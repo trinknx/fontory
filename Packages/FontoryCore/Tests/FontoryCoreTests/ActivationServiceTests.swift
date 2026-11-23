@@ -223,4 +223,38 @@ final class FakeRegistrar: FontRegistrar, @unchecked Sendable {
         _ = await svc.clearTemporary()
         #expect(fake.unregisterCalls.flatMap { $0 }.isEmpty)
     }
+
+    @Test func unattributedErrorIsResolvedAgainstAvailability() {
+        let a = URL(fileURLWithPath: "/tmp/fontory-a.ttf"), b = URL(fileURLWithPath: "/tmp/fontory-b.ttf")
+        let err = CoreTextRegistrar.RegistrationError(code: 101, description: "boom", urls: [])
+        let reg = CoreTextRegistrar.outcomes(inputs: [a, b], errors: [err], enabled: true, benign: .alreadyRegistered,
+                                             availableURLs: { [a] })
+        #expect(reg[a] == .ok)
+        #expect(reg[b] == .failed("boom"))
+        let unreg = CoreTextRegistrar.outcomes(inputs: [a, b], errors: [err], enabled: false, benign: .notRegistered,
+                                               availableURLs: { [a] })
+        #expect(unreg[a] == .failed("boom"))
+        #expect(unreg[b] == .ok)
+    }
+
+    @Test func partiallyMatchedErrorResolvesUnmatchedInputThroughAvailability() {
+        let a = URL(fileURLWithPath: "/tmp/fontory-a.ttf"), b = URL(fileURLWithPath: "/tmp/fontory-b.ttf")
+        let c = URL(fileURLWithPath: "/tmp/fontory-c.ttf")
+        // The error names a (matches) and a path no input has; b and c are left to availability.
+        let err = CoreTextRegistrar.RegistrationError(
+            code: 101, description: "boom", urls: [a, URL(fileURLWithPath: "/tmp/other/unknown.ttf")])
+        let r = CoreTextRegistrar.outcomes(inputs: [a, b, c], errors: [err], enabled: true, benign: .alreadyRegistered,
+                                           availableURLs: { [b] })
+        #expect(r[a] == .failed("boom"))
+        #expect(r[b] == .ok)
+        #expect(r[c] == .failed("boom"))
+    }
+
+    @Test func attributedBenignErrorIsAlreadyRegisteredWithoutConsultingAvailability() {
+        let a = URL(fileURLWithPath: "/tmp/fontory-a.ttf")
+        let err = CoreTextRegistrar.RegistrationError(code: Int(CTFontManagerError.alreadyRegistered.rawValue), description: "dup", urls: [a])
+        let r = CoreTextRegistrar.outcomes(inputs: [a], errors: [err], enabled: true, benign: .alreadyRegistered,
+                                           availableURLs: { Issue.record("should not be called"); return [] })
+        #expect(r[a] == .alreadyRegistered)
+    }
 }
