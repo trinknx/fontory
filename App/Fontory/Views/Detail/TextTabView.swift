@@ -314,7 +314,8 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
     private var stripViews: [Int: SpecimenStripView] = [:]
     /// The previous layout's strips, kept until the new layout's visible strips are drawn (no blank flash).
     private var staleViews: [SpecimenStripView] = []
-    private var inFlight: Set<Int> = []
+    /// Strip renders in flight; one leaving the wanted set is cancelled (it is not drawn if it has not started).
+    private var stripTasks: [Int: Task<Void, Never>] = [:]
     private var layoutGeneration = 0
     nonisolated(unsafe) private var scrollObserver: NSObjectProtocol?
 
@@ -336,6 +337,8 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
     private var editorFont: (key: FontKey, font: CTFont)?
     private var editorFontTask: Task<Void, Never>?
     private var editorFontLoading: FontKey?
+    /// A font that failed to load: not loaded again (nor the editor restyled) on every keystroke.
+    private var editorFontFailed: FontKey?
 
     init(renderer: PreviewRenderer) {
         self.renderer = renderer
@@ -443,7 +446,7 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         let fraction = oldHeight > 1 ? clip.bounds.minY / oldHeight : 0
         staleViews += stripViews.values
         stripViews.removeAll()
-        inFlight.removeAll()
+        cancelStripTasks()
         layoutGeneration &+= 1
         shownLayout = layout
         shownKey = key
@@ -463,27 +466,44 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         cache?.indices(near: scrollView.contentView.bounds) ?? []
     }
 
-    /// Shows the cached strips near the viewport and draws the missing ones.
+    /// Shows the cached strips near the viewport and draws the missing ones; renders of strips scrolled away are
+    /// cancelled.
     private func updateVisibleStrips() {
         guard let cache, let layout = shownLayout, let key = shownKey, !isEditing else { return }
-        for i in wantedStrips {
+        let wanted = wantedStrips
+        let wantedSet = Set(wanted)
+        for (i, task) in stripTasks where !wantedSet.contains(i) {
+            task.cancel()
+            stripTasks[i] = nil
+        }
+        for i in wanted {
             if let image = cache.image(at: i) {
                 if stripViews[i] == nil { addStripView(i, image) }
-            } else if !inFlight.contains(i) {
-                inFlight.insert(i)
+            } else if stripTasks[i] == nil {
                 let generation = layoutGeneration, rect = cache.rect(at: i), scale = key.scale
-                Task { [weak self] in
-                    let image = await Task.detached(priority: .userInitiated) {
-                        BodyTextRenderer.render(layout, scale: scale, rect: rect)
-                    }.value
-                    guard let self, generation == self.layoutGeneration else { return }
-                    self.inFlight.remove(i)
-                    guard let image else { return }
-                    self.stripArrived(i, image)
+                stripTasks[i] = Task.detached(priority: .userInitiated) { [weak self] in
+                    guard !Task.isCancelled else { return }
+                    let image = BodyTextRenderer.render(layout, scale: scale, rect: rect).map(StripImage.init)
+                    guard !Task.isCancelled else { return }
+                    await self?.stripFinished(i, image, generation: generation)
                 }
             }
         }
         dropStaleViewsIfCovered()
+    }
+
+    /// A strip render ended (not cancelled before reaching the main actor).
+    private func stripFinished(_ i: Int, _ image: StripImage?, generation: Int) {
+        // Cancelled while waiting for the main actor: a newer task may own the index now.
+        guard !Task.isCancelled, generation == layoutGeneration else { return }
+        stripTasks[i] = nil
+        guard let image else { return }
+        stripArrived(i, image.image)
+    }
+
+    private func cancelStripTasks() {
+        for task in stripTasks.values { task.cancel() }
+        stripTasks.removeAll()
     }
 
     private func stripArrived(_ i: Int, _ image: CGImage) {
@@ -555,6 +575,7 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         editorStyleKey = nil
         editorFontTask?.cancel()
         editorFontLoading = nil
+        editorFontFailed = nil
         editorUndo.removeAllActions()
         scrollView.isHidden = false
         render()
@@ -570,7 +591,7 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
             editorFont = (key, layout.font)
             return layout.font
         }
-        guard editorFontLoading != key else { return nil }
+        guard editorFontLoading != key, editorFontFailed != key else { return nil }
         editorFontTask?.cancel()
         editorFontLoading = key
         let renderer = self.renderer
@@ -581,7 +602,10 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
             }.value
             guard let self, !Task.isCancelled else { return }
             self.editorFontLoading = nil
-            guard let font = box?.font else { return }
+            guard let font = box?.font else {
+                self.editorFontFailed = key
+                return
+            }
             self.editorFont = (key, font)
             self.editorStyleKey = nil   // restyle with the new font
             self.applyEditorStyle()
@@ -607,7 +631,9 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         let loaded = editorFont(for: config)
         // Until the face loads, keep the editor's current font (no system-font flash).
         let font: NSFont = loaded.map { $0 as NSFont } ?? textView.font ?? .systemFont(ofSize: style.pointSize)
-        if loaded != nil { editorStyleKey = styleKey }
+        // A face that failed to load keeps the current font: styled once, not again on every keystroke.
+        let failed = editorFontFailed == FontKey(face: config.face, pointSize: style.pointSize, features: config.features)
+        if loaded != nil || failed { editorStyleKey = styleKey }
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = config.alignment.nsAlignment
         paragraph.minimumLineHeight = style.lineSpacing
@@ -645,6 +671,11 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         NSSound.beep()
         return false
     }
+}
+
+/// A rendered strip crossing actors (CGImage is immutable).
+private struct StripImage: @unchecked Sendable {
+    let image: CGImage
 }
 
 /// A CTFont crossing actors: CoreText fonts are immutable and thread-safe.
