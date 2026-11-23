@@ -93,8 +93,13 @@ public actor ActivationService {
             let temp = files.filter { !$0.states.contains(.on) }
             _ = await registrar.unregister(temp.filter(\.online).map(\.url))
             let tempIDs = files.flatMap { f in f.states.contains(.on) ? [] : f.faceIDs }
-            try store.setActivation(faceIDs: tempIDs, state: .off, at: now())
-            report.changedFaceIDs = tempIDs
+            // A file mixing on and temporary faces is registered as a whole: normalise it to on.
+            let mixedIDs = files.flatMap { f in f.states.contains(.on) && f.states.contains(.temporary) ? f.faceIDs : [] }
+            try store.database.transaction {
+                try store.setActivation(faceIDs: tempIDs, state: .off, at: now())
+                try store.setActivation(faceIDs: mixedIDs, state: .on, at: now())
+            }
+            report.changedFaceIDs = tempIDs + mixedIDs
         } catch {
             report.failures[-1] = "\(error)"
         }

@@ -38,6 +38,12 @@ public struct CoreTextRegistrar: FontRegistrar {
         guard !urls.isEmpty else { return [:] }
         let collector = Collector(urls: urls)
         let scope = self.scope
+        var byPath: [String: URL] = [:]
+        for url in urls {
+            byPath[url.standardizedFileURL.path] = url
+            byPath[url.resolvingSymlinksInPath().path] = url
+        }
+        let pathIndex = byPath
         return await withCheckedContinuation { (cont: CheckedContinuation<[URL: RegistrationOutcome], Never>) in
             let handler: (CFArray, Bool) -> Bool = { errors, done in
                 collector.lock.lock()
@@ -45,9 +51,16 @@ public struct CoreTextRegistrar: FontRegistrar {
                 for case let err as NSError in (errors as [AnyObject]) {
                     let outcome: RegistrationOutcome =
                         err.code == Int(benign.rawValue) ? .alreadyRegistered : .failed(err.localizedDescription)
-                    let failed = (err.userInfo[kCTFontManagerErrorFontURLsKey as String] as? [URL]) ?? []
-                    for url in failed { collector.results[url] = outcome }
-                    if failed.isEmpty {  // unattributed error: applies to the whole batch
+                    // CoreText reports standardized URLs; map them back to the input URLs.
+                    let reported = (err.userInfo[kCTFontManagerErrorFontURLsKey as String] as? [URL]) ?? []
+                    var attributed = false
+                    for u in reported {
+                        if let input = pathIndex[u.standardizedFileURL.path] ?? pathIndex[u.resolvingSymlinksInPath().path] {
+                            collector.results[input] = outcome
+                            attributed = true
+                        }
+                    }
+                    if !attributed {  // unattributed error: applies to the whole batch
                         for url in urls where collector.results[url] == .ok { collector.results[url] = outcome }
                     }
                 }

@@ -163,7 +163,7 @@ final class FakeRegistrar: FontRegistrar, @unchecked Sendable {
     }
 
     @Test func batchActivationIsOneCall() async throws {
-        var f = try Fixture.make()
+        let f = try Fixture.make()
         let batch = try f.store.nextImportBatch()
         try f.store.database.transaction {
             for i in 0..<500 {
@@ -184,8 +184,6 @@ final class FakeRegistrar: FontRegistrar, @unchecked Sendable {
         #expect(fake.registerCalls[0].count == 500)
         #expect(report.changedFaceIDs.count == 500)
         #expect(elapsed < 0.2, "took \(elapsed)s")
-        _ = f.faceIDs  // silence unused-mutation
-        f.faceIDs = [:]
     }
 
     @Test func coreTextRegistrarRoundTripInProcessScope() async throws {
@@ -200,5 +198,29 @@ final class FakeRegistrar: FontRegistrar, @unchecked Sendable {
         let again = await reg.unregister([url])
         #expect(again[url] == .alreadyRegistered || again[url] == .ok)
         #expect(await reg.register([]).isEmpty)
+    }
+
+    @Test func registrarAttributesErrorsToInputURLWithDotDotPath() async throws {
+        let reg = CoreTextRegistrar(scope: .process)
+        let url = URL(fileURLWithPath: "/tmp/../tmp/fontory-missing-\(UUID().uuidString).ttf")
+        let r = await reg.register([url])
+        guard case .failed = r[url] else { Issue.record("expected .failed, got \(String(describing: r[url]))"); return }
+    }
+
+    @Test func restoreOnLaunchNormalisesMixedFileToOn() async throws {
+        var f = try Fixture.make()
+        let batch = try f.store.nextImportBatch()
+        try f.add(f.locA.id, "Mix.ttc", (0..<2).map { Fixture.face("Mix-\($0)", family: "Mix", style: "S\($0)", weight: 400, index: $0) }, batch)
+        let a = f.faceIDs["Mix-0"]!, b = f.faceIDs["Mix-1"]!
+        try f.store.setActivation(faceIDs: [a], state: .on, at: fixed)
+        try f.store.setActivation(faceIDs: [b], state: .temporary, at: fixed)
+        let fake = FakeRegistrar()
+        let svc = service(f, fake)
+        _ = await svc.restoreOnLaunch()
+        let rows = try f.store.rows(ids: [a, b])
+        #expect(rows[a]?.activation == .on)
+        #expect(rows[b]?.activation == .on)
+        _ = await svc.clearTemporary()
+        #expect(fake.unregisterCalls.flatMap { $0 }.isEmpty)
     }
 }
