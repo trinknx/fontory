@@ -1,0 +1,23 @@
+name: Fontory
+options:
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  FontoryCore:
+    path: Packages/FontoryCore
+targets:
+  Fontory:
+    type: application
+    platform: macOS
+    sources: [App/Fontory]
+    dependencies:
+      - package: FontoryCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.fontory.app
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: NO
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.graphics-design
