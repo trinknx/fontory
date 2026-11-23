@@ -48,28 +48,30 @@ public enum GlyphCellRenderer {
     /// Share of the cell height the face's ascent + descent fill.
     public static let fill: CGFloat = 0.72
 
-    /// The box a face's cells are drawn in (per em), from its metrics and the ink of its mapped glyphs (`ink`, per
-    /// em, empty rects ignored).
+    /// The box a face's cells are drawn in (per em), from its metrics, the ink of its mapped glyphs (`mappedInk`)
+    /// and the ink of all its glyphs (`allInk`, mapped and unmapped), all per em; empty rects are ignored.
     ///
     /// Normally this is the typographic box. Faces whose box is far taller than their letters (Zapfino: ascent +
     /// descent ≈ 3.4 em) are fitted to their real ink so they are not drawn tiny:
     /// 1. The fitted box, per side, is min(typographic, max(cap-height rule, ink extent)). The cap-height rule is
     ///    1.3 × cap height above and max(0.25 em, 0.35 × cap height) below; the ink extent is the 97th percentile
     ///    of the ink tops and the 3rd percentile of the ink bottoms.
-    /// 2. The box then grows from the fitted box toward the typographic one (in 5% steps) until it clips no glyph
-    ///    that the typographic box shows whole, with a margin of `fitMargin`. So no face loses a glyph to the fit; scripts whose marks rise far
+    /// 2. The box then grows from the fitted box toward the typographic one (in 5% steps) until it cuts no glyph,
+    ///    mapped or unmapped, that the typographic box shows whole, neither vertically nor horizontally (ink wider
+    ///    than the cell; see `clips`), with a margin of `fitMargin`. So no face loses a glyph to the fit; scripts whose marks rise far
     ///    above the cap height (Khmer, Arabic, Myanmar) keep (nearly) their typographic box.
     /// Without a cap height the typographic box is used.
-    public static func cellBox(ascent: CGFloat, descent: CGFloat, capHeight: CGFloat, ink: [CGRect]) -> GlyphCellBox {
+    public static func cellBox(ascent: CGFloat, descent: CGFloat, capHeight: CGFloat, mappedInk: [CGRect],
+                               allInk: [CGRect]) -> GlyphCellBox {
         let typographic = GlyphCellBox(above: ascent, below: descent)
-        let rects = ink.filter { !$0.isEmpty && $0.height > 0 }
+        let rects = mappedInk.filter { !$0.isEmpty && $0.height > 0 }
         guard capHeight > 0, !rects.isEmpty else { return typographic }
         let inkTop = percentile(rects.map(\.maxY), 0.97)
         let inkBottom = percentile(rects.map(\.minY), 0.03)
         let fitted = GlyphCellBox(above: min(ascent, max(capHeight * 1.3, inkTop)),
                                   below: min(descent, max(0.25, capHeight * 0.35, -inkBottom)))
         guard fitted != typographic else { return typographic }
-        let shownWhole = rects.filter { !clips($0, box: typographic) }
+        let shownWhole = allInk.filter { !$0.isEmpty && !clips($0, box: typographic) }
         for step in 0..<20 {
             let t = CGFloat(step) / 20
             let box = GlyphCellBox(above: fitted.above + (ascent - fitted.above) * t,
@@ -83,11 +85,14 @@ public enum GlyphCellRenderer {
     /// How far (per em) inside the cell edge a glyph must stay when a fitted box is checked.
     static let fitMargin: CGFloat = 0.005
 
-    /// Whether ink `rect` (per em) leaves a cell drawn with `box`: the cell is the box / `fill` high, centred on it.
-    /// Ink within 0.001 em of the edge counts as inside; a positive `margin` moves the edge inward.
+    /// Whether ink `rect` (per em) is cut by a cell drawn with `box`. The cell is square, (above + below) / `fill`
+    /// em on a side, centred vertically on the box. Horizontally a glyph is centred on its ink when it would
+    /// overflow (see `render`), so only ink wider than the cell is cut. Ink within 0.001 em of an edge counts as
+    /// inside; a positive `margin` moves every edge inward.
     public static func clips(_ rect: CGRect, box: GlyphCellBox, margin: CGFloat = 0) -> Bool {
-        let half = (box.above + box.below) / fill / 2 - margin, centre = (box.above - box.below) / 2
-        return rect.maxY > centre + half + 0.001 || rect.minY < centre - half - 0.001
+        let side = (box.above + box.below) / fill - 2 * margin
+        let half = side / 2, centre = (box.above - box.below) / 2
+        return rect.maxY > centre + half + 0.001 || rect.minY < centre - half - 0.001 || rect.width > side + 0.001
     }
 
     private static func percentile(_ values: [CGFloat], _ p: Double) -> CGFloat {

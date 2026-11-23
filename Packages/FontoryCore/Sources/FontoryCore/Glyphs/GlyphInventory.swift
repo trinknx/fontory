@@ -225,18 +225,18 @@ public struct GlyphInventory: Sendable {
         }
         self.entries = entries
 
-        // Ink of the distinct mapped glyphs: one batched bounding-box call on the font as loaded (a resized copy of a
-        // variable font's named instance can measure slightly differently), scaled to per em.
-        var inkGlyphs = Array(Set(entries.lazy.filter(\.isMapped).map(\.glyphID)))
-        var rects = [CGRect](repeating: .zero, count: inkGlyphs.count)
-        if !inkGlyphs.isEmpty {
-            CTFontGetBoundingRectsForGlyphs(font, .horizontal, &inkGlyphs, &rects, inkGlyphs.count)
-        }
+        // Ink of every glyph: one batched bounding-box call on the font as loaded (a resized copy of a variable font's
+        // named instance can measure slightly differently), scaled to per em. Indexed by glyph ID.
+        var inkRects = [CGRect](repeating: .zero, count: glyphCount)
+        if glyphCount > 0 { CTFontGetBoundingRectsForGlyphs(font, .horizontal, &allGlyphs, &inkRects, glyphCount) }
         let size = max(0.001, CTFontGetSize(font))
-        let ink = rects.filter { !$0.isEmpty }
-            .map { CGRect(x: $0.minX / size, y: $0.minY / size, width: $0.width / size, height: $0.height / size) }
+        let perEm = inkRects.map { $0.isEmpty ? CGRect.null
+            : CGRect(x: $0.minX / size, y: $0.minY / size, width: $0.width / size, height: $0.height / size) }
+        let allInk = perEm.dropFirst().filter { !$0.isNull }   // without .notdef
+        let mappedInk = (0..<glyphCount).filter { mapped[$0] && !perEm[$0].isNull }.map { perEm[$0] }
         cellBox = GlyphCellRenderer.cellBox(ascent: CTFontGetAscent(font) / size, descent: CTFontGetDescent(font) / size,
-                                            capHeight: CTFontGetCapHeight(font) / size, ink: ink)
+                                            capHeight: CTFontGetCapHeight(font) / size, mappedInk: mappedInk,
+                                            allInk: Array(allInk))
 
         var counts: [GlyphFilter: Int] = [.all: entries.count]
         for e in entries {
