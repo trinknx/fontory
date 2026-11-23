@@ -230,4 +230,35 @@ struct StyleClassifierTests {
         #expect(remaining < 450)
         #expect(try versions(store).filter { $0 == StyleClassifier.version }.count == 450 - remaining)
     }
+
+    @Test func classifyChecksCancellationBeforeEveryFace() throws {
+        let temp = try TempFonts(); defer { temp.cleanup() }
+        let url = try temp.copy(TempFonts.arialBold, as: "a.ttf")
+        let batch = (0..<5).map { (faceID: Int64($0), url: url, faceIndex: 0) }
+        var asked = 0
+        let stopped = StyleBackfill.classify(batch, isCancelled: { asked += 1; return asked > 2 })
+        #expect(stopped == nil && asked == 3)
+        let all = StyleBackfill.classify(batch, isCancelled: { false })
+        #expect(all?.count == 5 && all?.allSatisfy { $0.styleClass == .sans } == true)
+    }
+
+    @Test func cancelledRunLeavesNothingInFlight() async throws {
+        let store = try FontStore(database: Database(path: ":memory:"))
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "F", displayName: "F", lastKnownPath: "/nonexistent")
+        let batch = try store.nextImportBatch()
+        let faces = (0..<450).map { Fixture.face("P-\($0)", family: "P", style: "\($0)", weight: 400, index: $0) }
+        _ = try store.insertFile(FileRecord(locationID: loc.id, relativePath: "big.ttc", size: 1, mtime: Date(), format: "ttc", fingerprint: "big"),
+                                 faces: faces, importBatch: batch)
+        try store.database.withLock { try store.database.execute("UPDATE faces SET class_version = 0") }
+        let backfill = StyleBackfill(store: store)
+        let task = Task {
+            for await p in backfill.run() where p.done >= 200 { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        await task.value
+        // The iterating task has ended, so the run has too: nothing is written afterwards.
+        let remaining = try store.countFacesNeedingClassification()
+        try await Task.sleep(for: .milliseconds(200))
+        let later = try store.countFacesNeedingClassification()
+        #expect(remaining == 250 && later == remaining)
+    }
 }

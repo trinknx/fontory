@@ -1,7 +1,7 @@
 import AppKit
 import FontoryCore
 
-/// One grid cell: the preview image, the family + style label and the activation dot.
+/// One grid cell: the preview image, the family + style label, the activation dot and the Quick Collection mark.
 final class FontGridItem: NSCollectionViewItem {
     static let identifier = NSUserInterfaceItemIdentifier("FontGridItem")
     static let labelHeight: CGFloat = 22
@@ -20,6 +20,20 @@ final class FontGridItem: NSCollectionViewItem {
     private let label = NSTextField(labelWithString: "")
     private let dot = ActivationDot()
     private let offlineBadge = NSImageView()
+    private let bookmark = NSImageView()
+    /// The offline badge ends before the bookmark when it shows, else at the cell's edge.
+    private var badgeBeforeBookmark: NSLayoutConstraint!
+    private var badgeAtEdge: NSLayoutConstraint!
+
+    /// The face is in the Quick Collection: a bookmark at the top right of the name strip.
+    var isInQuickCollection = false {
+        didSet {
+            guard isInQuickCollection != oldValue else { return }
+            bookmark.isHidden = !isInQuickCollection
+            badgeBeforeBookmark.isActive = isInQuickCollection
+            badgeAtEdge.isActive = !isInQuickCollection
+        }
+    }
 
     override func loadView() {
         let root = GridCellView()
@@ -55,7 +69,20 @@ final class FontGridItem: NSCollectionViewItem {
         offlineBadge.translatesAutoresizingMaskIntoConstraints = false
         offlineBadge.isHidden = true
 
-        for v in [dot, label, offlineBadge] as [NSView] { root.addSubview(v) }
+        // Tinted with a label color, like the dot: it resolves against the cell's own appearance, which follows
+        // the card background, so the mark reads on light and dark cards alike.
+        bookmark.image = NSImage(systemSymbolName: "bookmark.fill", accessibilityDescription: "In Quick Collection")
+        bookmark.symbolConfiguration = .init(pointSize: 10, weight: .regular)
+        bookmark.contentTintColor = .secondaryLabelColor
+        bookmark.toolTip = "In the Quick Collection"
+        bookmark.translatesAutoresizingMaskIntoConstraints = false
+        bookmark.isHidden = true
+        bookmark.setContentCompressionResistancePriority(.required, for: .horizontal)
+        offlineBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        for v in [dot, label, offlineBadge, bookmark] as [NSView] { root.addSubview(v) }
+        badgeBeforeBookmark = offlineBadge.trailingAnchor.constraint(lessThanOrEqualTo: bookmark.leadingAnchor, constant: -4)
+        badgeAtEdge = offlineBadge.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -Self.padding)
         NSLayoutConstraint.activate([
             dot.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.padding - 2),
             dot.topAnchor.constraint(equalTo: root.topAnchor, constant: 3),
@@ -65,7 +92,9 @@ final class FontGridItem: NSCollectionViewItem {
             label.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
             offlineBadge.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 4),
             offlineBadge.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
-            offlineBadge.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -Self.padding),
+            badgeAtEdge,
+            bookmark.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Self.padding),
+            bookmark.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
         ])
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         root.onLayout = { [weak self] in self?.layoutPreview() }
@@ -93,6 +122,7 @@ final class FontGridItem: NSCollectionViewItem {
         label.stringValue = ""
         dot.state = .placeholder
         offlineBadge.isHidden = true
+        isInQuickCollection = false
     }
 
     override var isSelected: Bool {

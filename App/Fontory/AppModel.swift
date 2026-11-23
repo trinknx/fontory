@@ -547,6 +547,33 @@ final class AppModel {
     /// The ⌘T tag panel, when shown.
     var tagPanel: TagPanelRequest?
 
+    // MARK: Quick Collection and style backfill (actions in AppModel+QuickCollection.swift)
+
+    /// Faces in the Quick Collection, loaded off the main actor at launch and kept in step with every write (set
+    /// at once by the actions, then confirmed from the store). Grid cells read it when configured.
+    var quickCollectionIDs: Set<Int64> = []
+    /// Bumped by every Quick Collection change made here; a store read started before a newer change is dropped.
+    @ObservationIgnored var quickCollectionGeneration = 0
+    /// The last Quick Collection write; each write waits for the previous one, so they land in order.
+    @ObservationIgnored var quickCollectionWriteChain: Task<Void, Never>?
+    /// Writes started and not yet confirmed (smoke hook).
+    @ObservationIgnored var quickCollectionWritesPending = 0
+    /// The running style backfill's progress; nil when none runs or it has nothing to do.
+    var styleBackfillProgress: BackfillProgress?
+    /// The running backfill (at most one); it clears itself when it ends.
+    @ObservationIgnored var styleBackfillTask: Task<Void, Never>?
+    /// A start was asked for while a run was going: run again once it ends.
+    @ObservationIgnored var styleBackfillRerun = false
+    /// Set when quitting: no new runs.
+    @ObservationIgnored var styleBackfillStopped = false
+    /// Runs started, and the most that ever ran at once (smoke checks of the coalescing).
+    @ObservationIgnored var styleBackfillRuns = 0
+    @ObservationIgnored var styleBackfillRunning = 0
+    @ObservationIgnored var styleBackfillMaxRunning = 0
+    /// Throttle of the Style counts reload while a backfill runs.
+    @ObservationIgnored var styleCountsReloadTask: Task<Void, Never>?
+    @ObservationIgnored var lastStyleCountsReload: ContinuousClock.Instant?
+
     // MARK: Notes (actions in AppModel+Notes.swift)
 
     /// Typed notes not yet written, by face.
@@ -674,11 +701,15 @@ final class AppModel {
         updateWatchers()
         refreshCounts()
         scheduleRefresh()
+        await loadQuickCollection()
+        // 8. Classify faces indexed by an older classifier (runs again after every mount and scan).
+        startStyleBackfill()
     }
 
     func prepareForQuit() async {
         flushPreviewSave()
         await flushNotes()
+        await stopStyleBackfill()
         await backend?.activation.prepareForQuit()
     }
 
@@ -1082,6 +1113,10 @@ final class AppModel {
         scheduleRefresh()
         // Newly indexed files may be active outside Fontory.
         scheduleInventory()
+        // Faces whose files are gone left the Quick Collection with them.
+        await loadQuickCollection()
+        // Moved files keep their face rows (and their old class version).
+        startStyleBackfill()
     }
 
     func relink(_ id: Int64, to url: URL) async {
@@ -1190,6 +1225,8 @@ final class AppModel {
             invalidateRows()
             refreshCounts()
             scheduleRefresh()
+            // Faces on the volume that waited while it was unplugged.
+            startStyleBackfill()
 
         case .unmounted(let volumeURL):
             // Sent twice per unmount (will + did): the first event marks the locations offline locally,
@@ -1201,6 +1238,8 @@ final class AppModel {
             // with "disk in use". Pending renders are dropped and parsed fonts released.
             previewPipeline.cancelAll()
             glyphPipeline.cancelAll()
+            // The backfill may be reading from the volume; it starts again once the locations are offline.
+            cancelStyleBackfill()
             previewRenderer.forgetFonts(under: volumeURL)
             for id in ids { forgetPreviewFonts(of: id) }
             for i in locations.indices where ids.contains(locations[i].id) { locations[i].online = false }
@@ -1216,6 +1255,7 @@ final class AppModel {
             invalidateRows()
             refreshCounts()
             scheduleRefresh()
+            startStyleBackfill()
         }
     }
 
@@ -1501,6 +1541,7 @@ final class AppModel {
     func attachBackendForSmoke(_ backend: LibraryBackend) async {
         self.backend = backend
         await reloadLocations()
+        await loadQuickCollection()
         isReady = true
     }
 

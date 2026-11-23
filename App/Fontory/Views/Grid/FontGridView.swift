@@ -15,6 +15,8 @@ struct FontGridView: NSViewRepresentable {
     let zoom: Double
     let preview: PreviewSettings
     let selection: Set<Int64>
+    /// Faces in the Quick Collection (their cells show a bookmark).
+    let quickCollection: Set<Int64>
     /// Scope, search and sort: when they change, the next list reload starts at the top.
     let query: LibraryQuery
     /// The family page covers the grid: it keeps its state but renders nothing and gives up the keyboard.
@@ -36,6 +38,7 @@ struct FontGridView: NSViewRepresentable {
         c.update(preview: preview)
         c.update(zoom: zoom)
         c.update(selection: selection)
+        c.update(quickCollection: quickCollection)
         c.update(hidden: isHidden)
     }
 }
@@ -65,6 +68,7 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
     private var queryChanged = false
     private var indexByID: [Int64: Int] = [:]
     private var rowsVersion = 0
+    private var quickCollection: Set<Int64> = []
     private var preview = PreviewSettings()
     private var zoom = AppModel.defaultZoom
     private var metrics = GridMetrics.compute(zoom: AppModel.defaultZoom, availableWidth: 800, spacing: FontGridController.spacing)
@@ -243,6 +247,15 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         prefetchSelectionURLs()
     }
 
+    func update(quickCollection new: Set<Int64>) {
+        guard new != quickCollection else { return }
+        quickCollection = new
+        // Only the marks change: no preview is asked for again.
+        for case let item as FontGridItem in collectionView.visibleItems() {
+            if let id = item.faceID { item.isInQuickCollection = new.contains(id) }
+        }
+    }
+
     func update(hidden new: Bool) {
         guard new != isHidden else { return }
         isHidden = new
@@ -390,6 +403,7 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         let id = faceIDs[index]
         let row = model.cachedRow(id)
         item.configure(faceID: id, row: row, background: preview.background)
+        item.isInQuickCollection = model.quickCollectionIDs.contains(id)
         guard let row else {
             item.wantedKey = nil
             needRow(at: index)

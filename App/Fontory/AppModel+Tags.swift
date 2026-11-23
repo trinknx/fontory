@@ -164,7 +164,7 @@ extension AppModel {
     }
 
     /// After tags or assignments change: counts, and the browser when it shows something tag-based.
-    private func afterTagChange() async {
+    func afterTagChange() async {
         tagAssignmentVersion += 1
         await reloadOrganization()
         switch query.scope {
@@ -183,7 +183,7 @@ extension AppModel {
     }
 
     /// Runs a store write off the main actor; on failure shows an alert titled `title`. Returns success.
-    private func tagWrite<T: Sendable>(_ title: String, _ work: @escaping @Sendable (FontStore) throws -> T) async -> T? {
+    func tagWrite<T: Sendable>(_ title: String, _ work: @escaping @Sendable (FontStore) throws -> T) async -> T? {
         guard let backend else { return nil }
         let store = backend.store
         let result = await Task.detached(priority: .userInitiated) { Result { try work(store) } }.value

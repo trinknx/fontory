@@ -55,6 +55,12 @@ struct FontoryApp: App {
                 Button("Tags…") { if model.browserIsKey { model.showTagPanel() } }
                     .keyboardShortcut("t")
                     .disabled(!model.isBrowserKey || (model.selection.isEmpty && (model.detail == nil || model.detailSelection.isEmpty)))
+                // Same targets as ⌘T; the title follows them (Remove when all are in the collection).
+                Button(model.quickCollectionMenuTitle) {
+                    if model.browserIsKey { Task { await model.toggleQuickCollection() } }
+                }
+                .keyboardShortcut("j")
+                .disabled(!model.isBrowserKey || model.quickCollectionTargetSet.isEmpty)
             }
         }
 

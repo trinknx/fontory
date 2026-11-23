@@ -11,6 +11,7 @@ enum FontContextMenu {
         for item in activationItems(for: ids, model: model) { menu.addItem(item) }
         menu.addItem(.separator())
         menu.addItem(tagsItem(for: ids, model: model))
+        menu.addItem(quickCollectionItem(for: ids, model: model))
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem("Reveal in Finder") { model.revealInFinder(ids) })
         menu.addItem(ClosureMenuItem("Copy Details") { model.copyDetails(ids) })
@@ -74,6 +75,14 @@ enum FontContextMenu {
                 tagItem.isEnabled = true
             }
         }
+        return item
+    }
+
+    /// Add to / Remove from Quick Collection (⌘J): Remove when every face is in it.
+    static func quickCollectionItem(for ids: [Int64], model: AppModel) -> NSMenuItem {
+        let item = ClosureMenuItem(model.quickCollectionTitle(for: ids)) { Task { await model.toggleQuickCollection(ids) } }
+        item.keyEquivalent = "j"
+        item.keyEquivalentModifierMask = .command
         return item
     }
 

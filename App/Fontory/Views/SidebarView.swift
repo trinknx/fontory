@@ -25,6 +25,15 @@ struct SidebarView: View {
                 libraryRow("Untagged", "square.dashed", .untagged, model.organizationCounts.untagged)
                     .help("Fonts without any tag")
                 libraryRow("Quick Collection", "bookmark", .quickCollection, model.organizationCounts.quickCollection)
+                    .contextMenu {
+                        Button("Save as Tag…") { promptSaveQuickCollectionAsTag(model: model) }
+                            .disabled(model.quickCollectionIDs.isEmpty)
+                        Button("Clear…") { model.confirmClearQuickCollection() }
+                            .disabled(model.quickCollectionIDs.isEmpty)
+                    }
+                if let progress = model.styleBackfillProgress, progress.total > 0 {
+                    StyleBackfillRow(progress: progress)
+                }
             }
 
             Section("Locations") {
@@ -81,6 +90,45 @@ struct SidebarView: View {
             .badge(count)
             .tag(SidebarItem.scope(scope))
     }
+}
+
+/// "Classifying styles… N of M" with a small bar, under Library while the style backfill runs.
+private struct StyleBackfillRow: View {
+    let progress: BackfillProgress
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Classifying styles… \(progress.done.formatted()) of \(progress.total.formatted())")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ProgressView(value: Double(min(progress.done, progress.total)), total: Double(progress.total))
+                .progressViewStyle(.linear)
+                .controlSize(.small)
+        }
+        .padding(.vertical, 2)
+        .selectionDisabled()
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Save as Tag…: asks for a name, then creates a top-level tag with the Quick Collection's fonts. A taken name
+/// shows the tag alert.
+@MainActor
+func promptSaveQuickCollectionAsTag(model: AppModel) {
+    let count = model.quickCollectionIDs.count
+    guard count > 0 else { return }
+    let alert = NSAlert()
+    alert.messageText = "Save Quick Collection as Tag"
+    alert.informativeText = "A new tag with the \(count.formatted()) font\(count == 1 ? "" : "s") of the Quick Collection."
+    let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+    field.placeholderString = "Tag Name"
+    alert.accessoryView = field
+    alert.addButton(withTitle: "Save")
+    alert.addButton(withTitle: "Cancel")
+    alert.window.initialFirstResponder = field
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let name = field.stringValue
+    Task { await model.saveQuickCollectionAsTag(name: name) }
 }
 
 /// A location with lazily loaded subfolders and its scan status.

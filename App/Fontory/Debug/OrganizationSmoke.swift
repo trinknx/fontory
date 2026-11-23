@@ -46,6 +46,8 @@ enum OrganizationSmoke {
             await steps(model, faces: faces)
             await assignmentSteps(model, faces: faces)
             await noteSteps(model, faces: faces)
+            await quickCollectionSteps(model, faces: faces)
+            await backfillSteps(model, backend: backend, folder: dir)
         } catch {
             check(false, "setup", "\(error)")
         }
@@ -346,6 +348,142 @@ enum OrganizationSmoke {
         check(found == [serif], "a note set through the model is found by search", "\(found)")
         model.searchText = ""
         model.searchScope = Set(SearchText.Field.allCases)
+    }
+
+    // MARK: Task 7: Quick Collection, style backfill
+
+    private static func storedQuickCollection(_ model: AppModel) async -> Set<Int64>? {
+        guard let backend = model.backend else { return nil }
+        return await model.runBackground { try backend.store.quickCollectionFaceIDs() }
+    }
+
+    private static func quickCollectionSteps(_ model: AppModel, faces: [String: Int64]) async {
+        guard let serif = faces["Smoke Serif"], let sans = faces["Smoke Sans"], let mono = faces["Smoke Mono"] else { return }
+        model.query.scope = .all
+        check(model.quickCollectionIDs.isEmpty, "Quick Collection starts empty")
+
+        // ⌘J on a mixed selection (Serif in, Sans out): adds all; again: removes all.
+        await model.setQuickCollection([serif], included: true)
+        model.selection = [serif, sans]
+        check(model.quickCollectionMenuTitle == "Add to Quick Collection", "mixed selection: the menu says Add")
+        await model.toggleQuickCollection()
+        var stored = await storedQuickCollection(model)
+        check(model.quickCollectionIDs == [serif, sans] && stored == [serif, sans] && model.organizationCounts.quickCollection == 2,
+              "⌘J on a mixed selection adds every selected face", "\(model.quickCollectionIDs) / \(String(describing: stored))")
+        check(model.quickCollectionMenuTitle == "Remove from Quick Collection", "all in: the menu says Remove")
+        await model.toggleQuickCollection()
+        stored = await storedQuickCollection(model)
+        check(model.quickCollectionIDs.isEmpty && stored == [] && model.organizationCounts.quickCollection == 0,
+              "⌘J again removes them all: toggling twice leaves the collection empty", "\(String(describing: stored))")
+
+        // Two quick presses (the second before the first write lands) still alternate.
+        model.selection = [mono]
+        let first = Task { await model.toggleQuickCollection() }
+        let second = Task { await model.toggleQuickCollection() }
+        await first.value
+        await second.value
+        stored = await storedQuickCollection(model)
+        check(model.quickCollectionIDs.isEmpty && stored == [], "two quick ⌘J presses add then remove", "\(String(describing: stored))")
+        model.selection = []
+
+        // Context menu item follows the faces.
+        _ = NSApplication.shared
+        let menu = FontContextMenu.make(for: [mono], model: model)
+        let addItem = menu.items.first { $0.title.hasSuffix("Quick Collection") }
+        check(addItem?.title == "Add to Quick Collection" && addItem?.keyEquivalent == "j", "context menu: Add to Quick Collection ⌘J")
+        if let addItem, let index = menu.items.firstIndex(of: addItem) {
+            menu.performActionForItem(at: index)
+            for _ in 0..<100 where !model.quickCollectionIDs.contains(mono) { try? await Task.sleep(for: .milliseconds(10)) }
+            await model.waitForQuickCollectionWritesForSmoke()
+        }
+        check(model.quickCollectionIDs == [mono], "context menu item adds the face")
+        let removeTitle = FontContextMenu.make(for: [mono], model: model).items.first { $0.title.hasSuffix("Quick Collection") }?.title
+        check(removeTitle == "Remove from Quick Collection", "context menu: Remove when the face is in it")
+
+        // The Library row shows the collection.
+        await model.setQuickCollection([serif], included: true)
+        model.query.scope = .quickCollection
+        let inCollection = await shown(model)
+        check(inCollection == [serif, mono], "Quick Collection row shows its faces", "\(inCollection)")
+
+        // Save as Tag…: a top-level tag with the same faces; a taken name alerts and creates nothing.
+        let tagID = await model.saveQuickCollectionAsTag(name: "Picks")
+        let direct = await model.faceTagMap([serif, sans, mono]) ?? [:]
+        check(tagID != nil && model.tag(tagID ?? -1)?.parentID == nil
+              && direct[serif]?.contains(tagID ?? -1) == true && direct[mono]?.contains(tagID ?? -1) == true
+              && direct[sans]?.contains(tagID ?? -1) != true && model.organizationCounts.perTag[tagID ?? -1] == 2,
+              "Save as Tag creates a top-level tag with the same faces", "\(direct)")
+        let tagCount = model.tags.count
+        let dup = await model.saveQuickCollectionAsTag(name: "picks")
+        check(dup == nil && model.alert != nil && model.tags.count == tagCount, "Save as Tag with a taken name shows the alert")
+        model.alert = nil
+
+        // Clear…: confirmed when not empty, then empties the collection.
+        model.confirmClearQuickCollection()
+        check(model.alert?.actionTitle == "Clear" && model.alert?.isDestructive == true, "Clear… asks first when not empty")
+        model.alert?.action?()
+        model.alert = nil
+        for _ in 0..<100 where !model.quickCollectionIDs.isEmpty { try? await Task.sleep(for: .milliseconds(10)) }
+        await model.waitForQuickCollectionWritesForSmoke()
+        stored = await storedQuickCollection(model)
+        let afterClear = await shown(model)
+        check(model.quickCollectionIDs.isEmpty && stored == [] && model.organizationCounts.quickCollection == 0 && afterClear.isEmpty,
+              "Clear empties the collection", "\(String(describing: stored))")
+        model.confirmClearQuickCollection()
+        check(model.alert == nil, "Clear… on an empty collection asks nothing")
+        model.query.scope = .all
+    }
+
+    /// A real font file plus the synthetic faces, all marked as classified by an old version, then the backfill.
+    private static func backfillSteps(_ model: AppModel, backend: LibraryBackend, folder: URL) async {
+        let store = backend.store
+        let before: Int
+        do {
+            let url = folder.appendingPathComponent("ArialBold.ttf")
+            try FileManager.default.copyItem(at: URL(fileURLWithPath: "/System/Library/Fonts/Supplemental/Arial Bold.ttf"), to: url)
+            guard let loc = try store.locations().first(where: { $0.volumeUUID == "SMOKE-VOLUME" }) else {
+                check(false, "backfill: smoke location"); return
+            }
+            _ = try store.insertFile(FileRecord(locationID: loc.id, relativePath: "ArialBold.ttf", size: 10, mtime: Date(timeIntervalSince1970: 1000),
+                                                format: "ttf", fingerprint: "smoke-arial"),
+                                     faces: try FontParser.parse(url: url), importBatch: try store.nextImportBatch())
+            let ids = try store.faceIDs(for: LibraryQuery())
+            try store.setStyleClasses(ids.map { ($0, StyleClass.unknown) }, version: StyleClassifier.version - 1)
+            before = try store.countFacesNeedingClassification()
+            check(before == ids.count && before == 4, "backfill: 4 faces marked with an old class version", "\(before)")
+        } catch {
+            check(false, "backfill setup", "\(error)")
+            return
+        }
+
+        // Coalescing: starting while a run goes only asks for one more run, never a second at once.
+        let runs = model.styleBackfillRuns
+        model.startStyleBackfill()
+        model.startStyleBackfill()
+        model.startStyleBackfill()
+        check(model.styleBackfillRuns == runs + 1, "backfill: starting again while it runs does not start a second run")
+        await model.waitForStyleBackfillForSmoke()
+        check(model.styleBackfillRuns == runs + 2 && model.styleBackfillMaxRunning == 1,
+              "backfill: the pending start ran once more afterwards, never two at once",
+              "runs \(model.styleBackfillRuns - runs), max at once \(model.styleBackfillMaxRunning)")
+        let remaining = await model.runBackground { try store.countFacesNeedingClassification() }
+        check(remaining == 0, "backfill: every face has the current class_version", "\(String(describing: remaining))")
+        check(model.styleBackfillProgress == nil, "backfill: progress hidden when done")
+        await model.reloadOrganization()
+        check(model.organizationCounts.perStyle[.sans] == 1 && model.organizationCounts.perStyle[.unknown] == 3,
+              "backfill: Arial Bold reclassified as Sans, the fileless faces unknown", "\(model.organizationCounts.perStyle)")
+
+        // Nothing to do: no progress shown.
+        model.startStyleBackfill()
+        check(model.styleBackfillProgress == nil, "backfill: no progress row when there is nothing to classify")
+        await model.waitForStyleBackfillForSmoke()
+        check(model.styleBackfillProgress == nil && model.styleBackfillMaxRunning == 1, "backfill: an empty run ends quietly")
+
+        // Quitting stops it and refuses new runs.
+        await model.stopStyleBackfill()
+        let stoppedRuns = model.styleBackfillRuns
+        model.startStyleBackfill()
+        check(model.styleBackfillRuns == stoppedRuns && model.styleBackfillTask == nil, "backfill: no run after quit")
     }
 
     /// The grid's drag source on the 3 seeded faces (payload on one item, one URL per file), then a 20,000-face

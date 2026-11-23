@@ -22,7 +22,8 @@ struct MainWindow: View {
                 let mode = model.viewMode
                 FontGridView(model: model, faceIDs: model.faceIDs, rowsVersion: model.rowsVersion, mode: mode,
                              zoom: model.zoom[mode] ?? AppModel.defaultZoom, preview: model.preview,
-                             selection: model.selection, query: model.query, isHidden: browserHidden)
+                             selection: model.selection, quickCollection: model.quickCollectionIDs, query: model.query,
+                             isHidden: browserHidden)
                     .id(mode)
                 if let detail = model.detail {
                     FamilyDetailView(model: model, detail: detail)
