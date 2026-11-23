@@ -8,7 +8,7 @@ enum ViewMode: String, CaseIterable, Sendable {
     case grid, list
 }
 
-/// The family page's tabs. Styles, Characters and Info exist; the others are shown disabled ("Coming soon").
+/// The family page's tabs. Variables is disabled for styles that are not variable fonts.
 enum DetailTab: String, CaseIterable, Sendable {
     case styles, characters, text, features, variables, info
 
@@ -22,8 +22,14 @@ enum DetailTab: String, CaseIterable, Sendable {
         case .info: "Info"
         }
     }
+}
 
-    var isAvailable: Bool { self != .variables }
+/// The Variables tab's coordinates for one face.
+struct VariationState: Equatable, Sendable {
+    /// Axis tag code → value, one per axis.
+    var values: [UInt32: Double]
+    /// `opsz` follows the sample's point size ("Auto (match size)").
+    var autoOpticalSize = false
 }
 
 /// How the family page lists styles: one big preview per style, or one compact line each.
@@ -397,6 +403,13 @@ final class AppModel {
         didSet { if detailPointSize != oldValue { UserDefaults.standard.set(detailPointSize, forKey: SettingsKey.detailPointSize) } }
     }
     nonisolated static let defaultDetailPointSize = 48.0
+    /// The Variables tab's axis coordinates by face, for this session (not persisted).
+    var variationStates: [Int64: VariationState] = [:]
+    /// The Variables tab lists the axes a font marks hidden (session only).
+    var showsHiddenAxes = false
+    /// Point size of the Variables tab's sample (session only); an automatic optical size follows it.
+    var variationSamplePointSize = 48.0
+    nonisolated static let variationSamplePointSizeRange: ClosedRange<Double> = 12...144
     nonisolated static let detailPointSizeRange: ClosedRange<Double> = 8...200
     @ObservationIgnored private var detailGeneration = 0
 

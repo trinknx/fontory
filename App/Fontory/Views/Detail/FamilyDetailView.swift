@@ -8,6 +8,9 @@ struct FamilyDetailView: View {
     @Bindable var model: AppModel
     let detail: FamilyDetail
 
+    /// Whether the focused style is a variable font, from its row; nil until the row is loaded.
+    @State private var focusedIsVariable: Bool?
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -22,6 +25,24 @@ struct FamilyDetailView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear(perform: updateFocusedIsVariable)
+        .onChange(of: focusedFaceID) { updateFocusedIsVariable() }
+        .onChange(of: model.rowsVersion) { updateFocusedIsVariable() }
+        .onReceive(NotificationCenter.default.publisher(for: AppModel.rowsLoadedNotification, object: model)) { _ in
+            updateFocusedIsVariable()
+        }
+    }
+
+    private func updateFocusedIsVariable() {
+        let value = model.cachedRow(focusedFaceID)?.isVariable
+        if value != focusedIsVariable { focusedIsVariable = value }
+    }
+
+    /// Tabs that cannot be chosen now, with the reason shown as their tooltip. While a variable font is open on
+    /// Variables, the tab stays enabled even before its row loads.
+    private var disabledTabs: [DetailTab: String] {
+        focusedIsVariable == true || (focusedIsVariable == nil && model.detailTab == .variables)
+            ? [:] : [.variables: "Not a variable font"]
     }
 
     // MARK: Header
@@ -63,7 +84,7 @@ struct FamilyDetailView: View {
                 .background(Capsule().fill(Color.secondary.opacity(0.15)))
                 .accessibilityLabel("\(detail.faceIDs.count) styles in this family")
             Spacer(minLength: 0)
-            DetailTabBar(selection: $model.detailTab)
+            DetailTabBar(selection: $model.detailTab, disabled: disabledTabs)
             Spacer(minLength: 0)
             Picker("Layout", selection: $model.detailLayout) {
                 Image(systemName: "rectangle.grid.1x2").tag(DetailLayout.rows).help("Rows: a large preview per style")
@@ -92,14 +113,14 @@ struct FamilyDetailView: View {
             TextTabView(model: model, detail: detail, faceID: focusedFaceID)
         case .features:
             FeaturesTabView(model: model, detail: detail, faceID: focusedFaceID)
+        case .variables:
+            VariablesTabView(model: model, detail: detail, faceID: focusedFaceID)
         case .info:
             FamilyInfoView(model: model, detail: detail, faceID: focusedFaceID, rowsVersion: model.rowsVersion)
-        default:
-            Text("Coming soon").foregroundStyle(.secondary)
         }
     }
 
-    /// Characters, Text, Features and Info show the first selected style, or the family's representative.
+    /// Characters, Text, Features, Variables and Info show the first selected style, or the family's representative.
     private var focusedFaceID: Int64 {
         detail.faceIDs.first(where: model.detailSelection.contains) ?? detail.representativeID
     }
@@ -138,14 +159,21 @@ struct FamilyDetailView: View {
     }
 }
 
-/// The page's tabs. Unavailable tabs are shown but inert, with a "Coming soon" tooltip.
+/// The page's tabs. Disabled tabs are shown but inert, with the reason as their tooltip.
 private struct DetailTabBar: View {
     @Binding var selection: DetailTab
+    /// Tab → why it is disabled.
+    var disabled: [DetailTab: String] = [:]
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(DetailTab.allCases, id: \.self) { tab in
-                if tab.isAvailable {
+                if let reason = disabled[tab] {
+                    label(tab)
+                        .foregroundStyle(.tertiary)
+                        .help(reason)
+                        .accessibilityLabel("\(tab.title), \(reason.lowercased())")
+                } else {
                     Button {
                         selection = tab
                     } label: {
@@ -154,11 +182,6 @@ private struct DetailTabBar: View {
                     .buttonStyle(.plain)
                     .accessibilityAddTraits(selection == tab ? .isSelected : [])
                     .help(tab == .info ? "Info (⌘I)" : tab.title)
-                } else {
-                    label(tab)
-                        .foregroundStyle(.tertiary)
-                        .help("Coming soon")
-                        .accessibilityLabel("\(tab.title), coming soon")
                 }
             }
         }

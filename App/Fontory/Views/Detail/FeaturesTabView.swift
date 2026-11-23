@@ -358,14 +358,14 @@ private struct FeatureSampleLines: View {
     var body: some View {
         GeometryReader { geo in
             VStack(alignment: .leading, spacing: 4) {
-                FeatureSampleImage(renderer: renderer, request: request(width: geo.size.width - 40, height: 80,
+                SampleLineImage(renderer: renderer, request: request(width: geo.size.width - 40, height: 80,
                                                                         pointSize: 48, settings: settings),
                                    face: face)
                     .frame(height: 80)
                     .accessibilityLabel("Sample with the switched features: \(text)")
                 HStack(spacing: 8) {
                     Text("Default").font(.caption).foregroundStyle(.secondary).frame(width: 52, alignment: .leading)
-                    FeatureSampleImage(renderer: renderer, request: request(width: geo.size.width - 100, height: 40,
+                    SampleLineImage(renderer: renderer, request: request(width: geo.size.width - 100, height: 40,
                                                                             pointSize: 24, settings: []),
                                        face: face)
                         .frame(height: 40)
@@ -392,7 +392,7 @@ private struct FeatureSampleLines: View {
 }
 
 /// One rendered line; renders off the main actor whenever the request changes, keeping the previous image meanwhile.
-private struct FeatureSampleImage: View {
+struct SampleLineImage: View {
     let renderer: PreviewRenderer
     let request: PreviewRequest
     let face: SpecimenFace
