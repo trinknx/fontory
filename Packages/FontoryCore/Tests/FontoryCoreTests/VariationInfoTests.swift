@@ -111,10 +111,44 @@ private func font(_ path: String) throws -> CTFont {
         #expect(info.css(values: values) == "font-variation-settings: \"wght\" 650;")
         values[VariationInfo.code("XHGT")] = 12.5
         #expect(info.css(values: values) == "font-variation-settings: \"wght\" 650, \"XHGT\" 12.5;")
-        #expect(info.css(values: values, omitting: [VariationInfo.code("wght")])
-                == "font-variation-settings: \"XHGT\" 12.5;")
+        // No opsz axis: the Auto flag changes nothing.
+        #expect(info.css(values: values, autoOpticalSize: true) == info.css(values: values))
         #expect(VariationInfo.format(0.333333) == "0.33")
         #expect(VariationInfo.format(-10) == "-10")
+    }
+
+    @Test func cssAlwaysPinsAManualOpticalSize() {
+        let info = VariationInfo(axes: [
+            .init(tag: "wght", name: "Weight", minValue: 100, defaultValue: 400, maxValue: 900),
+            .init(tag: "opsz", name: "Optical Size", minValue: 8, defaultValue: 14, maxValue: 144),
+        ], instances: [])
+        // Auto off: browsers would size optically on their own, so opsz is written even at its default.
+        #expect(info.css(values: info.defaults) == "font-variation-settings: \"opsz\" 14;")
+        var values = info.defaults
+        values[VariationInfo.code("wght")] = 700
+        values[VariationInfo.opticalSize] = 48
+        #expect(info.css(values: values) == "font-variation-settings: \"wght\" 700, \"opsz\" 48;")
+        // Auto on: left to `font-optical-sizing: auto`.
+        #expect(info.css(values: values, autoOpticalSize: true) == "font-variation-settings: \"wght\" 700;")
+        #expect(info.css(values: info.defaults, autoOpticalSize: true) == "font-variation-settings: normal;")
+    }
+
+    @Test func variationFontsDoNotEvictOtherSizedFonts() throws {
+        let renderer = PreviewRenderer(fontCacheLimit: 10)   // 64 sized entries
+        let url = URL(fileURLWithPath: TempFonts.sfns)
+        let wght = VariationInfo.code("wght")
+        _ = try #require(renderer.font(fileURL: url, faceIndex: 0, pointSize: 20))
+        let before = renderer.sizedFontCreations
+        var request = PreviewRequest(text: "Ag", pointSize: 20, foreground: CGColor(gray: 0, alpha: 1),
+                                     background: CGColor(gray: 1, alpha: 1), size: CGSize(width: 60, height: 30), scale: 1)
+        for v in 0..<200 {
+            request.variations = [wght: Double(100 + v * 4)]
+            _ = renderer.render(fileURL: url, faceIndex: 0, request: request)
+        }
+        #expect(renderer.sizedFontCreations == before + 200)
+        _ = try #require(renderer.font(fileURL: url, faceIndex: 0, pointSize: 20))
+        #expect(renderer.sizedFontCreations == before + 200)   // still cached
+        #expect(renderer.variationFontCount <= PreviewRenderer.variationCacheLimit)
     }
 
     @Test func instanceMatching() {

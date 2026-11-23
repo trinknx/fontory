@@ -25,6 +25,12 @@ public final class LRUCache<Key: Hashable & Sendable, Value>: @unchecked Sendabl
         self.costLimit = max(0, costLimit)
     }
 
+    /// Number of entries currently held.
+    public var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return nodes.count
+    }
+
     /// Sum of the costs of the entries currently held.
     public var totalCost: Int {
         lock.lock(); defer { lock.unlock() }

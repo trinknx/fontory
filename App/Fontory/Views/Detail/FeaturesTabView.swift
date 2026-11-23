@@ -392,12 +392,15 @@ private struct FeatureSampleLines: View {
 }
 
 /// One rendered line; renders off the main actor whenever the request changes, keeping the previous image meanwhile.
+/// Renders are coalesced: one runs at a time, and requests made meanwhile collapse into the latest, so a slider
+/// drag does not queue a render per mouse event.
 struct SampleLineImage: View {
     let renderer: PreviewRenderer
     let request: PreviewRequest
     let face: SpecimenFace
 
     @State private var image: CGImage?
+    @State private var coalescer = RenderCoalescer()
 
     private struct Key: Equatable {
         let request: PreviewRequest
@@ -415,18 +418,51 @@ struct SampleLineImage: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .task(id: Key(request: request, face: face)) {
+        .onChange(of: Key(request: request, face: face), initial: true) {
             let renderer = renderer, request = request, url = face.fileURL, index = face.faceIndex
-            let rendered = await Task.detached(priority: .userInitiated) {
+            coalescer.submit {
                 ImageBox(image: renderer.render(fileURL: url, faceIndex: index, request: request))
-            }.value
-            guard !Task.isCancelled else { return }
-            image = rendered.image
+            } deliver: { rendered in
+                image = rendered
+            }
         }
     }
 }
 
+/// Runs one render at a time; a render submitted while one runs replaces any earlier waiting one. Each finished
+/// render is delivered (the newest finished image beats a stale one), then the waiting render, if any, starts.
+@MainActor
+final class RenderCoalescer {
+    private typealias Job = (render: @Sendable () -> ImageBox, deliver: (CGImage?) -> Void)
+
+    private var running = false
+    private var waiting: Job?
+
+    func submit(_ render: @escaping @Sendable () -> ImageBox, deliver: @escaping (CGImage?) -> Void) {
+        let job: Job = (render, deliver)
+        guard !running else {
+            waiting = job
+            return
+        }
+        running = true
+        Task { await run(job) }
+    }
+
+    private func run(_ first: Job) async {
+        var job = first
+        while true {
+            let render = job.render
+            let rendered = await Task.detached(priority: .userInitiated) { render() }.value
+            job.deliver(rendered.image)
+            guard let next = waiting else { break }
+            waiting = nil
+            job = next
+        }
+        running = false
+    }
+}
+
 /// A CGImage crossing actors (immutable).
-private struct ImageBox: @unchecked Sendable {
+struct ImageBox: @unchecked Sendable {
     let image: CGImage?
 }

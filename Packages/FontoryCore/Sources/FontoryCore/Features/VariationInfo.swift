@@ -171,10 +171,17 @@ public struct VariationInfo: Sendable, Equatable {
     }
 
     /// `font-variation-settings` for the axes whose value differs from the default, in `fvar` order; `normal` when
-    /// none does. Axes in `omitting` are left out (an automatic optical size).
-    public func css(values: [UInt32: Double], omitting: Set<UInt32> = []) -> String {
+    /// none does. An `opsz` axis is special: browsers size optically on their own (`font-optical-sizing: auto`),
+    /// so with `autoOpticalSize` it is left out, and without it it is always written, even at its default, so the
+    /// CSS reproduces the sample.
+    public func css(values: [UInt32: Double], autoOpticalSize: Bool = false) -> String {
         let parts = axes.compactMap { axis -> String? in
-            guard !omitting.contains(axis.code), let v = values[axis.code], abs(v - axis.defaultValue) >= 0.005 else { return nil }
+            guard let v = values[axis.code] else { return nil }
+            if axis.code == Self.opticalSize {
+                if autoOpticalSize { return nil }
+            } else if abs(v - axis.defaultValue) < 0.005 {
+                return nil
+            }
             return "\"\(axis.tag)\" \(Self.format(v))"
         }
         return "font-variation-settings: \(parts.isEmpty ? "normal" : parts.joined(separator: ", "));"

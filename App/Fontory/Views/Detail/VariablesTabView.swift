@@ -77,7 +77,10 @@ struct VariablesTabView: View {
     }
 
     private func axisList(_ info: VariationInfo) -> some View {
-        let hiddenCount = info.axes.filter(\.isHidden).count
+        let hidden = info.axes.filter(\.isHidden)
+        let hiddenCount = hidden.count
+        let values = effectiveValues(info)
+        let hiddenChanged = hidden.filter { abs((values[$0.code] ?? $0.defaultValue) - $0.defaultValue) >= 0.005 }.count
         return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(info.axes.filter { model.showsHiddenAxes || !$0.isHidden }) { axis in
@@ -86,7 +89,10 @@ struct VariablesTabView: View {
                             autoValue: axis.clamped(model.variationSamplePointSize))
                 }
                 if hiddenCount > 0, !model.showsHiddenAxes {
-                    Text(hiddenCount == 1 ? "1 hidden axis" : "\(hiddenCount) hidden axes")
+                    Text((hiddenCount == 1 ? "1 hidden axis" : "\(hiddenCount) hidden axes")
+                         + (hiddenChanged == 0 ? ""
+                            : hiddenChanged == 1 ? ", 1 not at its default (it applies to the sample and the CSS)"
+                            : ", \(hiddenChanged) not at their defaults (they apply to the sample and the CSS)"))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -232,7 +238,8 @@ struct VariablesTabView: View {
 
     @ViewBuilder
     private var trailingControls: some View {
-        Slider(value: $model.variationSamplePointSize, in: AppModel.variationSamplePointSizeRange)
+        // Whole points: with an automatic optical size, every distinct size is a new font instance.
+        Slider(value: $model.variationSamplePointSize, in: AppModel.variationSamplePointSizeRange, step: 1)
             .frame(width: 100)
             .accessibilityLabel("Sample size")
             .help("Point size of the sample; an automatic optical size follows it")
@@ -242,7 +249,7 @@ struct VariablesTabView: View {
             .foregroundStyle(.secondary)
             .frame(width: 44, alignment: .trailing)
         let info = current
-        let css = info.map { $0.css(values: effectiveValues($0), omitting: omittedFromCSS($0)) } ?? ""
+        let css = info.map { $0.css(values: effectiveValues($0), autoOpticalSize: state($0).autoOpticalSize) } ?? ""
         Button("Reset") {
             if let info { setState(VariationState(values: info.defaults)) }
         }
@@ -264,14 +271,9 @@ struct VariablesTabView: View {
         }
     }
 
-    /// An automatic optical size is left to the browser (`font-optical-sizing: auto`).
-    private func omittedFromCSS(_ info: VariationInfo) -> Set<UInt32> {
-        state(info).autoOpticalSize ? [VariationInfo.opticalSize] : []
-    }
-
     private var instanceMenu: some View {
         let info = current
-        return InstancePicker(instances: info?.instances ?? [],
+        return InstancePicker(faceID: faceID, instances: info?.instances ?? [],
                               selected: info.flatMap { $0.instance(matching: effectiveValues($0)) }?.index) { index in
             guard let info, let instance = info.instances.first(where: { $0.index == index }) else { return }
             var values = info.defaults
@@ -304,12 +306,14 @@ struct VariablesTabView: View {
 /// The named-instance menu; "Custom" while the coordinates match no instance. Equatable on its instances and
 /// selection, so a slider drag does not rebuild a menu of hundreds of instances on every step.
 private struct InstancePicker: View, Equatable {
+    /// The face the instances belong to; two faces can declare equal instance lists.
+    let faceID: Int64
     let instances: [VariationInfo.Instance]
     let selected: Int?
     let choose: (Int) -> Void
 
     nonisolated static func == (a: InstancePicker, b: InstancePicker) -> Bool {
-        a.selected == b.selected && a.instances == b.instances
+        a.faceID == b.faceID && a.selected == b.selected && a.instances == b.instances
     }
 
     var body: some View {
@@ -362,7 +366,7 @@ private struct AxisRow: View {
                     .frame(height: 18)
             }
             .frame(minWidth: 200)
-            TextField(axis.tag, value: Binding(get: { value }, set: { value = $0 }),
+            TextField(axis.tag, value: $value,
                       format: .number.precision(.fractionLength(0...2)).grouping(.never))
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(.trailing)

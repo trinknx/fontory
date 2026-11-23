@@ -8,8 +8,8 @@ struct FamilyDetailView: View {
     @Bindable var model: AppModel
     let detail: FamilyDetail
 
-    /// Whether the focused style is a variable font, from its row; nil until the row is loaded.
-    @State private var focusedIsVariable: Bool?
+    /// Whether a style is a variable font, from its row: the last value seen, kept while the row reloads.
+    @State private var knownIsVariable: (faceID: Int64, isVariable: Bool)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,16 +33,28 @@ struct FamilyDetailView: View {
         }
     }
 
+    /// Records the focused style's is-variable flag when its row is cached; a missing row (dropped for a reload)
+    /// keeps the last value known for the same style.
     private func updateFocusedIsVariable() {
-        let value = model.cachedRow(focusedFaceID)?.isVariable
-        if value != focusedIsVariable { focusedIsVariable = value }
+        guard let value = model.cachedRow(focusedFaceID)?.isVariable else { return }
+        if knownIsVariable?.faceID != focusedFaceID || knownIsVariable?.isVariable != value {
+            knownIsVariable = (focusedFaceID, value)
+        }
     }
 
-    /// Tabs that cannot be chosen now, with the reason shown as their tooltip. While a variable font is open on
-    /// Variables, the tab stays enabled even before its row loads.
+    /// Whether the focused style is a variable font; nil while unknown (its row not loaded yet).
+    private var focusedIsVariable: Bool? {
+        knownIsVariable?.faceID == focusedFaceID ? knownIsVariable?.isVariable : nil
+    }
+
+    /// Tabs that cannot be chosen now, with the reason shown as their tooltip. Unknown is never reported as "not
+    /// variable": the tab waits with a Loading tooltip, or stays enabled if it is the open tab.
     private var disabledTabs: [DetailTab: String] {
-        focusedIsVariable == true || (focusedIsVariable == nil && model.detailTab == .variables)
-            ? [:] : [.variables: "Not a variable font"]
+        switch focusedIsVariable {
+        case true?: [:]
+        case false?: [.variables: "Not a variable font"]
+        case nil: model.detailTab == .variables ? [:] : [.variables: "Loading…"]
+        }
     }
 
     // MARK: Header

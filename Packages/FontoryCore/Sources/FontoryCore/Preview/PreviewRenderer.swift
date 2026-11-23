@@ -18,6 +18,7 @@ public final class PreviewRenderer: Sendable {
         fonts = LRUCache(limit: fontCacheLimit)
         failed = LRUCache(limit: 4096)
         sized = LRUCache(limit: max(64, fontCacheLimit * 2))
+        variationSized = LRUCache(limit: Self.variationCacheLimit)
     }
 
     /// How many times a font file was actually loaded (cache misses). For tests.
@@ -40,12 +41,14 @@ public final class PreviewRenderer: Sendable {
         fonts.removeAll(where: matches)
         failed.removeAll(where: matches)
         sized.removeAll(where: { matches($0.face) })
+        variationSized.removeAll(where: { matches($0.face) })
     }
 
     /// Drops every cached font and load failure.
     public func forgetAllFonts() {
         fonts.removeAll()
         sized.removeAll()
+        variationSized.removeAll()
         failed.removeAll()
     }
 
@@ -81,7 +84,14 @@ public final class PreviewRenderer: Sendable {
 
     /// Sized (and featured) copies of the base fonts, so scrolling does not rebuild them for every cell.
     private let sized: LRUCache<SizedKey, CTFont>
+    /// Sized copies with variation coordinates (the Variables tab), kept apart and small: a slider drag makes a new
+    /// one per step, which must not push the browser's fonts out of `sized`.
+    private let variationSized: LRUCache<SizedKey, CTFont>
+    static let variationCacheLimit = 24
     private let sizedCreations = AttemptCounter()
+
+    /// How many variation fonts are cached. For tests.
+    var variationFontCount: Int { variationSized.count }
 
     /// How many sized font copies were created (cache misses). For tests.
     var sizedFontCreations: Int { sizedCreations.value }
@@ -91,7 +101,8 @@ public final class PreviewRenderer: Sendable {
         let capsBit = features.contains(.smallCaps) && allCaps ? Self.allCapsBit : 0
         let key = SizedKey(face: FontKey(url: url, faceIndex: faceIndex), pointSize: pointSize,
                            features: features.rawValue | capsBit, settings: extra, variations: variations)
-        if let cached = sized[key] { return cached }
+        let cache = variations.isEmpty ? sized : variationSized
+        if let cached = cache[key] { return cached }
         guard let base = baseFont(url, faceIndex) else { return nil }
         sizedCreations.increment()
         let settings = Self.featureSettings(features, allCaps: capsBit != 0, extra: extra)
@@ -105,7 +116,7 @@ public final class PreviewRenderer: Sendable {
         let attributes = attributeValues.isEmpty ? nil
             : CTFontDescriptorCreateWithAttributes(attributeValues as CFDictionary)
         let font = CTFontCreateCopyWithAttributes(base, pointSize, nil, attributes)
-        sized[key] = font
+        cache[key] = font
         return font
     }
 
