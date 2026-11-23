@@ -15,7 +15,7 @@ private struct Bytes {
 
 /// A GSUB with features [liga, locl, ss01 (FeatureParams → name ID 256)], scripts DFLT (default: liga) and
 /// latn (default: liga, ss01; TRK: required locl, then liga).
-private func syntheticGSUB(badIndex: Bool = false) -> [UInt8] {
+private func syntheticGSUB(badIndex: Bool = false, badParams: Bool = false) -> [UInt8] {
     // Layout: header (10) | ScriptList | FeatureList
     var scriptList = Bytes()
     // ScriptList: count 2, records (DFLT, latn) → script tables after the 2 + 12 header.
@@ -44,7 +44,7 @@ private func syntheticGSUB(badIndex: Bool = false) -> [UInt8] {
     featureList.tag("ss01"); featureList.u16(tables + 8)
     featureList.u16(0); featureList.u16(0)                 // liga: no params, no lookups
     featureList.u16(0); featureList.u16(0)                 // locl
-    featureList.u16(4); featureList.u16(0)                 // ss01: params at +4
+    featureList.u16(badParams ? 0x7000 : 4); featureList.u16(0)   // ss01: params at +4 (or far past the end)
     featureList.u16(0); featureList.u16(256)               // FeatureParams: version 0, UINameID 256
 
     var out = Bytes()
@@ -115,12 +115,25 @@ private func syntheticName() -> [UInt8] {
         #expect(inv.allTags.isEmpty && inv.scripts.isEmpty)
     }
 
+    @Test func malformedFeatureParamsOnlyDropTheName() {
+        let inv = LayoutFeatureInventory.parse(gsub: SfntReader(bytes: syntheticGSUB(badParams: true)), gpos: nil,
+                                               name: SfntReader(bytes: syntheticName()))
+        #expect(inv.allTags == ["liga", "locl", "ss01"])
+        #expect(inv.featureNames.isEmpty)
+    }
+
     @Test func truncatedAndGarbageTablesYieldEmptyInventories() throws {
         let full = syntheticGSUB()
+        let paramsStart = full.count - 4   // the ss01 FeatureParams are the last 4 bytes
         for length in 0..<full.count {
             let inv = LayoutFeatureInventory.parse(gsub: SfntReader(bytes: Array(full.prefix(length))), gpos: nil,
-                                                   name: SfntReader(bytes: Array(syntheticName().prefix(length))))
-            #expect(inv.isEmpty, "length \(length)")
+                                                   name: SfntReader(bytes: syntheticName()))
+            if length < paramsStart {
+                #expect(inv.isEmpty, "length \(length)")
+            } else {
+                // Only the stylistic set's params are cut: the features stay, without the name.
+                #expect(inv.allTags == ["liga", "locl", "ss01"] && inv.featureNames.isEmpty, "length \(length)")
+            }
         }
         // A real font's GSUB, cut short at many points: never crashes.
         let font = try #require(FontFile.font(at: URL(fileURLWithPath: TempFonts.newYork), faceIndex: 0))
@@ -137,6 +150,30 @@ private func syntheticName() -> [UInt8] {
         }
         #expect(LayoutFeatureInventory.parse(gsub: SfntReader(bytes: [0, 1, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0]),
                                              gpos: nil, name: nil).isEmpty)
+    }
+
+    /// 10,000 script records sharing one Script table whose 10,000 language records share one LangSys of 1,000
+    /// indices: without caching by offset that is 10^11 index reads.
+    @Test(.timeLimit(.minutes(1))) func sharedOffsetsAreParsedOnce() throws {
+        let scripts = 10_000, languages = 10_000, indices = 1_000
+        var b = Bytes()
+        b.u16(1); b.u16(0); b.u16(22); b.u16(10); b.u16(0)         // ScriptList at 22, FeatureList at 10
+        b.u16(1); b.tag("liga"); b.u16(8); b.u16(0); b.u16(0)      // FeatureList: liga
+        b.u16(scripts)
+        let scriptOffset = 2 + scripts * 6
+        for _ in 0..<scripts { b.tag("latn"); b.u16(scriptOffset) }
+        let langSysOffset = 4 + languages * 6                       // relative to the Script table
+        b.u16(langSysOffset); b.u16(languages)
+        for _ in 0..<languages { b.tag("TRK "); b.u16(langSysOffset) }
+        b.u16(0); b.u16(0xFFFF); b.u16(indices)
+        for _ in 0..<indices { b.u16(0) }
+        let bytes = b.data
+        let start = Date()
+        let inv = LayoutFeatureInventory.parse(gsub: SfntReader(bytes: bytes), gpos: nil, name: nil)
+        #expect(Date().timeIntervalSince(start) < 2)
+        #expect(inv.tags(script: "latn", language: "TRK") == ["liga"])
+        // The same table with a tiny work budget is refused as a whole.
+        #expect(LayoutFeatureInventory.parseTable(SfntReader(bytes: bytes), budget: 5_000) == nil)
     }
 
     @Test func realFontFeaturesAndStylisticSetName() throws {
@@ -260,6 +297,80 @@ private func syntheticName() -> [UInt8] {
         let before = request
         request.featureSettings = [.openType(tag: "ss01", value: 1)]
         #expect(request != before)
+    }
+
+    private func lineWidth(_ request: PreviewRequest, _ path: String = TempFonts.newYork) throws -> CGFloat {
+        let line = try #require(PreviewRenderer().line(fileURL: URL(fileURLWithPath: path), faceIndex: 0, request: request))
+        return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+    }
+
+    private func request(_ text: String) -> PreviewRequest {
+        PreviewRequest(text: text, pointSize: 100, foreground: CGColor(gray: 0, alpha: 1),
+                       background: CGColor(gray: 1, alpha: 1), size: CGSize(width: 10, height: 10), scale: 1)
+    }
+
+    @Test func kerningOffChangesTheLine() throws {
+        var r = request("AVAV")
+        let kerned = try lineWidth(r)
+        r.featureSettings = [.openType(tag: "kern", value: 0)]
+        #expect(try lineWidth(r) == kerned)                 // CoreText ignores "kern" 0 …
+        r.disablesKerning = FeatureToggles.disablesKerning(r.featureSettings)
+        #expect(r.disablesKerning)
+        #expect(try lineWidth(r) > kerned + 1)              // … the kerning attribute does not
+        #expect(try lineWidth(r, TempFonts.arialBold) > lineWidth(request("AVAV"), TempFonts.arialBold) + 1)
+        r.tracking = 5                                        // tracking wins over kerning off
+        let tracked = try lineWidth(r)
+        r.disablesKerning = false
+        #expect(try lineWidth(r) == tracked)
+        #expect(request("x") != { var q = request("x"); q.disablesKerning = true; return q }())
+    }
+
+    /// Documents CoreText: switching mark, mkmk or ccmp off changes neither glyphs nor positions.
+    @Test func coreTextIgnoresMarkFeaturesOff() throws {
+        let renderer = PreviewRenderer()
+        let url = URL(fileURLWithPath: TempFonts.newYork)
+        func shape(_ settings: [FontFeatureSetting]) throws -> [String] {
+            let font = try #require(renderer.font(fileURL: url, faceIndex: 0, pointSize: 100, settings: settings))
+            let line = CTLineCreateWithAttributedString(NSAttributedString(
+                string: "q\u{0301}\u{0323}\u{0302}", attributes: [.init(kCTFontAttributeName as String): font]))
+            return (CTLineGetGlyphRuns(line) as! [CTRun]).flatMap { run in
+                var p = [CGPoint](repeating: .zero, count: CTRunGetGlyphCount(run))
+                CTRunGetPositions(run, CFRange(), &p)
+                return p.map { "\($0.x.rounded()),\($0.y.rounded())" }
+            }
+        }
+        let plain = try shape([])
+        for tag in FeatureCatalog.alwaysAppliedByCoreText {
+            #expect(try shape([.openType(tag: tag, value: 0)]) == plain, "\(tag)")
+        }
+        let mark = LayoutFeature(id: "mark", tag: "mark", name: "", detail: "", group: .positional, isOnByDefault: true,
+                                 source: .openType)
+        #expect(!mark.previewsWhenOff)
+    }
+
+    @Test func languageSelectsLocalizedForms() throws {
+        func glyphs(_ language: String?) throws -> [CGGlyph] {
+            var r = request("бгдпт")
+            r.language = language
+            let line = try #require(PreviewRenderer().line(fileURL: URL(fileURLWithPath: TempFonts.sfns), faceIndex: 0,
+                                                           request: r))
+            return (CTLineGetGlyphRuns(line) as! [CTRun]).flatMap { run in
+                var g = [CGGlyph](repeating: 0, count: CTRunGetGlyphCount(run))
+                CTRunGetGlyphs(run, CFRange(), &g)
+                return g
+            }
+        }
+        #expect(try glyphs(FeatureCatalog.languageCode("BGR")) != glyphs(nil))
+        #expect(FeatureCatalog.languageCode("TRK ") == "tr")
+    }
+
+    @Test func hiddenChangesCountsFilteredOutSwitches() {
+        let all = ["liga", "smcp", "locl"].map(ot)
+        let states = ["smcp": true, "locl": false]
+        #expect(FeatureToggles.hiddenChanges(all: all, listed: [all[0], all[1]], states: states) == 1)
+        #expect(FeatureToggles.hiddenChanges(all: all, listed: all, states: states) == 0)
+        #expect(FontFeatureSet.aatTag(type: 11, selector: 1) == "afrc")
+        #expect(FontFeatureSet.aatTag(type: 11, selector: 2) == "frac")
     }
 
     @Test func extraSettingsOverrideThePreviewFeatures() {

@@ -40,6 +40,11 @@ public struct PreviewRequest: Sendable, Hashable {
     /// Further feature settings (Features tab), applied after `features`; a tag set here overrides the same tag
     /// from `features`.
     public var featureSettings: [FontFeatureSetting] = []
+    /// Kerning off. CoreText ignores `"kern" 0` in feature settings, so this sets `kCTKernAttributeName` to 0
+    /// instead; non-zero tracking takes precedence.
+    public var disablesKerning = false
+    /// BCP 47 language of the text (`kCTLanguageAttributeName`), which selects `locl` forms; nil for none.
+    public var language: String?
     public var size: CGSize          // in points; pixel size = size * scale
     public var scale: CGFloat
     /// sRGB components, computed once when a color is set so == and hash never convert colors.
@@ -74,7 +79,8 @@ public struct PreviewRequest: Sendable, Hashable {
             && a.size == b.size && a.scale == b.scale
             && a.showGuides == b.showGuides && a.showMissingGlyphs == b.showMissingGlyphs
             && a.outline == b.outline && a.underline == b.underline && a.features == b.features
-            && a.featureSettings == b.featureSettings
+            && a.featureSettings == b.featureSettings && a.disablesKerning == b.disablesKerning
+            && a.language == b.language
     }
 
     public func hash(into h: inout Hasher) {
@@ -85,5 +91,7 @@ public struct PreviewRequest: Sendable, Hashable {
         h.combine(showGuides); h.combine(showMissingGlyphs); h.combine(outline); h.combine(underline)
         h.combine(features.rawValue)
         h.combine(featureSettings)
+        h.combine(disablesKerning)
+        h.combine(language)
     }
 }

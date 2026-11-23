@@ -54,6 +54,12 @@ public struct LayoutFeature: Sendable, Hashable, Identifiable {
         }
     }
 
+    /// False for features CoreText applies even when switched off (`mark`, `mkmk`, `ccmp`): the switch still
+    /// counts for CSS, but the sample cannot show it.
+    public var previewsWhenOff: Bool {
+        !(isOnByDefault && tag.map(FeatureCatalog.alwaysAppliedByCoreText.contains) == true)
+    }
+
     /// A sample that shows the feature off, when one is known.
     public var demoText: String? { tag.flatMap(FeatureCatalog.demoText(for:)) }
 }
@@ -146,7 +152,7 @@ public struct FontFeatureSet: Sendable, Equatable {
         case 3, 37, 38: .letterCase                          // letter case, lower case, upper case
         case 6, 10, 11, 21: .numbers                         // number spacing, vertical position, fractions, number case
         case 8, 17, 18, 35, 36: .alternates                  // smart swash, character alternatives, design complexity, stylistic / contextual alternates
-        case 22: .positional                                 // text spacing (kerning)
+        case 22: .positional                                 // kTextSpacingType: proportional / monospaced / half-width text (CoreText also lists "No Kerning" here)
         default: .other
         }
     }
@@ -167,7 +173,8 @@ public struct FontFeatureSet: Sendable, Equatable {
         case (10, 2): "subs"
         case (10, 3): "ordn"
         case (10, 4): "sinf"
-        case (11, 1), (11, 2): "frac"
+        case (11, 1): "afrc"                                 // vertical (nut) fractions
+        case (11, 2): "frac"                                 // diagonal fractions
         case (36, 0): "calt"
         case (35, let s) where s >= 2 && s <= 40 && s % 2 == 0: String(format: "ss%02d", s / 2)
         default: nil
@@ -202,6 +209,19 @@ public enum FeatureToggles {
             let on = isOn(f, states)
             return on == f.isOnByDefault ? nil : f.setting(on: on)
         }
+    }
+
+    /// Whether the settings switch kerning off (applied through `PreviewRequest.disablesKerning`, since CoreText
+    /// ignores `"kern" 0`).
+    public static func disablesKerning(_ settings: [FontFeatureSetting]) -> Bool {
+        settings.contains(.openType(tag: "kern", value: 0))
+    }
+
+    /// How many switched features (states differing from the default) are not in `listed`, e.g. hidden by the
+    /// script filter.
+    public static func hiddenChanges(all: [LayoutFeature], listed: [LayoutFeature], states: [String: Bool]) -> Int {
+        let shown = Set(listed.map(\.id))
+        return all.filter { !shown.contains($0.id) && isOn($0, states) != $0.isOnByDefault }.count
     }
 
     /// `font-feature-settings` for the switched features: 1 for features turned on, 0 for default features turned

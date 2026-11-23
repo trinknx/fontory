@@ -71,15 +71,29 @@ public struct LayoutFeatureInventory: Sendable, Equatable {
         return LayoutFeatureInventory(gsub: sub, gpos: pos, featureNames: names)
     }
 
-    /// One `GSUB`/`GPOS` table, or nil when anything is inconsistent.
+    /// Upper bound on records and feature indices visited per table. Real fonts need a few thousand; crafted
+    /// tables that share Script/LangSys offsets could otherwise demand billions of steps.
+    static let workBudget = 2_000_000
+
+    /// One `GSUB`/`GPOS` table, or nil when anything is inconsistent or it needs more than `budget` steps.
     static func parseTable(_ r: SfntReader) -> Table? {
+        parseTable(r, budget: workBudget)
+    }
+
+    static func parseTable(_ r: SfntReader, budget: Int) -> Table? {
+        var work = 0
+        /// Counts `n` steps; false once the budget is spent.
+        func spend(_ n: Int) -> Bool {
+            work += n
+            return work <= budget
+        }
         guard let major = r.u16(0), major == 1, let scriptListOffset = r.u16(4), let featureListOffset = r.u16(6)
         else { return nil }
         // FeatureList
         var features: [(tag: String, nameID: UInt16?)] = []
         if featureListOffset != 0 {
             let fl = Int(featureListOffset)
-            guard let count = r.u16(fl) else { return nil }
+            guard let count = r.u16(fl), spend(Int(count)) else { return nil }
             features.reserveCapacity(Int(count))
             for i in 0..<Int(count) {
                 let record = fl + 2 + i * 6
@@ -89,35 +103,54 @@ public struct LayoutFeatureInventory: Sendable, Equatable {
                 var id: UInt16?
                 if paramsOffset != 0, isNumbered(tag, prefix: "ss") || isNumbered(tag, prefix: "cv") {
                     let params = featureTable + Int(paramsOffset)
-                    guard let version = r.u16(params), let value = r.u16(params + 2) else { return nil }
                     // ssXX: version, UINameID; cvXX: format, FeatUILabelNameID. Only font-specific IDs count.
-                    if version == 0, (256...32767).contains(value) { id = value }
+                    // Malformed params cost the feature its name only, not the table.
+                    if let version = r.u16(params), let value = r.u16(params + 2), version == 0,
+                       (256...32767).contains(value) { id = value }
                 }
                 features.append((tag, id))
             }
         }
         // ScriptList
         var scripts: [String: ScriptEntry] = [:]
+        // Script and LangSys tables may be shared by offset: each is parsed once.
+        var scriptCache: [Int: ScriptEntry] = [:]
+        var langSysCache: [Int: [Int]] = [:]
+        func cachedLangSys(_ offset: Int) -> [Int]? {
+            if let hit = langSysCache[offset] { return hit }
+            guard let indices = langSys(r, at: offset, featureCount: features.count), spend(indices.count) else { return nil }
+            langSysCache[offset] = indices
+            return indices
+        }
         if scriptListOffset != 0 {
             let sl = Int(scriptListOffset)
-            guard let count = r.u16(sl) else { return nil }
+            guard let count = r.u16(sl), spend(Int(count)) else { return nil }
             for i in 0..<Int(count) {
                 let record = sl + 2 + i * 6
                 guard let tag = r.tag(record), let offset = r.u16(record + 4) else { return nil }
                 let script = sl + Int(offset)
-                guard let defaultOffset = r.u16(script), let langCount = r.u16(script + 2) else { return nil }
-                var entry = ScriptEntry(defaultFeatures: nil, languages: [:])
-                if defaultOffset != 0 {
-                    guard let indices = langSys(r, at: script + Int(defaultOffset), featureCount: features.count)
+                let entry: ScriptEntry
+                if let hit = scriptCache[script] {
+                    entry = hit
+                } else {
+                    guard let defaultOffset = r.u16(script), let langCount = r.u16(script + 2), spend(Int(langCount))
                     else { return nil }
-                    entry.defaultFeatures = indices
-                }
-                for j in 0..<Int(langCount) {
-                    let langRecord = script + 4 + j * 6
-                    guard let langTag = r.tag(langRecord), let langOffset = r.u16(langRecord + 4),
-                          let indices = langSys(r, at: script + Int(langOffset), featureCount: features.count)
-                    else { return nil }
-                    entry.languages[langTag.trimmingCharacters(in: .whitespaces)] = indices
+                    var parsed = ScriptEntry(defaultFeatures: nil, languages: [:])
+                    if defaultOffset != 0 {
+                        guard let indices = cachedLangSys(script + Int(defaultOffset)) else { return nil }
+                        parsed.defaultFeatures = indices
+                    }
+                    for j in 0..<Int(langCount) {
+                        let langRecord = script + 4 + j * 6
+                        guard let langTag = r.tag(langRecord), let langOffset = r.u16(langRecord + 4),
+                              let indices = cachedLangSys(script + Int(langOffset))
+                        else { return nil }
+                        let language = langTag.trimmingCharacters(in: .whitespaces)
+                        // A language listed twice keeps its first entry.
+                        if parsed.languages[language] == nil { parsed.languages[language] = indices }
+                    }
+                    scriptCache[script] = parsed
+                    entry = parsed
                 }
                 // A tag listed twice keeps its first entry.
                 if scripts[tag] == nil { scripts[tag] = entry }

@@ -179,6 +179,11 @@ public enum FeatureCatalog {
         "pres", "pstf", "psts", "rkrf", "rphf", "vatu", "ljmo", "vjmo", "tjmo",
     ]
 
+    /// On-by-default features CoreText keeps applying when `<tag> 0` is set (measured on macOS 27 with
+    /// NewYork.ttf: identical glyphs and positions). `kern` is not here: it is switched off through the kerning
+    /// attribute instead.
+    public static let alwaysAppliedByCoreText: Set<String> = ["mark", "mkmk", "ccmp"]
+
     private static func number(_ tag: String, prefix: String) -> Int? {
         LayoutFeatureInventory.isNumbered(tag, prefix: prefix) ? Int(tag.dropFirst(2)) : nil
     }
@@ -203,7 +208,7 @@ public enum FeatureCatalog {
         "tnum": "1111 0123456789", "frac": "1/2 3/4 5/8 7/16", "afrc": "1/2 3/4 5/8", "zero": "0 10 100 O0O",
         "sups": "x2 y3 E=mc2", "subs": "H2O CO2 x1", "sinf": "H2O C6H12O6", "ordn": "1a 2o No 1st 2nd",
         "numr": "123/456", "dnom": "123/456", "kern": "AVATAR Wave To Yo LT",
-        "mark": "à é î õ ü ç ñ", "mkmk": "ệ ặ ẫ ổ ữ", "ccmp": "à é î õ ü ç ñ",
+        "mark": "à é î õ ü ç ñ", "locl": "Şş Ţţ ĳ бгдпт ŀl", "mkmk": "ệ ặ ẫ ổ ữ", "ccmp": "à é î õ ü ç ñ",
     ]
 }
 
@@ -214,6 +219,22 @@ extension FeatureCatalog {
     public static func scriptName(_ tag: String) -> String {
         scriptNames[tag] ?? tag
     }
+
+    /// The BCP 47 code of an OpenType language system tag (for `kCTLanguageAttributeName`), when known.
+    public static func languageCode(_ tag: String) -> String? {
+        languageCodes[tag.trimmingCharacters(in: .whitespaces)]
+    }
+
+    private static let languageCodes: [String: String] = [
+        "ENG": "en", "TRK": "tr", "AZE": "az", "CRT": "crh", "KAZ": "kk", "TAT": "tt", "ROM": "ro", "MOL": "ro-MD",
+        "CAT": "ca", "NLD": "nl", "DEU": "de", "FRA": "fr", "ESP": "es", "ITA": "it", "PTG": "pt", "PLK": "pl",
+        "CSY": "cs", "SKY": "sk", "HUN": "hu", "HRV": "hr", "SRB": "sr", "BGR": "bg", "MKD": "mk", "RUS": "ru",
+        "UKR": "uk", "BEL": "be", "ELL": "el", "VIT": "vi", "LTH": "lt", "LVI": "lv", "ETI": "et", "FIN": "fi",
+        "SVE": "sv", "NOR": "nb", "DAN": "da", "ISL": "is", "GAG": "gag", "CHU": "cu", "SQI": "sq", "KUR": "ku",
+        "MAH": "mh", "NAV": "nv", "GRN": "kl", "SMO": "sm", "ARA": "ar", "FAR": "fa", "URD": "ur", "SND": "sd",
+        "KSH": "ks", "PAS": "ps", "IWR": "he", "HIN": "hi", "MAR": "mr", "NEP": "ne", "SAN": "sa", "BEN": "bn",
+        "TAM": "ta", "JAN": "ja", "KOR": "ko", "ZHS": "zh-Hans", "ZHT": "zh-Hant", "ZHH": "zh-HK", "THA": "th",
+    ]
 
     /// "Turkish" for `TRK`; unknown tags are returned as they are.
     public static func languageName(_ tag: String) -> String {

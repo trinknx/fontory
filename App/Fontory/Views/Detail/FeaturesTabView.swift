@@ -20,6 +20,9 @@ struct FeaturesTabView: View {
     /// The user's switches by feature id; kept across styles of the family (only listed features apply).
     @State private var states: [String: Bool] = [:]
     @State private var selection: LayoutSelection = .all
+    /// Every feature of the face, and those the selection lists; sorted once per face/selection, not per body.
+    @State private var allFeatures: [LayoutFeature] = []
+    @State private var features: [LayoutFeature] = []
     /// Typed sample text; empty uses the last switched feature's demo string, else the preview text.
     @State private var sampleText = ""
     @State private var lastSwitched: String?
@@ -44,6 +47,7 @@ struct FeaturesTabView: View {
             bottomBar
         }
         .task(id: LoadKey(faceID: faceID, rowsVersion: model.rowsVersion)) { await load() }
+        .onChange(of: selection) { updateFeatures() }
         .onAppear { updateStyleNames() }
         .onReceive(NotificationCenter.default.publisher(for: AppModel.rowsLoadedNotification, object: model)) { _ in
             updateStyleNames()
@@ -65,8 +69,9 @@ struct FeaturesTabView: View {
                     featureList(loaded)
                     Divider()
                     FeatureSampleLines(renderer: model.previewRenderer, face: loaded.face, text: resolvedSampleText,
-                                       settings: FeatureToggles.settings(features, states: states),
-                                       foreground: model.preview.foreground, background: model.preview.background)
+                                       settings: settings, language: sampleLanguage,
+                                       foreground: model.preview.foreground, background: model.preview.background,
+                                       showGuides: model.preview.showGuides)
                         .frame(height: 150)
                 }
                 .opacity(loadedID == faceID ? 1 : 0.5)
@@ -76,9 +81,25 @@ struct FeaturesTabView: View {
         }
     }
 
-    /// The listed features for the current face and selection.
-    private var features: [LayoutFeature] {
-        loaded?.features.features(for: selection) ?? []
+    /// Settings of every switched feature, including those the script filter hides.
+    private var settings: [FontFeatureSetting] {
+        FeatureToggles.settings(allFeatures, states: states)
+    }
+
+    /// Switched features the script filter hides.
+    private var hiddenChanges: Int {
+        FeatureToggles.hiddenChanges(all: allFeatures, listed: features, states: states)
+    }
+
+    /// The chosen language system's language, so the sample shows its `locl` forms.
+    private var sampleLanguage: String? {
+        if case let .languageSystem(_, language?) = selection { return FeatureCatalog.languageCode(language) }
+        return nil
+    }
+
+    private func updateFeatures() {
+        allFeatures = loaded?.features.features(for: .all) ?? []
+        features = loaded?.features.features(for: selection) ?? []
     }
 
     private func featureList(_ loaded: LoadedFace) -> some View {
@@ -115,7 +136,7 @@ struct FeaturesTabView: View {
         Binding(
             get: { FeatureToggles.isOn(feature, states) },
             set: { on in
-                states = FeatureToggles.toggled(feature, on: on, in: features, states: states)
+                states = FeatureToggles.toggled(feature, on: on, in: allFeatures, states: states)
                 lastSwitched = feature.id
             })
     }
@@ -123,7 +144,7 @@ struct FeaturesTabView: View {
     /// The typed text, else the demo string of the last switched feature, else the preview text.
     private var resolvedSampleText: String {
         if !sampleText.isEmpty { return sampleText }
-        if let id = lastSwitched, let demo = features.first(where: { $0.id == id })?.demoText { return demo }
+        if let id = lastSwitched, let demo = allFeatures.first(where: { $0.id == id })?.demoText { return demo }
         let preview = model.text(of: .previewText, row: model.cachedRow(faceID))
         return preview.isEmpty ? "Hamburgefonstiv 0123456789" : preview
     }
@@ -152,6 +173,7 @@ struct FeaturesTabView: View {
            !set.inventory.scripts.contains(script) || (language.map { !set.inventory.languages(script: script).contains($0) } ?? false) {
             selection = .all
         }
+        updateFeatures()
         updateStyleNames()
     }
 
@@ -197,7 +219,13 @@ struct FeaturesTabView: View {
 
     @ViewBuilder
     private var trailingControls: some View {
-        let css = FeatureToggles.css(features, states: states)
+        let css = FeatureToggles.css(allFeatures, states: states)
+        if hiddenChanges > 0 {
+            Text(hiddenChanges == 1 ? "1 hidden change" : "\(hiddenChanges) hidden changes")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .help("Switched features of other scripts or languages; they still apply to the sample and the CSS")
+        }
         Button("Reset") { states = [:] }
             .disabled(states.isEmpty)
             .help("Switch every feature back to the font's default")
@@ -291,7 +319,7 @@ private struct FeatureRow: View {
         Toggle(isOn: $isOn) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(feature.name).lineLimit(1).truncationMode(.tail)
-                Text(feature.isOnByDefault ? "\(feature.detail) · on by default" : feature.detail)
+                Text(caption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -299,7 +327,18 @@ private struct FeatureRow: View {
         }
         .toggleStyle(.switch)
         .controlSize(.small)
-        .help(feature.tag.map { "\(feature.name) (\($0))" } ?? feature.name)
+        .help(help)
+    }
+
+    private var caption: String {
+        guard feature.isOnByDefault else { return feature.detail }
+        return feature.previewsWhenOff ? "\(feature.detail) · on by default" : "\(feature.detail) · always on in previews"
+    }
+
+    private var help: String {
+        let title = feature.tag.map { "\(feature.name) (\($0))" } ?? feature.name
+        return feature.previewsWhenOff ? title
+            : "\(title). CoreText applies it even when switched off, so the sample cannot show it off; the CSS still does."
     }
 }
 
@@ -309,8 +348,10 @@ private struct FeatureSampleLines: View {
     let face: SpecimenFace
     let text: String
     let settings: [FontFeatureSetting]
+    let language: String?
     let foreground: CGColor
     let background: CGColor
+    let showGuides: Bool
 
     @Environment(\.displayScale) private var scale
 
@@ -342,6 +383,10 @@ private struct FeatureSampleLines: View {
         var r = PreviewRequest(text: text, pointSize: pointSize, foreground: foreground, background: background,
                                size: CGSize(width: max(1, width.rounded(.down)), height: height), scale: scale)
         r.featureSettings = settings
+        // CoreText ignores "kern" 0; the renderer switches kerning off through the kerning attribute instead.
+        r.disablesKerning = FeatureToggles.disablesKerning(settings)
+        r.language = language
+        r.showGuides = showGuides
         return r
     }
 }

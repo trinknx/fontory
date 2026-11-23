@@ -183,7 +183,12 @@ public final class PreviewRenderer: Sendable {
 
     private func attributes(font: CTFont, request: PreviewRequest, color: CGColor?) -> [NSAttributedString.Key: Any] {
         var attrs: [NSAttributedString.Key: Any] = [.init(kCTFontAttributeName as String): font]
-        if request.tracking != 0 { attrs[.init(kCTKernAttributeName as String)] = request.tracking }
+        if request.tracking != 0 {
+            attrs[.init(kCTKernAttributeName as String)] = request.tracking
+        } else if request.disablesKerning {
+            attrs[.init(kCTKernAttributeName as String)] = 0
+        }
+        if let language = request.language { attrs[.init(kCTLanguageAttributeName as String)] = language }
         if let color { attrs[.init(kCTForegroundColorAttributeName as String)] = color }
         if request.outline {
             // Positive width strokes without filling; percent of the point size, thicker at small sizes.
