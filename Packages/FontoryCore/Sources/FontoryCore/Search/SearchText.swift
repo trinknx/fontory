@@ -3,7 +3,7 @@ import Foundation
 /// Parsed library search box text.
 ///
 /// Syntax: `"Helvetica Neue"` exact, `helv*` prefix, `*neue` suffix, bare word contains,
-/// `#tag` tag (name or `Parent/Child` path, also matches style names like `#serif`), `#!tag` not tagged. Terms are ANDed.
+/// `#tag` plain tag (name or `Parent/Child` path; smart tags are reached from the sidebar only, also matches style names like `#serif`), `#!tag` not tagged. Terms are ANDed.
 public struct SearchText: Sendable, Hashable {
     public enum Field: String, Sendable, CaseIterable { case name, family, foundry, designer, notes }
 
@@ -108,8 +108,8 @@ public struct SearchText: Sendable, Hashable {
                 var matches = """
                     faces.id IN (SELECT face_id FROM face_tags WHERE tag_id IN (
                       WITH RECURSIVE p(id, name, path) AS (
-                        SELECT id, name, name FROM tags WHERE parent_id IS NULL
-                        UNION ALL SELECT tags.id, tags.name, p.path || '/' || tags.name FROM tags JOIN p ON tags.parent_id = p.id),
+                        SELECT id, name, name FROM tags WHERE parent_id IS NULL AND kind = 0
+                        UNION ALL SELECT tags.id, tags.name, p.path || '/' || tags.name FROM tags JOIN p ON tags.parent_id = p.id WHERE tags.kind = 0),
                       d(id) AS (
                         SELECT id FROM p WHERE fontory_fold(name) = ? OR fontory_fold(path) = ?
                         UNION SELECT tags.id FROM tags JOIN d ON tags.parent_id = d.id)
