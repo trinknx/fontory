@@ -50,6 +50,7 @@ enum OrganizationSmoke {
             await backfillSteps(model, backend: backend, folder: dir)
             await smartEditorSteps(model, backend: backend)
             await reviewFixSteps(model, backend: backend)
+            await filterSteps(model, backend: backend, folder: dir)
         } catch {
             check(false, "setup", "\(error)")
         }
@@ -954,6 +955,140 @@ enum OrganizationSmoke {
         await model.reloadOrganization(.styles)
         let styles = (try? store.styleCounts(includeSystem: includeSystem)) ?? [:]
         check(model.organizationCounts.perStyle == styles, "style-only reload refreshes the Style counts")
+    }
+
+    // MARK: Wave 3a task 4: Filters popover
+
+    /// Three faces with metadata in their own location (the earlier faces have none, so they never match a feature).
+    private static func seedFilterFaces(_ store: FontStore, folder: URL) throws -> (location: Int64, ids: [String: Int64]) {
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "SMOKE-FILTERS", relativePath: "Filters",
+                                           displayName: "Filters", lastKnownPath: folder.path)
+        let batch = try store.nextImportBatch()
+        let latin = Array(0x41...0x5A).map(UInt32.init) + Array(0x61...0x7A).map(UInt32.init)
+        let defs: [(String, [String], FigureStyle, OutlineType, Bool, Bool, [UInt32])] = [
+            ("FilterA", ["liga", "smcp"], .lining, .cff, false, false, latin + VietnameseLetters.scalars),
+            ("FilterB", ["liga"], .oldstyle, .truetype, true, false, latin),
+            ("FilterC", [], .unknown, .bitmap, false, true, [0x41]),
+        ]
+        for (name, features, figures, outline, variable, color, scalars) in defs {
+            let meta = FaceMetadata(coverage: CoverageRanges(scalars: scalars), features: features, figureStyle: figures)
+            let face = ParsedFace(postScriptName: "\(name)-Regular", family: name, style: "Regular", fullName: "\(name) Regular",
+                                  isVariable: variable, glyphCount: 100, outlineType: outline, isColor: color, metadata: meta)
+            let file = FileRecord(locationID: loc.id, relativePath: "\(name).otf", size: 10, mtime: Date(timeIntervalSince1970: 1000),
+                                  format: "otf", fingerprint: "filter-\(name)")
+            _ = try store.insertFile(file, faces: [face], importBatch: batch)
+        }
+        var q = LibraryQuery(scope: .location(id: loc.id, subfolder: nil))
+        q.includeSystem = true
+        var out: [String: Int64] = [:]
+        for row in try store.rows(ids: try store.faceIDs(for: q)).values { out[row.family] = row.id }
+        return (loc.id, out)
+    }
+
+    /// What the core returns for the model's current query (its scope, search and filters).
+    private static func coreShown(_ store: FontStore, _ model: AppModel) -> Set<Int64> {
+        Set((try? store.faceIDs(for: model.query)) ?? [-1])
+    }
+
+    private static func filterSteps(_ model: AppModel, backend: LibraryBackend, folder: URL) async {
+        let store = backend.store
+        model.suppressesPreviewSaveForSmoke = true
+        let savedPreview = model.preview
+        defer { model.preview = savedPreview }
+        let seeded: (location: Int64, ids: [String: Int64])
+        do { seeded = try seedFilterFaces(store, folder: folder) } catch { check(false, "filters: seed", "\(error)"); return }
+        guard let a = seeded.ids["FilterA"], let b = seeded.ids["FilterB"] else {
+            check(false, "filters: seed", "\(seeded.ids)")
+            return
+        }
+        model.searchText = ""
+        model.query.scope = .all
+        model.clearFilters()
+        let unfiltered = await shown(model)
+        // Earlier steps indexed real fonts too: expectations are about the seeded faces; the whole result must equal the core's.
+        let seededSet = Set(seeded.ids.values)
+        func ours(_ ids: Set<Int64>) -> Set<Int64> { ids.intersection(seededSet) }
+        check(unfiltered.isSuperset(of: [a, b]) && model.query.filters.isEmpty, "filters: unfiltered All shows the seeded faces",
+              "\(unfiltered.count) faces")
+
+        // Two filters: applied at once (no text), result equals the core query.
+        model.filters.features = ["liga"]
+        model.filters.figures = .lining
+        check(model.query.filters == model.filters && model.filterApplyTask == nil, "filters: non-text controls apply at once")
+        var now = await shown(model)
+        check(ours(now) == [a] && now.count < unfiltered.count && now == coreShown(store, model), "filters: liga + lining equals the core query",
+              "shown \(now), core \(coreShown(store, model))")
+        check(model.effectiveFilters.activeCount == 2 && model.browserCountText == "\(now.count) font\(now.count == 1 ? "" : "s") · 2 filters", "filters: badge and window subtitle count",
+              "\(model.effectiveFilters.activeCount), \"\(model.browserCountText)\"")
+        // Another sidebar view keeps them.
+        model.query.scope = .location(id: seeded.location, subfolder: nil)
+        now = await shown(model)
+        check(ours(now) == [a] && now == coreShown(store, model) && !model.query.filters.isEmpty, "filters: kept on another sidebar view",
+              "\(now)")
+        model.query.scope = .all
+        model.clearFilters()
+
+        // Characters field: debounced 150 ms.
+        model.filters.requiredCharacters = "Ab"
+        check(model.query.filters.requiredCharacters.isEmpty && model.filterApplyTask != nil, "filters: typed characters wait for the debounce")
+        try? await Task.sleep(for: .milliseconds(300))
+        now = await shown(model)
+        check(model.query.filters.requiredCharacters == "Ab" && ours(now) == [a, b] && now == coreShown(store, model),
+              "filters: characters field applied after 150 ms", "\"\(model.query.filters.requiredCharacters)\" \(now)")
+
+        // "Supports the preview text": combined with the field, follows the preview text, off clears only the mirror.
+        model.preview.showsFontNames = false
+        model.preview.text = ""
+        check(!model.canFollowPreviewText, "filters: preview mirror unavailable while the preview is Dynamic")
+        model.preview.text = "Ắ Z"
+        check(model.canFollowPreviewText, "filters: preview mirror available with typed text")
+        model.followsPreviewText = true
+        now = await shown(model)
+        check(model.query.filters.requiredCharacters == "AbẮ Z" && ours(now) == [a] && now == coreShown(store, model),
+              "filters: preview text combined with the characters field", "\"\(model.query.filters.requiredCharacters)\" \(now)")
+        check(model.effectiveFilters.activeCount == 1, "filters: field + mirror count as one filter")
+        model.preview.text = "z"
+        try? await Task.sleep(for: .milliseconds(300))
+        now = await shown(model)
+        check(model.query.filters.requiredCharacters == "Abz" && ours(now) == [a, b] && now == coreShown(store, model),
+              "filters: follows a preview text change", "\"\(model.query.filters.requiredCharacters)\" \(now)")
+        model.followsPreviewText = false
+        check(model.query.filters.requiredCharacters == "Ab" && model.filters.requiredCharacters == "Ab",
+              "filters: turning the mirror off keeps the typed characters", "\"\(model.query.filters.requiredCharacters)\"")
+        model.followsPreviewText = true
+        model.preview.text = ""
+        check(!model.followsPreviewText && model.query.filters.requiredCharacters == "Ab",
+              "filters: an emptied (Dynamic) preview turns the mirror off", "\"\(model.query.filters.requiredCharacters)\"")
+
+        // Feature tags: 4 printable ASCII, no spaces; added once.
+        let valid = ["ss01", " cv01 ", "kern", "c2sc"].map(AppModel.validFeatureTag)
+        let invalid = ["", "abc", "abcde", "ab c", "abçd", "ab\td"].map(AppModel.validFeatureTag)
+        check(valid == ["ss01", "cv01", "kern", "c2sc"] && invalid.allSatisfy { $0 == nil }, "filters: feature tag validation",
+              "\(valid) \(invalid)")
+        let added = model.addFeatureTag("smcp"), again = model.addFeatureTag("smcp"), bad = model.addFeatureTag("sm")
+        check(added && again && !bad && model.filters.features == ["smcp"] && model.query.filters.features == ["smcp"],
+              "filters: tag added once, invalid tag refused", "\(model.filters.features)")
+        now = await shown(model)
+        check(ours(now) == [a] && now == coreShown(store, model), "filters: characters + typed feature tag equal the core query", "\(now)")
+        model.removeFeatureTag("smcp")
+        check(model.query.filters.features.isEmpty, "filters: tag removed")
+
+        // Script menu: Vietnamese and a script are one choice; kind tri-states.
+        model.filters.vietnamese = true
+        model.filters.variable = .exclude
+        now = await shown(model)
+        check(ours(now) == [a] && now == coreShown(store, model), "filters: Vietnamese + not variable equal the core query", "\(now)")
+
+        // Clear All.
+        model.followsPreviewText = false
+        model.filters.outline = .bitmap
+        model.clearFilters()
+        now = await shown(model)
+        check(now == unfiltered && model.query.filters.isEmpty && model.filters.isEmpty && !model.followsPreviewText
+              && model.effectiveFilters.activeCount == 0 && model.browserCountText == "\(unfiltered.count) fonts",
+              "filters: Clear All restores the unfiltered count", "\(now.count) of \(unfiltered.count), \"\(model.browserCountText)\"")
+        let persisted = UserDefaults.standard.dictionaryRepresentation().keys.filter { $0.localizedCaseInsensitiveContains("filter") }
+        check(persisted.isEmpty, "filters: nothing written to defaults", "\(persisted)")
     }
 }
 #endif

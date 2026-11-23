@@ -31,6 +31,8 @@ struct MainWindow: View {
             }
         }
         .navigationTitle(model.detail?.family ?? "Fontory")
+        // The browser's font count, which follows the toolbar filters (sidebar counts do not).
+        .navigationSubtitle(model.browserCountText)
         .onChange(of: colorScheme, initial: true) { _, scheme in model.isDarkAppearance = scheme == .dark }
         .background(BrowserWindowReader(model: model))
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search fonts")

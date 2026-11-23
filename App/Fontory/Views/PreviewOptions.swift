@@ -7,9 +7,15 @@ import SwiftUI
 
 /// Toolbar button that opens the preview popover below itself. The popover is an `NSPopover` with semitransient
 /// behavior, so the color panel opened from its color wells does not close it; clicking the browser or Esc does.
+/// The Filters button (`FiltersPopover.swift`) uses the same controller.
 struct PreviewOptionsButton: View {
     @Bindable var model: AppModel
-    @State private var controller = PreviewPopoverController()
+    @State private var controller = ToolbarPopoverController(isShowing: \.isShowingPreviewOptions,
+                                                             afterClose: \.afterPreviewOptionsClose) { model in
+        let hosting = NSHostingController(rootView: PreviewOptionsView(model: model))
+        hosting.sizingOptions = .preferredContentSize
+        return hosting
+    }
 
     var body: some View {
         Button {
@@ -30,9 +36,14 @@ struct PreviewOptionsButton: View {
     }
 }
 
+/// A toolbar button's popover (Preview, Filters), shown while `model[keyPath: isShowing]` is true.
 @MainActor
-final class PreviewPopoverController: NSObject, NSPopoverDelegate {
-    private static let log = Logger(subsystem: "local.fontory.app", category: "preview")
+final class ToolbarPopoverController: NSObject, NSPopoverDelegate {
+    private static let log = Logger(subsystem: "local.fontory.app", category: "popover")
+    private let isShowing: ReferenceWritableKeyPath<AppModel, Bool>
+    /// An action the model sets to run once the popover has finished closing; nil when the popover has none.
+    private let afterClose: ReferenceWritableKeyPath<AppModel, (@MainActor () -> Void)?>?
+    private let makeContent: @MainActor (AppModel) -> NSViewController
     weak var anchorView: NSView?
     private var popover: NSPopover?
     /// The popover between its will-close and did-close notifications; a did-close of any other popover is ignored,
@@ -41,6 +52,14 @@ final class PreviewPopoverController: NSObject, NSPopoverDelegate {
     private weak var model: AppModel?
     /// Event number of the mouse click that closed the popover. Mouse-down and mouse-up of one click share it.
     private var closingClick: Int?
+
+    init(isShowing: ReferenceWritableKeyPath<AppModel, Bool>,
+         afterClose: ReferenceWritableKeyPath<AppModel, (@MainActor () -> Void)?>? = nil,
+         content: @escaping @MainActor (AppModel) -> NSViewController) {
+        self.isShowing = isShowing
+        self.afterClose = afterClose
+        makeContent = content
+    }
 
     var isShown: Bool { popover != nil }
 
@@ -58,16 +77,14 @@ final class PreviewPopoverController: NSObject, NSPopoverDelegate {
         guard popover == nil else { return }
         self.model = model
         guard let view = anchorView, view.window != nil else {
-            Self.log.error("preview popover has no anchor in a window")
-            model.isShowingPreviewOptions = false
+            Self.log.error("toolbar popover has no anchor in a window")
+            model[keyPath: isShowing] = false
             return
         }
-        let hosting = NSHostingController(rootView: PreviewOptionsView(model: model))
-        hosting.sizingOptions = .preferredContentSize
         let popover = NSPopover()
         popover.behavior = .semitransient
         popover.animates = true
-        popover.contentViewController = hosting
+        popover.contentViewController = makeContent(model)
         popover.delegate = self
         self.popover = popover
         closingClick = nil
@@ -78,27 +95,27 @@ final class PreviewPopoverController: NSObject, NSPopoverDelegate {
         popover?.performClose(nil)
     }
 
-    /// The popover counts as closed from here on, so ⌥⌘P during the close animation opens a new one.
+    /// The popover counts as closed from here on, so ⌥⌘P (or the button) during the close animation opens a new one.
     func popoverWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSPopover, closing === popover else { return }
         popover = nil
         closingPopover = closing
         closingClick = NSApp.currentEvent.flatMap { Self.isMouseClick($0) ? $0.eventNumber : nil }
-        if model?.isShowingPreviewOptions == true { model?.isShowingPreviewOptions = false }
+        if let model, model[keyPath: isShowing] { model[keyPath: isShowing] = false }
     }
 
     func popoverDidClose(_ notification: Notification) {
         guard let closed = notification.object as? NSPopover, closed === closingPopover else { return }
         closingPopover = nil
-        guard let model, let action = model.afterPreviewOptionsClose else { return }
-        model.afterPreviewOptionsClose = nil
+        guard let model, let afterClose, let action = model[keyPath: afterClose] else { return }
+        model[keyPath: afterClose] = nil
         // Next turn of the run loop: never inside the close animation's CA commit.
         DispatchQueue.main.async { action() }
     }
 }
 
 /// Hands out the AppKit view it is placed in, to anchor the popover.
-private struct AnchorReader: NSViewRepresentable {
+struct AnchorReader: NSViewRepresentable {
     let onView: (NSView) -> Void
 
     func makeNSView(context: Context) -> NSView {

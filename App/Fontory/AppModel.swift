@@ -357,8 +357,11 @@ final class AppModel {
     var query: LibraryQuery {
         didSet {
             guard query != oldValue else { return }
-            // Searching, choosing another view or sorting leaves the family page for the browser.
-            if detail != nil { closeFamilyDetail() }
+            // Searching, choosing another view or sorting leaves the family page for the browser. A filters-only
+            // change does not (the preview text it may follow can be edited on the family page).
+            var unfiltered = query
+            unfiltered.filters = oldValue.filters
+            if detail != nil && unfiltered != oldValue { closeFamilyDetail() }
             if query.includeSystem != oldValue.includeSystem {
                 UserDefaults.standard.set(query.includeSystem, forKey: SettingsKey.showSystemFonts)
                 refreshCounts()
@@ -380,6 +383,8 @@ final class AppModel {
     }
     var preview = PreviewSettings() {
         didSet {
+            // Before the color adaptation below, which re-enters this observer with the text already changed.
+            previewDidChangeForFilters(from: oldValue)
             // Default colors follow the appearance (e.g. a preset saved in the other one). With @Observable,
             // assigning here runs this observer again, so assign only when something changes: it settles in one step.
             var adapted = preview
@@ -406,6 +411,18 @@ final class AppModel {
     private(set) var presets: [Preset] = []
     /// Drives the "save preset" name prompt.
     var isNamingPreset = false
+
+    // MARK: Filters (AppModel+Filters.swift)
+
+    /// The Filters popover's controls; `requiredCharacters` is its Characters field. Session only, never persisted.
+    /// The query gets `effectiveFilters` (these plus the preview text while it is followed).
+    var filters = LibraryFilters() { didSet { if filters != oldValue { filtersDidChange(from: oldValue) } } }
+    /// "Supports the preview text": the preview text's characters are required too, following it as it changes.
+    var followsPreviewText = false { didSet { if followsPreviewText != oldValue { applyFilters(debounced: false) } } }
+    /// Drives the Filters popover (toolbar button).
+    var isShowingFilters = false
+    /// Pending debounced hand-over of typed characters to `query.filters`.
+    @ObservationIgnored var filterApplyTask: Task<Void, Never>?
 
     // MARK: Results
 
@@ -634,6 +651,10 @@ final class AppModel {
     /// the scan cannot read does not loop).
     @ObservationIgnored private var requestedPendingPaths: Set<String> = []
     @ObservationIgnored private var started = false
+    #if DEBUG
+    /// Set by the smoke run: preview changes are not written to the user's defaults.
+    @ObservationIgnored var suppressesPreviewSaveForSmoke = false
+    #endif
 
     init() {
         SettingsKey.register()
@@ -729,6 +750,10 @@ final class AppModel {
     private static let previewSaveDelay: Duration = .milliseconds(300)
 
     private func schedulePreviewSave() {
+        #if DEBUG
+        // The smoke run shares the app's defaults domain with the user's Fontory.
+        if suppressesPreviewSaveForSmoke { return }
+        #endif
         previewSaveTask?.cancel()
         previewSaveTask = Task { [weak self] in
             try? await Task.sleep(for: Self.previewSaveDelay)

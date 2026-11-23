@@ -11,6 +11,7 @@ struct BrowserToolbar: ToolbarContent {
 
         ToolbarItemGroup {
             PreviewOptionsButton(model: model)
+            FiltersButton(model: model)
             if model.detail != nil {
                 // On the family page the size slider drives the page's own size (as do ⌘+/⌘−/⌘0 and its slider).
                 Slider(value: $model.detailPointSize, in: AppModel.detailPointSizeRange) { Text("Size") }
@@ -70,7 +71,8 @@ private struct SearchScopeMenu: View {
                 Text("Several words must all match")
             }
         } label: {
-            Label("Search Options", systemImage: "line.3.horizontal.decrease.circle")
+            // Not the funnel: that is the Filters button's symbol.
+            Label("Search Options", systemImage: "text.magnifyingglass")
         }
         .help("Search fields and syntax")
     }
