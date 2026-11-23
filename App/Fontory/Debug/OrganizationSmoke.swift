@@ -51,6 +51,7 @@ enum OrganizationSmoke {
             await smartEditorSteps(model, backend: backend)
             await reviewFixSteps(model, backend: backend)
             await filterSteps(model, backend: backend, folder: dir)
+            await duplicateSteps()
         } catch {
             check(false, "setup", "\(error)")
         }
@@ -1089,6 +1090,266 @@ enum OrganizationSmoke {
               "filters: Clear All restores the unfiltered count", "\(now.count) of \(unfiltered.count), \"\(model.browserCountText)\"")
         let persisted = UserDefaults.standard.dictionaryRepresentation().keys.filter { $0.localizedCaseInsensitiveContains("filter") }
         check(persisted.isEmpty, "filters: nothing written to defaults", "\(persisted)")
+    }
+
+    // MARK: Wave 3a task 5: Duplicates
+
+    /// Records unregistrations (and whether the file was still there), registers nothing on the Mac.
+    final class SmokeRegistrar: FontRegistrar, @unchecked Sendable {
+        private let lock = NSLock()
+        private var log: [(path: String, existed: Bool)] = []
+
+        var unregistered: [(path: String, existed: Bool)] { lock.withLock { log } }
+
+        func register(_ urls: [URL]) async -> [URL: RegistrationOutcome] {
+            Dictionary(urls.map { ($0, .ok) }, uniquingKeysWith: { a, _ in a })
+        }
+
+        func unregister(_ urls: [URL]) async -> [URL: RegistrationOutcome] {
+            lock.withLock { for url in urls { log.append((url.path, FileManager.default.fileExists(atPath: url.path))) } }
+            return Dictionary(urls.map { ($0, .ok) }, uniquingKeysWith: { a, _ in a })
+        }
+
+        func availablePostScriptNames() -> Set<String> { [] }
+    }
+
+    private static func indexedPaths(_ store: FontStore, _ locationID: Int64) -> [String: Int64] {
+        Dictionary(((try? store.files(in: locationID)) ?? []).map { ($0.relativePath, $0.id) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    private static func hashedFileCount(_ store: FontStore) -> Int {
+        (try? store.database.withLock {
+            let s = try store.database.prepare("SELECT COUNT(*) FROM files WHERE content_hash IS NOT NULL")
+            defer { s.reset() }
+            return try s.step() ? Int(s.int64(0)) : -1
+        }) ?? -1
+    }
+
+    /// A temporary library (its own registrar and settings suite) with copies of a system font: an OTF-named copy, a TTF
+    /// copy, a copy in a subfolder (for the Trash) and a padded copy (same font, different file).
+    private static func duplicateSteps() async {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FontoryDuplicatesSmoke-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let suiteName = "local.fontory.smoke.duplicates.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else { check(false, "duplicates: settings suite"); return }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+        let token = String(UUID().uuidString.prefix(8))
+        let subName = "Sub/Arial copy \(token).ttf"
+        let fonts = root.appendingPathComponent("Fonts", isDirectory: true)
+        let source = URL(fileURLWithPath: "/System/Library/Fonts/Supplemental/Arial Bold.ttf")
+        let standardBefore = ["previewSettings", SettingsKey.duplicateLocationRank, SettingsKey.skipDuplicatesOnImport]
+            .map { String(describing: UserDefaults.standard.object(forKey: $0)) }
+        let registrar = SmokeRegistrar()
+        let backend: LibraryBackend
+        do {
+            try fm.createDirectory(at: fonts.appendingPathComponent("Sub"), withIntermediateDirectories: true)
+            for name in ["Arial.otf", "Arial.ttf", subName] { try fm.copyItem(at: source, to: fonts.appendingPathComponent(name)) }
+            try (Data(contentsOf: source) + Data(count: 4096)).write(to: fonts.appendingPathComponent("Arial padded.ttf"))
+            backend = try LibraryBackend(databaseURL: root.appendingPathComponent("library.sqlite"), registrar: registrar)
+        } catch {
+            check(false, "duplicates: setup", "\(error)")
+            return
+        }
+        let store = backend.store
+        let model = AppModel()
+        model.settingsDefaults = suite
+        model.suppressesPreviewSaveForSmoke = true
+        await model.attachBackendForSmoke(backend)
+        guard let loc = await model.runBackground({ try backend.addFolder(fonts) }) else {
+            check(false, "duplicates: add the folder", model.alert?.message ?? ""); return
+        }
+        await model.reloadLocations()
+        model.rescan(loc.id)
+        await model.waitForScansForSmoke()
+        check(indexedPaths(store, loc.id).count == 4, "duplicates: 4 copies indexed", "\(indexedPaths(store, loc.id).keys.sorted())")
+
+        // No search starts while an unmount is handled; the handler starts it afterwards.
+        await model.waitForDuplicateSearchForSmoke()  // the count's grouping after the scan
+        model.unmountsInProgress = 1
+        let idle = model.duplicateRuns
+        model.findDuplicates()
+        check(model.duplicateRuns == idle && model.duplicateTask == nil, "duplicates: no search starts while an unmount is handled")
+        model.unmountsInProgress = 0
+        model.cancelDuplicateSearch()  // drops the pending start (the view is not showing)
+
+        // The sidebar row shows the view and starts hashing; an unmount cancels it before a file is read, and the
+        // view searches again once the volume is offline.
+        let runs = model.duplicateRuns, cancelled = model.duplicateRunsCancelled
+        model.applySidebarSelection([.duplicates], modifiers: [])
+        check(model.isShowingDuplicates && model.sidebarSelection == [.duplicates] && model.duplicateTask != nil && model.duplicateRuns == runs + 1,
+              "duplicates: the sidebar row shows the view and starts a search")
+        await model.handle(.unmounted(volumeURL: fonts))
+        await model.waitForDuplicateSearchForSmoke()
+        check(model.duplicateRunsCancelled == cancelled + 1 && hashedFileCount(store) == 0,
+              "duplicates: hashing cancelled on unmount, nothing hashed", "cancelled \(model.duplicateRunsCancelled - cancelled), hashed \(hashedFileCount(store))")
+        check(model.duplicateRuns == runs + 2 && model.location(loc.id)?.online == false,
+              "duplicates: searched again after the unmount (view showing)", "runs \(model.duplicateRuns - runs)")
+        await model.handle(.mounted(volumeURL: fonts, uuid: loc.volumeUUID))
+        await model.waitForScansForSmoke()
+        await model.waitForDuplicateSearchForSmoke()
+        await model.waitForFaceBackfillForSmoke()
+        check(model.location(loc.id)?.online == true, "duplicates: the folder is back online")
+
+        // Groups.
+        model.findDuplicates()
+        await model.waitForDuplicateSearchForSmoke()
+        var paths = indexedPaths(store, loc.id)
+        guard let otf = paths["Arial.otf"], let ttf = paths["Arial.ttf"], let sub = paths[subName], let padded = paths["Arial padded.ttf"] else {
+            check(false, "duplicates: indexed paths", "\(paths.keys.sorted())"); return
+        }
+        let exact = model.duplicateGroups.filter { $0.kind == .exact }
+        let sameFont = model.duplicateGroups.filter { $0.kind == .sameFont }
+        check(exact.count == 1 && Set(exact.first?.fileIDs ?? []) == [otf, ttf, sub], "duplicates: one exact group of the 3 copies",
+              "\(model.duplicateGroups.map { "\($0.kind) \($0.fileIDs)" })")
+        check(sameFont.count == 1 && sameFont.first?.fileIDs.contains(padded) == true && sameFont.first?.fileIDs.count == 2,
+              "duplicates: the padded file is a same-font group with the copies", "\(sameFont.map(\.fileIDs))")
+        check(model.duplicateGroups.first?.kind == .exact && hashedFileCount(store) == 3, "duplicates: exact groups first; only the 3 equal fingerprints hashed",
+              "hashed \(hashedFileCount(store))")
+        check(model.duplicateRows[exact.first?.faceIDs.first ?? -1]?.postScriptName == "Arial-BoldMT" && model.duplicateFiles[otf]?.size ?? 0 > 0,
+              "duplicates: rows carry the face and the file size")
+
+        // Select Copies to Remove keeps the OTF; same-font rows are never selected but can be checked by hand.
+        model.selectCopiesToRemove()
+        check(model.checkedDuplicateFiles == [ttf, sub], "duplicates: auto-select keeps the OTF over the TTF", "\(model.checkedDuplicateFiles)")
+        model.setDuplicateChecked(padded, true)
+        check(model.checkedDuplicateFiles.contains(padded), "duplicates: a same-font row can be checked by hand")
+        model.setDuplicateChecked(padded, false)
+
+        // Remove from Library: excluded, a rescan does not bring it back, Include Again does. A tagged face counts in
+        // the "N fonts removed" notice.
+        guard let subFace = model.duplicateFacesByFile[sub]?.first?.id, let tag = await model.createTag(name: "Dup Smoke", parentID: nil) else {
+            check(false, "duplicates: tag setup"); return
+        }
+        await model.setTag(tag, onFaces: [subFace], included: true)
+        model.checkedDuplicateFiles = [sub]
+        await model.removeCheckedFromLibrary()
+        await model.waitForDuplicateSearchForSmoke()
+        paths = indexedPaths(store, loc.id)
+        check(paths[subName] == nil && fm.fileExists(atPath: fonts.appendingPathComponent(subName).path)
+              && model.excludedFiles == [ExcludedFile(locationID: loc.id, relativePath: subName)],
+              "duplicates: Remove from Library excludes the file and leaves it on disk", "\(model.excludedFiles)")
+        check(model.removalNotices[loc.id] == 1, "duplicates: the tagged face counts in the fonts-removed notice", "\(model.removalNotices)")
+        check(model.checkedDuplicateFiles.isEmpty && !model.duplicateGroups.contains { $0.fileIDs.contains(sub) },
+              "duplicates: the removed file leaves the groups")
+        model.rescan(loc.id)
+        await model.waitForScansForSmoke()
+        check(indexedPaths(store, loc.id)[subName] == nil, "duplicates: a rescan does not bring it back")
+        if let excluded = model.excludedFiles.first { await model.includeAgain(excluded) }
+        await model.waitForScansForSmoke()
+        await model.waitForDuplicateSearchForSmoke()
+        paths = indexedPaths(store, loc.id)
+        check(paths[subName] != nil && model.excludedFiles.isEmpty, "duplicates: Include Again rescans and brings it back")
+        guard let sub2 = paths[subName] else { return }
+
+        // Protected copies: a user-installed one is kept and never checked; a file active outside Fontory neither.
+        let installed = root.appendingPathComponent("Installed", isDirectory: true)
+        let instLoc: LocationRecord
+        do {
+            try fm.createDirectory(at: installed, withIntermediateDirectories: true)
+            try fm.copyItem(at: source, to: installed.appendingPathComponent("Arial.ttf"))
+            let ref = try VolumeIdentity.ref(for: installed)
+            instLoc = try store.upsertLocation(kind: .userInstalled, volumeUUID: ref.volumeUUID, relativePath: ref.relativePath,
+                                               displayName: "Installed", lastKnownPath: installed.path)
+        } catch {
+            check(false, "duplicates: installed location", "\(error)"); return
+        }
+        await model.reloadLocations()
+        model.rescan(instLoc.id)
+        await model.waitForScansForSmoke()
+        await model.waitForDuplicateSearchForSmoke()
+        guard let inst = indexedPaths(store, instLoc.id)["Arial.ttf"] else { check(false, "duplicates: installed copy indexed"); return }
+        model.selectCopiesToRemove()
+        check(model.checkedDuplicateFiles == [otf, ttf, sub2], "duplicates: a user-installed copy is the one kept",
+              "\(model.checkedDuplicateFiles) installed \(inst)")
+        model.setDuplicateChecked(inst, true)
+        check(!model.checkedDuplicateFiles.contains(inst) && model.isProtectedDuplicate(inst), "duplicates: a user-installed copy cannot be checked")
+        _ = try? store.setExternalActive(fileIDs: [otf], true)
+        model.findDuplicates()
+        await model.waitForDuplicateSearchForSmoke()
+        check(model.isProtectedDuplicate(otf) && !model.checkedDuplicateFiles.contains(otf), "duplicates: a copy active outside Fontory is unchecked and locked")
+        model.checkedDuplicateFiles = [inst, otf]  // forced past the UI
+        check(model.checkedRemovableFiles.isEmpty, "duplicates: protected files are filtered out of the checked set")
+        await model.removeCheckedFromLibrary()
+        let forced = await model.trashFiles([inst, otf])
+        model.alert = nil
+        check(forced.recycled.isEmpty && forced.failures.count == 2 && indexedPaths(store, instLoc.id)["Arial.ttf"] == inst
+              && indexedPaths(store, loc.id)["Arial.otf"] == otf && fm.fileExists(atPath: installed.appendingPathComponent("Arial.ttf").path)
+              && fm.fileExists(atPath: fonts.appendingPathComponent("Arial.otf").path) && model.excludedFiles.isEmpty,
+              "duplicates: protected rows are never removed or trashed", "\(forced.failures.map(\.message))")
+        _ = try? store.setExternalActive(fileIDs: [otf], false)
+
+        // Move to Trash: confirmed with count and size, deactivates first, recycles, deletes the row without exclusion.
+        let sub2Face = (try? store.rows(ids: try store.faceIDs(for: LibraryQuery(scope: .location(id: loc.id, subfolder: nil), includeSystem: true))))?
+            .values.first { $0.fileID == sub2 }?.id
+        guard let sub2Face else { check(false, "duplicates: face of the subfolder copy"); return }
+        let report = await backend.activation.set([sub2Face], to: .on, force: true)
+        check(report.failures.isEmpty && (try? store.rows(ids: [sub2Face]))?[sub2Face]?.activation == .on, "duplicates: the copy to trash is active in Fontory")
+        model.findDuplicates()
+        await model.waitForDuplicateSearchForSmoke()
+        model.checkedDuplicateFiles = [sub2]
+        model.lastTrashResult = nil
+        model.moveCheckedToTrash()
+        let size = ByteCountFormatter.string(fromByteCount: model.duplicateFiles[sub2]?.size ?? -1, countStyle: .file)
+        check(model.alert?.actionTitle == "Move to Trash" && model.alert?.isDestructive == true && model.alert?.title.contains("1 font file") == true
+              && model.alert?.message.hasPrefix("1 file, \(size) in total.") == true && fm.fileExists(atPath: fonts.appendingPathComponent(subName).path),
+              "duplicates: Move to Trash asks first with the file count and total size", model.alert?.message ?? "no alert")
+        model.alert?.action?()
+        model.alert = nil
+        for _ in 0..<500 where model.lastTrashResult == nil { try? await Task.sleep(for: .milliseconds(20)) }
+        let trashed = model.lastTrashResult
+        let subPath = fonts.appendingPathComponent(subName).path
+        let unregisteredFirst = registrar.unregistered.contains { $0.path.hasSuffix("Arial copy \(token).ttf") && $0.existed }
+        check(trashed?.recycled == [sub2] && !fm.fileExists(atPath: subPath), "duplicates: Move to Trash recycles the file (gone from its path)",
+              "\(String(describing: trashed?.failures))")
+        check(unregisteredFirst, "duplicates: the active copy was deactivated before it was trashed", "\(registrar.unregistered)")
+        check(indexedPaths(store, loc.id)[subName] == nil && model.excludedFiles.isEmpty, "duplicates: the trashed file leaves the index without an exclusion")
+        // Our temporary copy only: take it out of the Trash again.
+        for url in trashed?.trashedURLs ?? [] where url.lastPathComponent.contains(token) { try? fm.removeItem(at: url) }
+
+        // An already-missing file is reported per file and stays in the index.
+        try? fm.removeItem(at: fonts.appendingPathComponent("Arial.ttf"))
+        let missing = await model.trashFiles([ttf])
+        check(missing.recycled.isEmpty && missing.failures.map(\.fileID) == [ttf] && missing.failures.first?.message == "The file is missing."
+              && model.alert?.message.contains("Arial.ttf") == true && indexedPaths(store, loc.id)["Arial.ttf"] == ttf,
+              "duplicates: a missing file is reported per file", model.alert?.message ?? "no alert")
+        model.alert = nil
+
+        // Settings: skip duplicates on import (scanner and suite), location rank (suite), nothing in the user's defaults.
+        model.skipDuplicatesOnImport = true
+        try? await Task.sleep(for: .milliseconds(100))
+        let more = root.appendingPathComponent("More", isDirectory: true)
+        try? fm.createDirectory(at: more, withIntermediateDirectories: true)
+        try? fm.copyItem(at: source, to: more.appendingPathComponent("Arial more.ttf"))
+        if let moreLoc = await model.runBackground({ try backend.addFolder(more) }) {
+            await model.reloadLocations()
+            model.rescan(moreLoc.id)
+            await model.waitForScansForSmoke()
+            check(model.scanProgress[moreLoc.id]?.skippedDuplicates == 1 && indexedPaths(store, moreLoc.id).isEmpty && suite.bool(forKey: SettingsKey.skipDuplicatesOnImport),
+                  "duplicates: Skip duplicates on import skips the copy and reports it", "\(String(describing: model.scanProgress[moreLoc.id]))")
+            model.duplicateLocationRank = [moreLoc.id, loc.id]
+            let stored = (suite.array(forKey: SettingsKey.duplicateLocationRank) as? [NSNumber])?.map(\.int64Value)
+            check(stored == [moreLoc.id, loc.id] && Array(model.effectiveLocationRank.prefix(2)) == [moreLoc.id, loc.id],
+                  "duplicates: location rank persisted as ids", "\(String(describing: stored))")
+            model.moveLocationRank(from: [0], to: 2)
+            check(Array(model.duplicateLocationRank.prefix(2)) == [loc.id, moreLoc.id], "duplicates: reordering the rank")
+        } else {
+            check(false, "duplicates: add More", model.alert?.message ?? "")
+        }
+        model.skipDuplicatesOnImport = false
+
+        // Leaving the view, quitting, and the user's defaults.
+        model.applySidebarSelection([.scope(.all)], modifiers: [])
+        check(!model.isShowingDuplicates, "duplicates: another sidebar row shows the browser again")
+        model.preview.text = "smoke"
+        model.flushPreviewSave()
+        await model.stopDuplicateSearch()
+        let stopped = model.duplicateRuns
+        model.findDuplicates()
+        check(model.duplicateRuns == stopped && model.duplicateTask == nil, "duplicates: no search after quit")
+        let standardAfter = ["previewSettings", SettingsKey.duplicateLocationRank, SettingsKey.skipDuplicatesOnImport]
+            .map { String(describing: UserDefaults.standard.object(forKey: $0)) }
+        check(standardAfter == standardBefore, "duplicates: nothing written to the user's defaults")
     }
 }
 #endif

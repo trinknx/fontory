@@ -19,7 +19,7 @@ final class PreviewPipeline {
     /// Who asked for a render. Each lane keeps at most one pending render per face, so the family page's header,
     /// its style rows and the (hidden) browser never cancel each other's renders of the same face.
     enum Lane: Hashable, Sendable {
-        case browser, detailHeader, detailStyles
+        case browser, detailHeader, detailStyles, duplicates
     }
 
     private struct OperationKey: Hashable {

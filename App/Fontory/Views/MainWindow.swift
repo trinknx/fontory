@@ -16,7 +16,7 @@ struct MainWindow: View {
                 .navigationSplitViewColumnWidth(min: 190, ideal: 240, max: 380)
         } detail: {
             // The browser stays alive (hidden) under the family page, so Back finds its scroll position and selection.
-            let browserHidden = model.detail != nil
+            let browserHidden = model.detail != nil || model.isShowingDuplicates
             ZStack {
                 // Grid and list are the same card view: the list keeps one font per row. Each mode keeps its own size.
                 let mode = model.viewMode
@@ -25,14 +25,17 @@ struct MainWindow: View {
                              selection: model.selection, quickCollection: model.quickCollectionIDs, query: model.query,
                              isHidden: browserHidden)
                     .id(mode)
-                if let detail = model.detail {
+                if model.isShowingDuplicates {
+                    DuplicatesView(model: model)
+                        .background(.background)
+                } else if let detail = model.detail {
                     FamilyDetailView(model: model, detail: detail)
                 }
             }
         }
-        .navigationTitle(model.detail?.family ?? "Fontory")
+        .navigationTitle(model.isShowingDuplicates ? "Duplicates" : model.detail?.family ?? "Fontory")
         // The browser's font count, which follows the toolbar filters (sidebar counts do not).
-        .navigationSubtitle(model.browserCountText)
+        .navigationSubtitle(model.isShowingDuplicates ? duplicatesSubtitle : model.browserCountText)
         .onChange(of: colorScheme, initial: true) { _, scheme in model.isDarkAppearance = scheme == .dark }
         .background(BrowserWindowReader(model: model))
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search fonts")
@@ -51,6 +54,11 @@ struct MainWindow: View {
         } message: {
             Text(model.preview.text)
         }
+    }
+
+    private var duplicatesSubtitle: String {
+        let n = model.duplicateGroups.count
+        return "\(n.formatted()) group\(n == 1 ? "" : "s")"
     }
 }
 

@@ -324,6 +324,10 @@ enum SettingsKey {
     static let textAlignment = "detail.text.alignment"
     static let textPointSize = "detail.text.pointSize"
     static let textLineHeight = "detail.text.lineHeight"
+    /// Settings → Duplicates: location ids, highest rank first ("Select Copies to Remove" keeps the higher one).
+    static let duplicateLocationRank = "duplicates.locationRank"
+    /// Settings → Duplicates: "Skip duplicates on import" (default off).
+    static let skipDuplicatesOnImport = "duplicates.skipOnImport"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -333,6 +337,7 @@ enum SettingsKey {
             glyphCellSize: AppModel.defaultGlyphCellSize, glyphOrder: GlyphOrder.unicode.rawValue,
             textSample: TextSample.english.rawValue, textColumns: 1, textAlignment: BodyTextAlignment.left.rawValue,
             textPointSize: AppModel.defaultTextPointSize, textLineHeight: AppModel.defaultTextLineHeight,
+            skipDuplicatesOnImport: false,
         ])
         // Activation is always restored at launch now; drop the old "restore on launch" switch.
         UserDefaults.standard.removeObject(forKey: "restoreOnLaunch")
@@ -362,9 +367,14 @@ final class AppModel {
             var unfiltered = query
             unfiltered.filters = oldValue.filters
             if detail != nil && unfiltered != oldValue { closeFamilyDetail() }
+            // The Duplicates view follows Show System Fonts (it searches again); anything else leaves it.
+            var browsing = unfiltered
+            browsing.includeSystem = oldValue.includeSystem
+            if isShowingDuplicates && browsing != oldValue { closeDuplicates() }
             if query.includeSystem != oldValue.includeSystem {
                 UserDefaults.standard.set(query.includeSystem, forKey: SettingsKey.showSystemFonts)
                 refreshCounts()
+                startDuplicateSearch(hashing: false)
             }
             scheduleRefresh()
         }
@@ -537,9 +547,10 @@ final class AppModel {
 
     private(set) var locations: [LocationRecord] = []
     private(set) var scanProgress: [Int64: ScanProgress] = [:]
-    /// Per location: faces with activation or notes that scans removed because their files are gone, accumulated
+    /// Per location: faces with activation, tags or notes that scans removed because their files are gone (or that
+    /// Duplicates removed from the library or moved to the Trash), accumulated
     /// until the user dismisses the notice (so a later clean rescan does not hide it).
-    private(set) var removalNotices: [Int64: Int] = [:]
+    var removalNotices: [Int64: Int] = [:]
     var alert: AlertItem?
     private(set) var isReady = false
 
@@ -602,6 +613,59 @@ final class AppModel {
     /// Throttle of the Style counts reload while a backfill runs.
     @ObservationIgnored var styleCountsReloadTask: Task<Void, Never>?
     @ObservationIgnored var lastStyleCountsReload: ContinuousClock.Instant?
+
+    // MARK: Duplicates (actions in AppModel+Duplicates.swift)
+
+    /// The Duplicates view is shown in place of the browser (Library → Duplicates).
+    var isShowingDuplicates = false
+    /// Exact groups first, then same-font groups (`DuplicateFinder.groups`), from the last search.
+    var duplicateGroups: [DuplicateGroup] = []
+    /// Every face of the listed files, by face id (rows of the view and the keep policy).
+    var duplicateRows: [Int64: FaceRow] = [:]
+    /// The listed files, by file id (size, format, date added).
+    var duplicateFiles: [Int64: FileRecord] = [:]
+    /// `duplicateRows` by file (protection and activation are per file).
+    var duplicateFacesByFile: [Int64: [FaceRow]] = [:]
+    /// Files checked for removal. Protected files (system, user-installed, active outside Fontory) never are.
+    var checkedDuplicateFiles: Set<Int64> = []
+    /// Hashing progress while a search hashes candidate files.
+    var duplicateProgress: BackfillProgress?
+    /// A search (hashing, then grouping) is running.
+    var isFindingDuplicates = false
+    /// Remove from Library or Move to Trash is running.
+    var isRemovingDuplicates = false
+    /// Settings → Duplicates: excluded files (removed from the library, skipped by rescans).
+    var excludedFiles: [ExcludedFile] = []
+    /// Settings → Duplicates: location ids, highest rank first. Persisted in `settingsDefaults`.
+    var duplicateLocationRank: [Int64] {
+        didSet {
+            if duplicateLocationRank != oldValue {
+                settingsDefaults.set(duplicateLocationRank.map { NSNumber(value: $0) }, forKey: SettingsKey.duplicateLocationRank)
+            }
+        }
+    }
+    /// Settings → Duplicates: "Skip duplicates on import". Persisted in `settingsDefaults`, handed to the scanner.
+    var skipDuplicatesOnImport: Bool {
+        didSet {
+            guard skipDuplicatesOnImport != oldValue else { return }
+            settingsDefaults.set(skipDuplicatesOnImport, forKey: SettingsKey.skipDuplicatesOnImport)
+            let skip = skipDuplicatesOnImport
+            if let scanner = backend?.scanner { Task { await scanner.setSkipFingerprintDuplicates(skip) } }
+        }
+    }
+    /// Where the Duplicates settings are written (the smoke run uses its own suite).
+    @ObservationIgnored var settingsDefaults: UserDefaults = .standard
+    /// The running search (at most one); it clears itself when it ends.
+    @ObservationIgnored var duplicateTask: Task<Void, Never>?
+    /// A start asked for while a search ran (or an unmount was handled): run again afterwards; true when it must hash.
+    @ObservationIgnored var duplicateRerun: Bool?
+    /// Set when quitting: no new searches.
+    @ObservationIgnored var duplicateSearchStopped = false
+    /// Searches started, and searches that ended cancelled (smoke checks).
+    @ObservationIgnored var duplicateRuns = 0
+    @ObservationIgnored var duplicateRunsCancelled = 0
+    /// The last Move to Trash: per-file failures (file id → message) and the files recycled (smoke checks).
+    @ObservationIgnored var lastTrashResult: TrashResult?
 
     // MARK: Notes (actions in AppModel+Notes.swift)
 
@@ -681,6 +745,8 @@ final class AppModel {
         textPointSize = Self.textPointSizeRange.contains(textSize) ? textSize : Self.defaultTextPointSize
         let lineHeight = defaults.double(forKey: SettingsKey.textLineHeight)
         textLineHeight = Self.textLineHeightRange.contains(lineHeight) ? lineHeight : Self.defaultTextLineHeight
+        duplicateLocationRank = (defaults.array(forKey: SettingsKey.duplicateLocationRank) as? [NSNumber])?.map(\.int64Value) ?? []
+        skipDuplicatesOnImport = defaults.bool(forKey: SettingsKey.skipDuplicatesOnImport)
     }
 
     // MARK: Startup
@@ -690,9 +756,10 @@ final class AppModel {
         started = true
         // 1. Open the database.
         do {
+            let skipDuplicates = skipDuplicatesOnImport
             let (backend, presetStore) = try await Task.detached(priority: .userInitiated) {
                 let dir = try LibraryBackend.dataDirectory()
-                return (try LibraryBackend(databaseURL: dir.appendingPathComponent("library.sqlite")),
+                return (try LibraryBackend(databaseURL: dir.appendingPathComponent("library.sqlite"), skipDuplicatesOnImport: skipDuplicates),
                         PresetStore(url: dir.appendingPathComponent("presets.json")))
             }.value
             self.backend = backend
@@ -737,6 +804,8 @@ final class AppModel {
         await loadQuickCollection()
         // 8. Classify faces indexed by an older classifier (runs again after every mount and scan).
         startFaceBackfill()
+        // 9. The Duplicates row's group count, from the hashes already stored (the view hashes when opened).
+        startDuplicateSearch(hashing: false)
     }
 
     func prepareForQuit() async {
@@ -744,6 +813,7 @@ final class AppModel {
         await flushNotes()
         await quickCollectionWriteChain?.value
         await stopFaceBackfill()
+        await stopDuplicateSearch()
         await backend?.activation.prepareForQuit()
     }
 
@@ -765,6 +835,9 @@ final class AppModel {
 
     /// Writes a pending preview-settings change now (at quit).
     func flushPreviewSave() {
+        #if DEBUG
+        if suppressesPreviewSaveForSmoke { return }
+        #endif
         guard let task = previewSaveTask else { return }
         task.cancel()
         previewSaveTask = nil
@@ -978,7 +1051,7 @@ final class AppModel {
         }.value
     }
 
-    private func invalidateRows() {
+    func invalidateRows() {
         rowCache.removeAll()
         // Fetches in flight return rows of the old version and are dropped, so their ids must be requestable again.
         pendingRowIDs.removeAll()
@@ -989,7 +1062,7 @@ final class AppModel {
 
     /// A rescan may have replaced files: glyphs are listed and drawn afresh. (Not on activation changes, which
     /// also invalidate the rows but leave the files alone.)
-    private func forgetGlyphs() {
+    func forgetGlyphs() {
         glyphsVersion &+= 1
         glyphInventories.removeAll()
         glyphPipeline.removeAllImages()
@@ -1129,7 +1202,7 @@ final class AppModel {
     }
 
     /// Drops the preview renderer's parsed fonts for a location's files (they may hold the files open).
-    private func forgetPreviewFonts(of id: Int64) {
+    func forgetPreviewFonts(of id: Int64) {
         guard let loc = location(id) else { return }
         previewRenderer.forgetFonts(under: URL(fileURLWithPath: loc.lastKnownPath))
     }
@@ -1143,7 +1216,7 @@ final class AppModel {
         present(report, state: .on, context: "Re-activating moved fonts")
     }
 
-    private func scanFinished() async {
+    func scanFinished() async {
         forgetGlyphs()
         invalidateRows()
         await reloadLocations()
@@ -1155,6 +1228,9 @@ final class AppModel {
         await loadQuickCollection()
         // Moved files keep their face rows (and their old class version).
         startFaceBackfill()
+        // Changed files lost their hashes, new ones may be copies: the Duplicates view searches again, else its count
+        // follows from the hashes stored.
+        startDuplicateSearch(hashing: isShowingDuplicates)
     }
 
     func relink(_ id: Int64, to url: URL) async {
@@ -1243,7 +1319,7 @@ final class AppModel {
         }
     }
 
-    private func handle(_ event: VolumeEvent) async {
+    func handle(_ event: VolumeEvent) async {
         guard let backend else { return }
         switch event {
         case .mounted(_, let uuid):
@@ -1279,6 +1355,8 @@ final class AppModel {
             // The backfill may be reading from the volume; no run starts until the locations are offline.
             unmountsInProgress += 1
             cancelFaceBackfill()
+            // Hashing may be reading from the volume too.
+            cancelDuplicateSearch()
             previewRenderer.forgetFonts(under: volumeURL)
             for id in ids { forgetPreviewFonts(of: id) }
             for i in locations.indices where ids.contains(locations[i].id) { locations[i].online = false }
@@ -1292,6 +1370,7 @@ final class AppModel {
             _ = await runBackground { try backend.markOffline(ids) }
             unmountsInProgress -= 1
             startFaceBackfill()
+            duplicateSearchAfterUnmount()
             await reloadLocations()
             invalidateRows()
             refreshCounts()
@@ -1319,7 +1398,7 @@ final class AppModel {
         await setActivation(rows.map(\.id), state)
     }
 
-    private func afterActivationChange() {
+    func afterActivationChange() {
         invalidateRows()
         refreshCounts()
         switch query.scope {
@@ -1335,7 +1414,7 @@ final class AppModel {
     }
 
     /// Turns an activation report into one alert: conflicts (with "Activate Anyway") and failures.
-    private func present(_ report: ActivationReport, state: ActivationState, context: String?) {
+    func present(_ report: ActivationReport, state: ActivationState, context: String?) {
         guard !report.conflicts.isEmpty || !report.failures.isEmpty else { return }
         var lines: [String] = []
         if let general = report.failures[-1] { lines.append("Error: \(general)") }
@@ -1434,6 +1513,7 @@ final class AppModel {
             let group = await runBackground { try backend.store.family(named: name, includeSystem: includeSystem) } ?? nil
             guard generation == detailGeneration else { return }
             let ids = group?.faceIDs ?? [faceID]
+            if isShowingDuplicates { closeDuplicates() }
             detail = FamilyDetail(family: group?.name ?? name, faceIDs: ids, representativeID: group?.representativeID ?? faceID)
             detailTab = .styles
             detailSelection = ids.contains(faceID) ? [faceID] : []
@@ -1465,6 +1545,7 @@ final class AppModel {
     /// Back to the browser, as it was.
     func closeFamilyDetail() {
         detailGeneration += 1
+        if isShowingDuplicates { closeDuplicates() }
         guard detail != nil else { return }
         detail = nil
         detailSelection = []
@@ -1586,6 +1667,11 @@ final class AppModel {
     }
 
     func refreshNowForSmoke() async { await refreshNow() }
+
+    /// Waits until no scan runs.
+    func waitForScansForSmoke() async {
+        while let task = scanTasks.values.first { await task.value }
+    }
     #endif
 
     // MARK: Helpers

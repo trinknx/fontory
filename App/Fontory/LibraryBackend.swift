@@ -43,12 +43,15 @@ final class LibraryBackend: Sendable {
         return dir
     }
 
-    init(databaseURL: URL) throws {
+    /// `skipDuplicatesOnImport` is the "Skip duplicates on import" setting (`LibraryScanner.setSkipFingerprintDuplicates`
+    /// changes it later). `registrar` is replaced only by the smoke run.
+    init(databaseURL: URL, skipDuplicatesOnImport: Bool = false, registrar: FontRegistrar = CoreTextRegistrar()) throws {
         let store = try FontStore(database: Database(path: databaseURL.path))
         self.store = store
-        self.scanner = LibraryScanner(store: store, rootURL: { LibraryBackend.resolve($0) })
+        self.scanner = LibraryScanner(store: store, rootURL: { LibraryBackend.resolve($0) },
+                                      skipFingerprintDuplicates: skipDuplicatesOnImport)
         // Scope stays `.session` (CoreTextRegistrar's default): the DB, not the system, remembers what is on.
-        self.activation = ActivationService(store: store, registrar: CoreTextRegistrar())
+        self.activation = ActivationService(store: store, registrar: registrar)
         self.inventory = SystemFontInventory(store: store)
     }
 

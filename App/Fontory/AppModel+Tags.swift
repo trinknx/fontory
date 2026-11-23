@@ -6,6 +6,8 @@ import SwiftUI
 enum SidebarItem: Hashable, Sendable {
     case scope(LibraryQuery.Scope)
     case tag(Int64)
+    /// Library → Duplicates: the Duplicates view, not a browser scope.
+    case duplicates
 }
 
 extension TagError {
@@ -66,6 +68,7 @@ extension AppModel {
 
     /// The sidebar's selection, derived from the query scope.
     var sidebarSelection: Set<SidebarItem> {
+        if isShowingDuplicates { return [.duplicates] }
         if case .tags(let picks) = query.scope { return Set(picks.map { .tag($0.tagID) }) }
         return [.scope(query.scope)]
     }
@@ -88,7 +91,15 @@ extension AppModel {
         } else {
             clicked = nil
         }
+        if clicked == .duplicates {
+            showDuplicates()
+            return
+        }
+        // Any other row leaves the Duplicates view for the browser (also when it picks the scope already set).
+        if isShowingDuplicates { closeDuplicates() }
         switch clicked {
+        case .duplicates?:
+            break
         case .tag(let id)?:
             if modifiers.contains(.option) {
                 optionClickTag(id, modifiers: modifiers, time: time)
@@ -103,7 +114,7 @@ extension AppModel {
             if !tagIDs.isEmpty {
                 let current = Dictionary(selectedTagPicks.map { ($0.tagID, $0) }, uniquingKeysWith: { a, _ in a })
                 query.scope = .tags(tagIDs.sorted().map { current[$0] ?? tagPick($0) })
-            } else if case .scope(let scope)? = new.first {
+            } else if let scope = new.lazy.compactMap({ if case .scope(let s) = $0 { s } else { nil } }).first {
                 query.scope = scope
             }
         }

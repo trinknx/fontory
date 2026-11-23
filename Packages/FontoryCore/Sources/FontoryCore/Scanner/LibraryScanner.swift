@@ -74,7 +74,8 @@ public actor LibraryScanner {
     private let onPhase: (@Sendable (ScanProgress.Phase) -> Void)?
     /// When true, a new file whose fingerprint equals an indexed file in another location is not indexed (counted in
     /// `ScanProgress.skippedDuplicates`). Such a file is fingerprinted again on every scan. Moves are not affected.
-    private let skipFingerprintDuplicates: Bool
+    /// A change applies to scans started afterwards.
+    private var skipFingerprintDuplicates: Bool
     private var runs: [Int64: (token: UInt64, task: Task<Void, Never>)] = [:]
     private var nextToken: UInt64 = 0
 
@@ -107,6 +108,11 @@ public actor LibraryScanner {
         runs[locationID] = (token, task)
         continuation.onTermination = { _ in task.cancel() }
         return stream
+    }
+
+    /// The "Skip duplicates on import" setting; applies to scans started afterwards.
+    public func setSkipFingerprintDuplicates(_ skip: Bool) {
+        skipFingerprintDuplicates = skip
     }
 
     public func cancel(locationID: Int64) {

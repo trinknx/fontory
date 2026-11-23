@@ -2,14 +2,20 @@ import FontoryCore
 import SwiftUI
 
 struct SettingsView: View {
+    @Environment(AppModel.self) private var model
+
     var body: some View {
         TabView {
             GeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
             LocationSettings()
                 .tabItem { Label("Locations", systemImage: "folder") }
+            DuplicateSettings()
+                .tabItem { Label("Duplicates", systemImage: "doc.on.doc") }
         }
-        .frame(width: 560, height: 380)
+        .frame(width: 560, height: 460)
+        // One presenter for every tab.
+        .modelAlert(model, inSettings: true)
     }
 }
 
@@ -100,7 +106,6 @@ private struct LocationSettings: View {
             }
         }
         .padding()
-        .modelAlert(model, inSettings: true)
     }
 
     private var selected: LocationRecord? { selection.flatMap(model.location) }
@@ -121,5 +126,63 @@ private struct LocationSettings: View {
         case .aborted: return "Scan stopped"
         default: return loc.lastScan.map { $0.formatted(.relative(presentation: .named)) } ?? "Not scanned"
         }
+    }
+}
+
+/// Settings → Duplicates: the location ranking "Select Copies to Remove" follows, "Skip duplicates on import", and the
+/// files removed from the library with Include Again.
+private struct DuplicateSettings: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Keep copies in").font(.headline)
+            Text("Select Copies to Remove keeps the active copy, then the better format (OTF, TTF, TTC, WOFF2, WOFF), then the copy in the location higher in this list. Drag to reorder.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            List {
+                ForEach(model.effectiveLocationRank, id: \.self) { id in
+                    if let loc = model.location(id) {
+                        HStack {
+                            Image(systemName: "line.3.horizontal").foregroundStyle(.tertiary)
+                            Text(loc.displayName)
+                            Spacer()
+                            Text(loc.lastKnownPath).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        }
+                    }
+                }
+                .onMove { model.moveLocationRank(from: $0, to: $1) }
+            }
+            .frame(height: 120)
+
+            Toggle("Skip duplicates on import", isOn: $model.skipDuplicatesOnImport)
+            Text("A new file whose content matches a file already in another location is not added. The scan reports how many were skipped.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Excluded files").font(.headline).padding(.top, 4)
+            if model.excludedFiles.isEmpty {
+                Text("Files removed from the library with Remove from Library are listed here.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            } else {
+                List(model.excludedFiles) { file in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text((file.relativePath as NSString).lastPathComponent).lineLimit(1)
+                            Text("\(model.location(file.locationID)?.displayName ?? "Unknown location") · \(file.relativePath)")
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer()
+                        Button("Include Again") { Task { await model.includeAgain(file) } }
+                            .controlSize(.small)
+                            .help("Deletes the exclusion and rescans the location")
+                    }
+                }
+            }
+        }
+        .padding()
+        .task { await model.loadExcludedFiles() }
     }
 }

@@ -31,6 +31,10 @@ struct SidebarView: View {
                         Button("Clear…") { model.confirmClearQuickCollection() }
                             .disabled(model.quickCollectionIDs.isEmpty)
                     }
+                Label("Duplicates", systemImage: "doc.on.doc")
+                    .badge(model.duplicateGroups.count)
+                    .tag(SidebarItem.duplicates)
+                    .help("Files holding the same font: exact copies and other versions or formats")
                 if let progress = model.faceBackfillProgress, progress.total > 0 {
                     FaceBackfillRow(progress: progress)
                 }
@@ -252,7 +256,10 @@ private struct LocationRow: View {
     }
 
     @ViewBuilder private var status: some View {
-        if let progress {
+        let removed = model.removalNotices[location.id] ?? 0
+        if progress == nil && removed > 0 {
+            warningsButton(progress: nil, removed: removed)
+        } else if let progress {
             switch progress.phase {
             case .enumerating, .applying:
                 ProgressView().controlSize(.mini)
@@ -269,20 +276,27 @@ private struct LocationRow: View {
                     .foregroundStyle(.red)
                     .help(reason)
             case .done:
-                let removed = model.removalNotices[location.id] ?? 0
                 if progress.unreadableCount > 0 || progress.failed > 0 || removed > 0 {
-                    Button { showingWarnings = true } label: {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
-                    }
-                    .buttonStyle(.borderless)
-                    .help(removed > 0 ? "Fonts with activation or notes were removed" : "Some files could not be read")
-                    .popover(isPresented: $showingWarnings, arrowEdge: .trailing) {
-                        ScanWarnings(progress: progress, removedWithUserData: removed) {
-                            showingWarnings = false
-                            model.dismissRemovalNotice(location.id)
-                        }
-                    }
+                    warningsButton(progress: progress, removed: removed)
+                } else if progress.skippedDuplicates > 0 {
+                    Image(systemName: "doc.on.doc")
+                        .foregroundStyle(.secondary)
+                        .help("\(progress.skippedDuplicates.formatted()) duplicate\(progress.skippedDuplicates == 1 ? " was" : "s were") skipped (Settings › Duplicates)")
                 }
+            }
+        }
+    }
+
+    private func warningsButton(progress: ScanProgress?, removed: Int) -> some View {
+        Button { showingWarnings = true } label: {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
+        }
+        .buttonStyle(.borderless)
+        .help(removed > 0 ? "Fonts with activation, tags or notes were removed" : "Some files could not be read")
+        .popover(isPresented: $showingWarnings, arrowEdge: .trailing) {
+            ScanWarnings(progress: progress ?? ScanProgress(locationID: location.id, phase: .done), removedWithUserData: removed) {
+                showingWarnings = false
+                model.dismissRemovalNotice(location.id)
             }
         }
     }
@@ -297,7 +311,7 @@ private struct ScanWarnings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if removedWithUserData > 0 {
-                Text("\(removedWithUserData.formatted()) font\(removedWithUserData == 1 ? "" : "s") with activation or notes \(removedWithUserData == 1 ? "was" : "were") removed because \(removedWithUserData == 1 ? "its file is" : "their files are") gone.")
+                Text("\(removedWithUserData.formatted()) font\(removedWithUserData == 1 ? "" : "s") with activation, tags or notes \(removedWithUserData == 1 ? "was" : "were") removed: \(removedWithUserData == 1 ? "its file is" : "their files are") gone, or \(removedWithUserData == 1 ? "was" : "were") removed as \(removedWithUserData == 1 ? "a duplicate" : "duplicates").")
                     .fixedSize(horizontal: false, vertical: true)
                 Button("OK", action: dismissRemovals)
                     .controlSize(.small)
@@ -322,6 +336,10 @@ private struct ScanWarnings: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 220)
+            }
+            if progress.skippedDuplicates > 0 {
+                Text("\(progress.skippedDuplicates.formatted()) duplicate\(progress.skippedDuplicates == 1 ? " was" : "s were") not imported: the same file is already in another location.")
+                    .foregroundStyle(.secondary)
             }
             if progress.skippedRemovals > 0 {
                 Text("\(progress.skippedRemovals) missing file\(progress.skippedRemovals == 1 ? " was" : "s were") kept in the library, because the folder could not be read completely.")
