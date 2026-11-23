@@ -380,13 +380,22 @@ final class AppModel {
     }
     var preview = PreviewSettings() {
         didSet {
-            preview.adaptDefaultColors(dark: isDarkAppearance)  // e.g. a preset saved in the other appearance
+            // Default colors follow the appearance (e.g. a preset saved in the other one). With @Observable,
+            // assigning here runs this observer again, so assign only when something changes: it settles in one step.
+            var adapted = preview
+            adapted.adaptDefaultColors(dark: isDarkAppearance)
+            if adapted != preview { preview = adapted; return }
             if preview != oldValue { schedulePreviewSave() }
         }
     }
     /// Set by the main window from its color scheme; default preview colors follow it.
     var isDarkAppearance = false {
-        didSet { if isDarkAppearance != oldValue { preview.adaptDefaultColors(dark: isDarkAppearance) } }
+        didSet {
+            guard isDarkAppearance != oldValue else { return }
+            var adapted = preview
+            adapted.adaptDefaultColors(dark: isDarkAppearance)
+            if adapted != preview { preview = adapted }
+        }
     }
     /// Pending debounced write of `preview` (slider drags and typing change it many times a second).
     @ObservationIgnored private var previewSaveTask: Task<Void, Never>?
