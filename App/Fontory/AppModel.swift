@@ -666,6 +666,8 @@ final class AppModel {
     @ObservationIgnored var duplicateRunsCancelled = 0
     /// The last Move to Trash: per-file failures (file id → message) and the files recycled (smoke checks).
     @ObservationIgnored var lastTrashResult: TrashResult?
+    /// Moves one file to the Trash (Move to Trash…): its new URL, or an error message. The smoke run replaces it.
+    @ObservationIgnored var recycleFile: @MainActor (URL) async -> (trashedURL: URL?, error: String?) = { await AppModel.workspaceRecycle($0) }
 
     // MARK: Notes (actions in AppModel+Notes.swift)
 

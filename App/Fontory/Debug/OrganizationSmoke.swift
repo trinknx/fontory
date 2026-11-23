@@ -1155,6 +1155,18 @@ enum OrganizationSmoke {
         let model = AppModel()
         model.settingsDefaults = suite
         model.suppressesPreviewSaveForSmoke = true
+        // Never the user's Trash: "recycling" moves the file into a Trash folder of the temp root.
+        let smokeTrash = root.appendingPathComponent("Trash", isDirectory: true)
+        try? fm.createDirectory(at: smokeTrash, withIntermediateDirectories: true)
+        model.recycleFile = { url in
+            let target = smokeTrash.appendingPathComponent(url.lastPathComponent)
+            do {
+                try FileManager.default.moveItem(at: url, to: target)
+                return (target, nil)
+            } catch {
+                return (nil, error.localizedDescription)
+            }
+        }
         await model.attachBackendForSmoke(backend)
         guard let loc = await model.runBackground({ try backend.addFolder(fonts) }) else {
             check(false, "duplicates: add the folder", model.alert?.message ?? ""); return
@@ -1304,8 +1316,20 @@ enum OrganizationSmoke {
               "\(String(describing: trashed?.failures))")
         check(unregisteredFirst, "duplicates: the active copy was deactivated before it was trashed", "\(registrar.unregistered)")
         check(indexedPaths(store, loc.id)[subName] == nil && model.excludedFiles.isEmpty, "duplicates: the trashed file leaves the index without an exclusion")
-        // Our temporary copy only: take it out of the Trash again.
-        for url in trashed?.trashedURLs ?? [] where url.lastPathComponent.contains(token) { try? fm.removeItem(at: url) }
+        check(trashed?.trashedURLs.map(\.path) == [smokeTrash.appendingPathComponent("Arial copy \(token).ttf").path]
+              && fm.fileExists(atPath: smokeTrash.appendingPathComponent("Arial copy \(token).ttf").path),
+              "duplicates: the file went to the smoke's own Trash folder (the user's Trash is never used)")
+
+        // A recycle error is reported per file; the file and its row stay.
+        let workingRecycler = model.recycleFile
+        model.recycleFile = { _ in (nil, "Simulated recycle failure.") }
+        let refused = await model.trashFiles([padded])
+        model.recycleFile = workingRecycler
+        check(refused.recycled.isEmpty && refused.failures.map(\.fileID) == [padded] && refused.failures.first?.message == "Simulated recycle failure."
+              && model.alert?.message.contains("Arial padded.ttf") == true && indexedPaths(store, loc.id)["Arial padded.ttf"] == padded
+              && fm.fileExists(atPath: fonts.appendingPathComponent("Arial padded.ttf").path),
+              "duplicates: a recycle error is reported per file and keeps the file and its row", model.alert?.message ?? "no alert")
+        model.alert = nil
 
         // An already-missing file is reported per file and stays in the index.
         try? fm.removeItem(at: fonts.appendingPathComponent("Arial.ttf"))

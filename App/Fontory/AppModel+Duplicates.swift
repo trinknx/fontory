@@ -338,7 +338,7 @@ extension AppModel {
             }
             // Parsed fonts may hold the file open.
             previewRenderer.forgetFonts(under: url)
-            let (trashed, error) = await recycle(url)
+            let (trashed, error) = await recycleFile(url)
             if let trashed, !(await Self.fileExists(url)) {
                 recycled.append(c)
                 result.trashedURLs.append(trashed)
@@ -364,9 +364,14 @@ extension AppModel {
         await Task.detached(priority: .userInitiated) { FileManager.default.fileExists(atPath: url.path) }.value
     }
 
-    /// Recycles one file: its URL in the Trash, or the error's description.
-    private func recycle(_ url: URL) async -> (URL?, String?) {
-        await withCheckedContinuation { (continuation: CheckedContinuation<(URL?, String?), Never>) in
+    /// The default `recycleFile`: `NSWorkspace.recycle` of one file, giving its URL in the Trash or the error's description.
+    /// Never reached by the smoke run, which replaces `recycleFile` (it would change the user's Trash).
+    static func workspaceRecycle(_ url: URL) async -> (trashedURL: URL?, error: String?) {
+        #if DEBUG
+        precondition(!CommandLine.arguments.contains(OrganizationSmoke.argument),
+                     "the smoke run must not recycle into the user's Trash")
+        #endif
+        return await withCheckedContinuation { (continuation: CheckedContinuation<(URL?, String?), Never>) in
             NSWorkspace.shared.recycle([url]) { moved, error in
                 if let trashed = moved.values.first {
                     continuation.resume(returning: (trashed, nil))
