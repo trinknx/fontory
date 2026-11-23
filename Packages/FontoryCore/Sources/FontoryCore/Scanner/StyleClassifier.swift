@@ -4,8 +4,9 @@ import Foundation
 /// The decision order is spec section 17, "Style classification", steps 1 to 7. Pure and stateless.
 public enum StyleClassifier {
     /// Bump to reclassify every face in the background (see `StyleBackfill`). 2: version 1 was briefly computed
-    /// without CoreText's class mask, so faces marked 1 may hold wrong classes.
-    public static let version = 2
+    /// without CoreText's class mask, so faces marked 1 may hold wrong classes. 3: a stray (3,0) cmap beside a
+    /// Unicode one no longer makes a face Symbol.
+    public static let version = 3
 
     public struct Input: Sendable, Hashable {
         public var familyClass: Int?      // sFamilyClass high byte
@@ -13,18 +14,20 @@ public enum StyleClassifier {
         public var classMask: Int?        // CoreText symbolic-trait class (top 4 bits), same numbering as sFamilyClass
         public var panose: [UInt8]?       // 10 bytes
         public var isMonospace: Bool
-        public var hasSymbolCmap: Bool
+        public var hasSymbolCmap: Bool    // a (3,0) subtable
+        public var hasUnicodeCmap: Bool   // a (3,1), (3,10) or platform-0 subtable
         public var coversLatin: Bool
         public var names: [String]        // family, full name, style
 
         public init(familyClass: Int? = nil, familySubclass: Int? = nil, classMask: Int? = nil, panose: [UInt8]? = nil, isMonospace: Bool = false,
-                    hasSymbolCmap: Bool = false, coversLatin: Bool = true, names: [String] = []) {
+                    hasSymbolCmap: Bool = false, hasUnicodeCmap: Bool = false, coversLatin: Bool = true, names: [String] = []) {
             self.familyClass = familyClass
             self.familySubclass = familySubclass
             self.classMask = classMask
             self.panose = panose
             self.isMonospace = isMonospace
             self.hasSymbolCmap = hasSymbolCmap
+            self.hasUnicodeCmap = hasUnicodeCmap
             self.coversLatin = coversLatin
             self.names = names
         }
@@ -41,8 +44,9 @@ public enum StyleClassifier {
         let name = input.names.joined(separator: " ").lowercased()
         func named(_ words: String...) -> Bool { words.contains { name.contains($0) } }
 
-        // 1. Symbol. The cmap test stands in for "pictographic glyphs": a (3,0) subtable marks a symbol encoding.
-        if cls(12) || family == 5 || input.hasSymbolCmap { return .symbol }
+        // 1. Symbol. The cmap test stands in for "pictographic glyphs": a (3,0) subtable marks a symbol encoding,
+        // but only when there is no Unicode subtable (legacy text fonts often carry a stray (3,0) beside (3,1)).
+        if cls(12) || family == 5 || (input.hasSymbolCmap && !input.hasUnicodeCmap) { return .symbol }
         // 2. Mono
         if input.isMonospace || proportion == 9 { return .mono }
         // 3. Script

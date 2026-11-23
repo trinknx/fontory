@@ -4,11 +4,12 @@ import Testing
 
 struct StyleClassifierTests {
     private static func input(
-        cls: Int? = nil, mask: Int? = nil, panose: [UInt8]? = nil, mono: Bool = false, symbolCmap: Bool = false, latin: Bool = true,
+        cls: Int? = nil, mask: Int? = nil, panose: [UInt8]? = nil, mono: Bool = false, symbolCmap: Bool = false, unicodeCmap: Bool = false,
+        latin: Bool = true,
         names: [String] = ["Test", "Test Regular", "Regular"]
     ) -> StyleClassifier.Input {
         .init(familyClass: cls, familySubclass: 0, classMask: mask, panose: panose, isMonospace: mono, hasSymbolCmap: symbolCmap,
-              coversLatin: latin, names: names)
+              hasUnicodeCmap: unicodeCmap, coversLatin: latin, names: names)
     }
 
     private static func panose(family: UInt8 = 0, serif: UInt8 = 0, proportion: UInt8 = 0) -> [UInt8] {
@@ -21,6 +22,10 @@ struct StyleClassifierTests {
         (StyleClassifierTests.input(panose: StyleClassifierTests.panose(family: 5)), .symbol),
         (StyleClassifierTests.input(symbolCmap: true), .symbol),
         (StyleClassifierTests.input(cls: 8, mono: true, symbolCmap: true), .symbol),
+        // A stray (3,0) beside a Unicode subtable is not a symbol font: the other signals decide.
+        (StyleClassifierTests.input(cls: 1, symbolCmap: true, unicodeCmap: true), .serif),
+        (StyleClassifierTests.input(symbolCmap: true, unicodeCmap: true), .display),
+        (StyleClassifierTests.input(cls: 12, symbolCmap: true, unicodeCmap: true), .symbol),
         // 2 mono
         (StyleClassifierTests.input(mono: true), .mono),
         (StyleClassifierTests.input(panose: StyleClassifierTests.panose(family: 2, proportion: 9)), .mono),

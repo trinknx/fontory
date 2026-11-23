@@ -107,7 +107,8 @@ public enum FontParser {
             for i in 0..<Int(n) {
                 let rec = 4 + i * 8
                 guard let platform = cmap.u16(rec), let encoding = cmap.u16(rec + 2) else { break }
-                if platform == 3 && encoding == 0 { input.hasSymbolCmap = true; break }
+                if platform == 3 && encoding == 0 { input.hasSymbolCmap = true }
+                if platform == 0 || (platform == 3 && (encoding == 1 || encoding == 10)) { input.hasUnicodeCmap = true }
             }
         }
         return StyleClassifier.classify(input)
