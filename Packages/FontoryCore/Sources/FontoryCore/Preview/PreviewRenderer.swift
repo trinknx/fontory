@@ -124,20 +124,50 @@ public final class PreviewRenderer: Sendable {
 
     private static let placeholder = "\u{25CC}"   // ◌ DOTTED CIRCLE
 
-    /// Characters that never need a glyph of their own (joiners, variation selectors, controls).
+    /// Characters that never need a glyph of their own: C0/C1 controls and DEL, zero-width and directional
+    /// formatting characters, joiners, variation selectors.
     private static func isIgnorable(_ scalar: Unicode.Scalar) -> Bool {
         let v = scalar.value
-        return v < 0x20 || (0x200B...0x200F).contains(v) || (0xFE00...0xFE0F).contains(v)
-            || (0xE0100...0xE01EF).contains(v) || v == 0x2060 || v == 0xFEFF
+        return v < 0x20 || (0x7F...0x9F).contains(v) || (0x200B...0x200F).contains(v) || (0x202A...0x202E).contains(v)
+            || (0x2060...0x2064).contains(v) || (0xFE00...0xFE0F).contains(v) || (0xE0100...0xE01EF).contains(v)
+            || v == 0xFEFF
     }
 
-    private static func covers(_ font: CTFont, _ character: Character) -> Bool {
-        for scalar in character.unicodeScalars where !isIgnorable(scalar) {
-            let units = Array(String(scalar).utf16)
-            var glyphs = [CGGlyph](repeating: 0, count: units.count)
-            if !CTFontGetGlyphsForCharacters(font, units, &glyphs, units.count) { return false }
+    /// For each Character of `text`, whether the face covers it. One glyph lookup over the whole UTF-16 buffer;
+    /// a surrogate pair's glyph lands in its first slot. ASCII space and tab always count as covered; other spaces
+    /// (NBSP, U+3000) are checked like any character.
+    static func coverage(of text: String, in font: CTFont) -> [Bool] {
+        let units = Array(text.utf16)
+        var glyphs = [CGGlyph](repeating: 0, count: units.count)
+        if !units.isEmpty { _ = CTFontGetGlyphsForCharacters(font, units, &glyphs, units.count) }
+        var out: [Bool] = []
+        out.reserveCapacity(text.count)
+        var offset = 0
+        for character in text {
+            var covered = true
+            for scalar in character.unicodeScalars {
+                defer { offset += scalar.utf16.count }
+                if scalar == " " || scalar == "\t" || isIgnorable(scalar) { continue }
+                if glyphs[offset] == 0 { covered = false }
+            }
+            out.append(covered)
         }
-        return true
+        return out
+    }
+
+    /// The system font that draws ◌, per point size; created only when a character is missing.
+    private let placeholderFonts = LRUCache<CGFloat, CTFont>(limit: 32)
+    private let placeholderCreations = AttemptCounter()
+
+    /// How many placeholder fonts were created. For tests.
+    var placeholderFontCreations: Int { placeholderCreations.value }
+
+    private func placeholderFont(size: CGFloat) -> CTFont? {
+        if let cached = placeholderFonts[size] { return cached }
+        guard let font = CTFontCreateUIFontForLanguage(.system, size, nil) else { return nil }
+        placeholderCreations.increment()
+        placeholderFonts[size] = font
+        return font
     }
 
     private func attributes(font: CTFont, request: PreviewRequest, color: CGColor?) -> [NSAttributedString.Key: Any] {
@@ -160,17 +190,19 @@ public final class PreviewRenderer: Sendable {
     private func attributedText(font: CTFont, request: PreviewRequest, color: CGColor?) -> NSAttributedString {
         let attrs = attributes(font: font, request: request, color: color)
         guard request.showMissingGlyphs else { return NSAttributedString(string: request.text, attributes: attrs) }
+        let coverage = Self.coverage(of: request.text, in: font)
+        guard coverage.contains(false) else { return NSAttributedString(string: request.text, attributes: attrs) }
         var placeholderAttrs = attrs
-        placeholderAttrs[.init(kCTFontAttributeName as String)] =
-            CTFontCreateUIFontForLanguage(.system, request.pointSize, nil) ?? font
+        placeholderAttrs[.init(kCTFontAttributeName as String)] = placeholderFont(size: request.pointSize) ?? font
         if let color {
-            placeholderAttrs[.init(kCTForegroundColorAttributeName as String)] = color.copy(alpha: color.alpha * 0.4) ?? color
-            if request.outline { placeholderAttrs[.init(kCTStrokeColorAttributeName as String)] = color.copy(alpha: color.alpha * 0.4) ?? color }
+            let faint = color.copy(alpha: color.alpha * 0.4) ?? color
+            placeholderAttrs[.init(kCTForegroundColorAttributeName as String)] = faint
+            if request.outline { placeholderAttrs[.init(kCTStrokeColorAttributeName as String)] = faint }
         }
         let out = NSMutableAttributedString()
         var covered = ""
-        for character in request.text {
-            if character.isWhitespace || Self.covers(font, character) {
+        for (character, isCovered) in zip(request.text, coverage) {
+            if isCovered {
                 covered.append(character)
             } else {
                 if !covered.isEmpty { out.append(NSAttributedString(string: covered, attributes: attrs)); covered = "" }
@@ -257,13 +289,26 @@ public final class PreviewRenderer: Sendable {
         ctx.restoreGState()
     }
 
+    /// Ink height of `text` at `pointSize` with the standard features and CoreText fallback.
     public func inkHeight(fileURL: URL, faceIndex: Int, text: String, pointSize: CGFloat) -> CGFloat {
-        guard let font = baseFont(fileURL, faceIndex) else { return 0 }
-        let sized = CTFontCreateCopyWithAttributes(font, pointSize, nil, nil)
-        let attrs: [NSAttributedString.Key: Any] = [.init(kCTFontAttributeName as String): sized]
-        let l = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
+        let request = PreviewRequest(text: text, pointSize: pointSize, foreground: Self.measureColor,
+                                     background: Self.measureColor, size: CGSize(width: 1, height: 1), scale: 1)
+        return inkHeight(fileURL: fileURL, faceIndex: faceIndex, request: request)
+    }
+
+    /// Ink height of a request's text at its point size, shaped as it is drawn: same OpenType features and the
+    /// same ◌ substitution. Outline, underline, colors and size do not take part.
+    public func inkHeight(fileURL: URL, faceIndex: Int, request: PreviewRequest) -> CGFloat {
+        guard request.pointSize > 0, let font = sizedFont(for: request, fileURL, faceIndex) else { return 0 }
+        var shape = request
+        shape.outline = false
+        shape.underline = false
+        shape.tracking = 0
+        let l = CTLineCreateWithAttributedString(attributedText(font: font, request: shape, color: nil))
         return CTLineGetBoundsWithOptions(l, .useGlyphPathBounds).height
     }
+
+    private static let measureColor = CGColor(gray: 0, alpha: 1)
 
     // MARK: Sample text
 

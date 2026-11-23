@@ -43,6 +43,9 @@ struct PreviewSettings: Equatable {
     var dynamicStyle: PreviewSamples.DynamicStyle = .automatic
     /// Each face previews its own family name (the "Font Names" preset); typing text turns it off.
     var showsFontNames = false
+    /// The preset menu item that filled `text` ("sample:…", "language:…", "preset:…"), so only that item is checked
+    /// even when another item has the same text. nil for typed text, Dynamic and Font Names.
+    var textSource: String?
     /// nil: the size follows the zoom level.
     var pointSizeOverride: Double?
     var tracking: Double = 0
@@ -107,7 +110,7 @@ struct PreviewSettings: Equatable {
 
 extension PreviewSettings: Codable {
     private enum CodingKeys: String, CodingKey {
-        case text, dynamicStyle, showsFontNames, pointSizeOverride, tracking, foreground, background, alignment
+        case text, dynamicStyle, showsFontNames, textSource, pointSizeOverride, tracking, foreground, background, alignment
         case smoothing, autoSize, showGuides, showMissingGlyphs, outline, underline, ligatures
         case discretionaryLigatures, alternates, smallCaps
     }
@@ -122,6 +125,7 @@ extension PreviewSettings: Codable {
         read(.text, into: &text)
         read(.dynamicStyle, into: &dynamicStyle)
         read(.showsFontNames, into: &showsFontNames)
+        textSource = (try? c.decodeIfPresent(String.self, forKey: .textSource)) ?? nil
         pointSizeOverride = (try? c.decodeIfPresent(Double.self, forKey: .pointSizeOverride)) ?? nil
         read(.tracking, into: &tracking)
         if let rgba = try? c.decodeIfPresent([CGFloat].self, forKey: .foreground), rgba.count == 4 {
@@ -150,6 +154,7 @@ extension PreviewSettings: Codable {
         try c.encode(text, forKey: .text)
         try c.encode(dynamicStyle, forKey: .dynamicStyle)
         try c.encode(showsFontNames, forKey: .showsFontNames)
+        try c.encodeIfPresent(textSource, forKey: .textSource)
         try c.encodeIfPresent(pointSizeOverride, forKey: .pointSizeOverride)
         try c.encode(tracking, forKey: .tracking)
         try c.encode(Self.rgba(foreground), forKey: .foreground)
@@ -250,9 +255,13 @@ final class AppModel {
     var zoom: [ViewMode: Double] {
         didSet { for mode in ViewMode.allCases { UserDefaults.standard.set(zoom[mode], forKey: "zoom.\(mode.rawValue)") } }
     }
-    var preview = PreviewSettings() { didSet { if preview != oldValue { preview.save() } } }
+    var preview = PreviewSettings() { didSet { if preview != oldValue { schedulePreviewSave() } } }
+    /// Pending debounced write of `preview` (slider drags and typing change it many times a second).
+    @ObservationIgnored private var previewSaveTask: Task<Void, Never>?
     /// Drives the preview popover (toolbar button and View ▸ Preview Options).
     var isShowingPreviewOptions = false
+    /// Run once after the preview popover has closed (e.g. to present the preset name prompt).
+    @ObservationIgnored var afterPreviewOptionsClose: (@MainActor () -> Void)?
     private(set) var presets: [Preset] = []
     /// Drives the "save preset" name prompt.
     var isNamingPreset = false
@@ -376,7 +385,28 @@ final class AppModel {
     }
 
     func prepareForQuit() async {
+        flushPreviewSave()
         await backend?.activation.prepareForQuit()
+    }
+
+    private static let previewSaveDelay: Duration = .milliseconds(300)
+
+    private func schedulePreviewSave() {
+        previewSaveTask?.cancel()
+        previewSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.previewSaveDelay)
+            guard !Task.isCancelled, let self else { return }
+            self.previewSaveTask = nil
+            self.preview.save()
+        }
+    }
+
+    /// Writes a pending preview-settings change now (at quit).
+    func flushPreviewSave() {
+        guard let task = previewSaveTask else { return }
+        task.cancel()
+        previewSaveTask = nil
+        preview.save()
     }
 
     // MARK: Registered fonts
@@ -1024,6 +1054,7 @@ final class AppModel {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         presets = PresetStore.upserting(Preset(name: trimmed, text: preview.text), into: presets)
+        preview.textSource = "preset:" + trimmed
         persistPresets()
     }
 

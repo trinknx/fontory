@@ -13,7 +13,9 @@ struct PreviewOptionsButton: View {
 
     var body: some View {
         Button {
-            model.isShowingPreviewOptions.toggle()
+            // A click on this button while the popover is open first closes it (semitransient: on mouse-down),
+            // then runs this action on mouse-up. That click means "close", not "open again".
+            model.isShowingPreviewOptions = !(controller.isShown || controller.closedByCurrentClick)
         } label: {
             Label("Preview", systemImage: "character.cursor.ibeam")
         }
@@ -34,17 +36,24 @@ final class PreviewPopoverController: NSObject, NSPopoverDelegate {
     weak var anchorView: NSView?
     private var popover: NSPopover?
     private weak var model: AppModel?
-    /// When the popover last closed. A click on the toolbar button first closes the (semitransient) popover on
-    /// mouse-down and then toggles it on mouse-up; that click must not reopen it.
-    private var closedAt = Date.distantPast
+    /// Event number of the mouse click that closed the popover. Mouse-down and mouse-up of one click share it.
+    private var closingClick: Int?
+
+    var isShown: Bool { popover != nil }
+
+    /// The current event is the same click that closed the popover.
+    var closedByCurrentClick: Bool {
+        guard let closingClick, let event = NSApp.currentEvent, Self.isMouseClick(event) else { return false }
+        return event.eventNumber == closingClick
+    }
+
+    private static func isMouseClick(_ event: NSEvent) -> Bool {
+        [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp].contains(event.type)
+    }
 
     func show(model: AppModel) {
         guard popover == nil else { return }
         self.model = model
-        guard Date().timeIntervalSince(closedAt) > 0.3 else {
-            model.isShowingPreviewOptions = false
-            return
-        }
         guard let view = anchorView, view.window != nil else {
             Self.log.error("preview popover has no anchor in a window")
             model.isShowingPreviewOptions = false
@@ -58,6 +67,7 @@ final class PreviewPopoverController: NSObject, NSPopoverDelegate {
         popover.contentViewController = hosting
         popover.delegate = self
         self.popover = popover
+        closingClick = nil
         popover.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
     }
 
@@ -65,10 +75,19 @@ final class PreviewPopoverController: NSObject, NSPopoverDelegate {
         popover?.performClose(nil)
     }
 
-    func popoverDidClose(_ notification: Notification) {
+    /// The popover counts as closed from here on, so ⌥⌘P during the close animation opens a new one.
+    func popoverWillClose(_ notification: Notification) {
+        guard let closing = notification.object as? NSPopover, closing === popover else { return }
         popover = nil
-        closedAt = Date()
+        closingClick = NSApp.currentEvent.flatMap { Self.isMouseClick($0) ? $0.eventNumber : nil }
         if model?.isShowingPreviewOptions == true { model?.isShowingPreviewOptions = false }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        guard let model, let action = model.afterPreviewOptionsClose else { return }
+        model.afterPreviewOptionsClose = nil
+        // Next turn of the run loop: never inside the close animation's CA commit.
+        DispatchQueue.main.async { action() }
     }
 }
 
@@ -110,8 +129,10 @@ struct PreviewOptionsView: View {
     private var textBinding: Binding<String> {
         Binding(get: { model.preview.showsFontNames ? "" : model.preview.text },
                 set: { new in
+                    guard new != model.preview.text || model.preview.showsFontNames else { return }
                     model.preview.text = new
                     model.preview.showsFontNames = false
+                    model.preview.textSource = nil
                 })
     }
 
@@ -130,6 +151,7 @@ struct PreviewOptionsView: View {
                 Button {
                     model.preview.text = ""
                     model.preview.showsFontNames = false
+                    model.preview.textSource = nil
                 } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
                 }
@@ -288,6 +310,7 @@ private struct PresetMenu: View {
                     check(style.title, model.preview.isDynamic && model.preview.dynamicStyle == style) {
                         model.preview.text = ""
                         model.preview.showsFontNames = false
+                        model.preview.textSource = nil
                         model.preview.dynamicStyle = style
                     }
                 }
@@ -295,24 +318,27 @@ private struct PresetMenu: View {
             check("Font Names", model.preview.showsFontNames) {
                 model.preview.text = ""
                 model.preview.showsFontNames = true
+                model.preview.textSource = nil
             }
-            ForEach(PreviewSamples.letterSets) { sample($0) }
+            ForEach(PreviewSamples.letterSets) { sample($0, kind: "sample") }
             Divider()
-            ForEach(PreviewSamples.symbolSets) { sample($0) }
+            ForEach(PreviewSamples.symbolSets) { sample($0, kind: "sample") }
             Divider()
             Menu("Languages") {
-                ForEach(PreviewSamples.languages) { sample($0) }
+                ForEach(PreviewSamples.languages) { sample($0, kind: "language") }
             }
             Divider()
             if !model.presets.isEmpty {
                 ForEach(model.presets) { preset in
-                    check(preset.name, isCurrent(preset.text)) { use(preset.text) }
+                    check(preset.name, isCurrent("preset:" + preset.name)) { use(preset.text, source: "preset:" + preset.name) }
                 }
                 Divider()
             }
             Button("Save Current Text…") {
+                // The name prompt is a window alert: present it once the popover has finished closing.
+                let appModel: AppModel = model
+                appModel.afterPreviewOptionsClose = { [weak appModel] in appModel?.isNamingPreset = true }
                 model.isShowingPreviewOptions = false
-                model.isNamingPreset = true
             }
             .disabled(model.preview.text.isEmpty || model.preview.showsFontNames)
             if !model.presets.isEmpty {
@@ -332,17 +358,20 @@ private struct PresetMenu: View {
         .help("Preview text presets")
     }
 
-    private func isCurrent(_ text: String) -> Bool {
-        !model.preview.showsFontNames && model.preview.text == text
+    /// Only the item that was chosen is checked, not every item with the same text.
+    private func isCurrent(_ source: String) -> Bool {
+        !model.preview.showsFontNames && !model.preview.text.isEmpty && model.preview.textSource == source
     }
 
-    private func use(_ text: String) {
+    private func use(_ text: String, source: String) {
         model.preview.text = text
         model.preview.showsFontNames = false
+        model.preview.textSource = source
     }
 
-    private func sample(_ sample: PreviewSamples.Sample) -> some View {
-        check(sample.name, isCurrent(sample.text)) { use(sample.text) }
+    private func sample(_ sample: PreviewSamples.Sample, kind: String) -> some View {
+        let source = "\(kind):\(sample.name)"
+        return check(sample.name, isCurrent(source)) { use(sample.text, source: source) }
     }
 
     /// A menu item with a checkmark when `on`.

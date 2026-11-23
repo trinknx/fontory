@@ -155,6 +155,54 @@ import Testing
         #expect(text.string == "Chữ Việt có dấu")
     }
 
+    func missingText(_ text: String, renderer: PreviewRenderer = PreviewRenderer()) throws -> String {
+        var r = request(text)
+        r.showMissingGlyphs = true
+        return try #require(renderer.attributedText(fileURL: URL(fileURLWithPath: Self.arial), faceIndex: 0, request: r)).string
+    }
+
+    @Test func missingGlyphCoverageEdgeCases() throws {
+        #expect(try missingText("A\u{3000}B") == "A\u{25CC}B")          // ideographic space: Arial lacks it
+        #expect(try missingText("A\u{00A0}B") == "A\u{00A0}B")          // NBSP: Arial has it
+        #expect(try missingText("A B\tC") == "A B\tC")                  // ASCII space and tab always pass
+        #expect(try missingText("A\u{0085}B") == "A\u{0085}B")          // C1 control: ignored
+        #expect(try missingText("A\u{1F600}B") == "A\u{25CC}B")         // astral (surrogate pair): one placeholder
+        #expect(try missingText("e\u{0301}x") == "e\u{0301}x")          // combining mark Arial has
+        #expect(try missingText("中文") == "\u{25CC}\u{25CC}")
+    }
+
+    @Test func placeholderFontIsCreatedOnlyWhenNeededAndCached() throws {
+        let renderer = PreviewRenderer()
+        var r = request("Covered text")
+        r.showMissingGlyphs = true
+        _ = try render(Self.arial, r, renderer: renderer)
+        #expect(renderer.placeholderFontCreations == 0)
+        r.text = "A中"
+        _ = try render(Self.arial, r, renderer: renderer)
+        _ = try render(Self.arial, r, renderer: renderer)
+        #expect(renderer.placeholderFontCreations == 1)
+    }
+
+    @Test func inkHeightHonoursFeaturesAndPlaceholders() throws {
+        let renderer = PreviewRenderer()
+        let baskerville = URL(fileURLWithPath: Self.baskerville)
+        var r = request("ace", pointSize: 100)
+        let plain = renderer.inkHeight(fileURL: baskerville, faceIndex: 0, request: r)
+        r.features.insert(.smallCaps)
+        let caps = renderer.inkHeight(fileURL: baskerville, faceIndex: 0, request: r)
+        #expect(plain > 0 && caps > plain + 1, "plain \(plain) caps \(caps)")   // small caps rise above the x-height
+
+        let arial = URL(fileURLWithPath: Self.arial)
+        var cjk = request("中", pointSize: 100)
+        let fallback = renderer.inkHeight(fileURL: arial, faceIndex: 0, request: cjk)
+        cjk.showMissingGlyphs = true
+        let placeholder = renderer.inkHeight(fileURL: arial, faceIndex: 0, request: cjk)
+        #expect(fallback > 0 && placeholder > 0 && abs(fallback - placeholder) > 1)
+        // The text-only overload is the standard case.
+        #expect(renderer.inkHeight(fileURL: arial, faceIndex: 0, text: "Hxg", pointSize: 100)
+                == renderer.inkHeight(fileURL: arial, faceIndex: 0, request: request("Hxg", pointSize: 100)))
+    }
+
     @Test func guidesDrawInEmptyRegions() throws {
         var r = request("x")
         let plain = try render(Self.arial, r)
@@ -223,6 +271,9 @@ import Testing
         #expect(PreviewSamples.uppercase.text == PreviewSamples.lowercase.text.uppercased())
         #expect(PreviewSamples.hamburgefonstiv.text == "Hamburgefonstiv")
         #expect(PreviewSamples.accented.text.contains("ư"))
+        for c in ["Ă", "Â", "Đ", "Ê", "Ô", "Ơ", "Ư", "Ấ", "Ầ", "Ẩ", "Ẫ", "Ậ", "Ế", "Ổ", "Ữ", "Ự", "ý", "Ÿ"] {
+            #expect(PreviewSamples.accented.text.contains(c), "missing \(c)")
+        }
         #expect(PreviewSamples.numbers.text.contains("0123456789"))
         #expect(PreviewSamples.currencies.text.contains("₫"))
     }

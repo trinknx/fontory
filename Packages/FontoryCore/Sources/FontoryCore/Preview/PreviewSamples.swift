@@ -15,7 +15,9 @@ public enum PreviewSamples {
     public static let uppercase = Sample(name: "Uppercase", text: "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
     public static let accented = Sample(
         name: "Accented",
-        text: "ÀÁÂÃÄÅ Çç ÈÉÊË ÌÍÎÏ Ññ ÒÓÔÕÖØ ÙÚÛÜ Ýÿ àáâãäå èéêë ìíîï òóôõöø ùúûü ăâđêôơư ạảấầẩẫậắằẳẵặ ẹẻẽếềểễệ ỉị ọỏốồổỗộớờởỡợ ụủứừửữự ỳỵỷỹ")
+        text: "ÀÁÂÃÄÅ Çç ÈÉÊË ÌÍÎÏ Ññ ÒÓÔÕÖØ ÙÚÛÜ ÝŸ àáâãäå èéêë ìíîï òóôõöø ùúûü ýÿ "
+            + "Ă Â Đ Ê Ô Ơ Ư Ấ Ầ Ẩ Ẫ Ậ Ắ Ằ Ế Ề Ể Ễ Ệ Ố Ồ Ổ Ỗ Ộ Ớ Ợ Ứ Ừ Ử Ữ Ự "
+            + "ă â đ ê ô ơ ư ạ ả ấ ầ ẩ ẫ ậ ắ ằ ẳ ẵ ặ ẹ ẻ ẽ ế ề ể ễ ệ ỉ ị ọ ỏ ố ồ ổ ỗ ộ ớ ờ ở ỡ ợ ụ ủ ứ ừ ử ữ ự ỳ ỵ ỷ ỹ")
     public static let numbers = Sample(name: "Numbers", text: "0123456789 ½ ¼ ¾ ⅛ ⁰¹²³⁴ ₀₁₂₃₄ +−×÷=%‰")
     public static let punctuation = Sample(name: "Punctuation", text: "! ? ¡ ¿ . , : ; … – — ' \" ‘ ’ “ ” « » ‹ › ( ) [ ] { } / \\ | @ # & * § ¶ † ‡ •")
     public static let currencies = Sample(name: "Currencies", text: "$ € £ ¥ ¢ ₫ ₩ ₹ ₽ ₺ ₪ ₱ ₦ ₴ ₸ ฿ ₿ ¤")

@@ -91,9 +91,12 @@ final class PreviewPipeline {
     }
 }
 
+/// Ink height depends on the shaping options too: OpenType features and ◌ substitution.
 private struct InkKey: Hashable, Sendable {
     let faceID: Int64
     let text: String
+    let features: PreviewFeatures
+    let showMissingGlyphs: Bool
 }
 
 /// One preview render. Checks for cancellation before and after the work; delivers on the main actor.
@@ -118,20 +121,23 @@ private final class RenderOperation: Operation, @unchecked Sendable {
         guard !isCancelled else { return deliver(nil) }
         var request = key.request
         if key.autoSize {
-            request.pointSize = autoPointSize(base: request.pointSize, text: request.text)
+            request.pointSize = autoPointSize(base: request.pointSize, request: request)
         }
         let image = renderer.render(fileURL: fileURL, faceIndex: faceIndex, request: request)
         deliver(isCancelled ? nil : image)
     }
 
     /// The size whose ink height matches `autoSizeInkRatio` of the base size, clamped to a quarter…four times it.
-    private func autoPointSize(base: CGFloat, text: String) -> CGFloat {
-        let inkKey = InkKey(faceID: key.faceID, text: text)
+    private func autoPointSize(base: CGFloat, request: PreviewRequest) -> CGFloat {
+        let inkKey = InkKey(faceID: key.faceID, text: request.text, features: request.features,
+                            showMissingGlyphs: request.showMissingGlyphs)
         let perPoint: CGFloat
         if let cached = inkPerPoint[inkKey] {
             perPoint = cached
         } else {
-            perPoint = renderer.inkHeight(fileURL: fileURL, faceIndex: faceIndex, text: text, pointSize: 100) / 100
+            var measure = request
+            measure.pointSize = 100
+            perPoint = renderer.inkHeight(fileURL: fileURL, faceIndex: faceIndex, request: measure) / 100
             inkPerPoint[inkKey] = perPoint
         }
         guard perPoint > 0.001 else { return base }
