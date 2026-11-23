@@ -86,19 +86,19 @@ extension ListColumn {
     }
 
     /// The in-memory sort key of a face in this column. Pure: safe off the main actor.
-    func sortKey(_ row: FaceRow, locked: Bool, locationName: String?) -> FamilySortKey {
+    func sortKey(_ row: FaceRow, locationName: String?) -> FamilySortKey {
         switch self {
         case .glyphs:
             return .number(Double(row.glyphCount))
         case .status:
-            // Active, temporary, off, system, offline.
+            // Active in Fontory, active outside Fontory, off, system, offline.
             let rank: Int
-            if locked { rank = 3 } else if !row.online { rank = 4 } else {
-                switch row.activation {
-                case .on: rank = 0
-                case .temporary: rank = 1
-                case .off: rank = 2
-                }
+            switch row.activationStatus {
+            case .system: rank = 3
+            case _ where !row.online: rank = 4
+            case .on: rank = 0
+            case .external: rank = 1
+            case .off: rank = 2
             }
             return .number(Double(rank))
         default:
@@ -221,7 +221,7 @@ final class ListStatusCell: NSTableCellView {
     }
 
     /// Shows the state of `row`, or nothing (a family row, or a face whose row is still loading).
-    func configure(faceID: Int64?, row: FaceRow?, locked: Bool) {
+    func configure(faceID: Int64?, row: FaceRow?) {
         self.faceID = faceID
         guard let row else {
             dot.isHidden = faceID == nil
@@ -231,17 +231,9 @@ final class ListStatusCell: NSTableCellView {
             return
         }
         dot.isHidden = false
-        if locked {
-            dot.state = .locked
-        } else {
-            switch row.activation {
-            case .off: dot.state = .off
-            case .on: dot.state = .on
-            case .temporary: dot.state = .temporary
-            }
-        }
+        dot.state = ActivationDot.State(row.activationStatus)
         dot.isOffline = !row.online
-        label.stringValue = FontListController.statusText(row, locked: locked)
+        label.stringValue = FontListController.statusText(row)
     }
 }
 

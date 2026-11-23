@@ -280,7 +280,6 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         let generation = sortGeneration
         let source = sourceFamilies
         // Everything the keys need from the main actor is captured here; the keys and the sort run off it.
-        let lockedLocations = Set(model.systemLocations.map(\.id))
         let locationNames = Dictionary(model.locations.map { ($0.id, $0.displayName) }, uniquingKeysWith: { a, _ in a })
         Task { [weak self] in
             guard let self else { return }
@@ -290,8 +289,7 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
                 var keys: [Int64: FamilySortKey] = [:]
                 keys.reserveCapacity(rows.count)
                 for row in rows {
-                    keys[row.id] = localSort.column.sortKey(row, locked: lockedLocations.contains(row.locationID),
-                                                            locationName: locationNames[row.locationID])
+                    keys[row.id] = localSort.column.sortKey(row, locationName: locationNames[row.locationID])
                 }
                 return FamilyListSorter.sorted(source, keys: keys, ascending: localSort.ascending)
             }.value
@@ -552,9 +550,9 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         case let cell as ListStatusCell:
             // Family rows show no status: their faces may differ.
             if family != nil {
-                cell.configure(faceID: nil, row: nil, locked: false)
+                cell.configure(faceID: nil, row: nil)
             } else {
-                cell.configure(faceID: id, row: row, locked: row.map(model.isActivationLocked) ?? false)
+                cell.configure(faceID: id, row: row)
             }
         case let cell as ListTextCell:
             configureText(cell, column: column, family: family, row: row)
@@ -610,12 +608,12 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         label.toolTip = column == .location ? label.stringValue : nil
     }
 
-    static func statusText(_ row: FaceRow, locked: Bool) -> String {
-        if locked { return "System" }
-        if !row.online { return "Offline" }
-        switch row.activation {
+    static func statusText(_ row: FaceRow) -> String {
+        switch row.activationStatus {
+        case .system: return "System"
+        case _ where !row.online: return "Offline"
+        case .external: return "Outside Fontory"
         case .on: return "Active"
-        case .temporary: return "Temporary"
         case .off: return "Off"
         }
     }

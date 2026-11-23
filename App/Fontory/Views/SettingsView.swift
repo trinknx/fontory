@@ -68,9 +68,9 @@ private struct LocationSettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Table(model.locations, selection: $selection) {
+            Table(model.listedLocations, selection: $selection) {
                 TableColumn("Name") { loc in
-                    Label(loc.displayName, systemImage: loc.kind == .system ? "lock" : loc.kind == .fileSet ? "doc.on.doc" : "folder")
+                    Label(loc.displayName, systemImage: symbol(loc.kind))
                 }
                 TableColumn("Path") { loc in
                     Text(loc.lastKnownPath).foregroundStyle(.secondary).truncationMode(.middle)
@@ -92,11 +92,11 @@ private struct LocationSettings: View {
                 Button { model.showImportPanel() } label: { Image(systemName: "plus") }
                     .help("Add folders or fonts")
                 Button { if let selected { model.confirmRemoveLocation(selected.id) } } label: { Image(systemName: "minus") }
-                    .disabled(selected == nil || selected?.kind == .system)
+                    .disabled(selected == nil || selected?.kind.isReadOnly == true)
                     .help("Remove the location from the library")
                 Spacer()
                 Button("Relink…") { if let selected { chooseRelinkTarget(for: selected, model: model) } }
-                    .disabled(selected == nil || selected?.kind == .system)
+                    .disabled(selected == nil || selected?.kind.isReadOnly == true)
                 Button("Rescan") { if let selected { model.rescan(selected.id) } }
                     .disabled(selected?.online != true)
             }
@@ -106,6 +106,15 @@ private struct LocationSettings: View {
     }
 
     private var selected: LocationRecord? { selection.flatMap(model.location) }
+
+    private func symbol(_ kind: LocationKind) -> String {
+        switch kind {
+        case .system: "lock"
+        case .userInstalled: "person.crop.square"
+        case .fileSet: "doc.on.doc"
+        case .folder: "folder"
+        }
+    }
 
     private func status(_ loc: LocationRecord) -> String {
         if !loc.online { return "Offline" }

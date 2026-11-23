@@ -19,12 +19,13 @@ enum FontContextMenu {
         return menu
     }
 
-    /// Activate / Activate Temporarily / Deactivate. Disabled when every face is a locked system font.
+    /// Activate / Deactivate (always persistent). Disabled when every face is read-only: a system font or a font
+    /// active outside Fontory.
     static func activationItems(for ids: [Int64], model: AppModel) -> [NSMenuItem] {
         let rows = ids.compactMap(model.cachedRow)
         let allLocked = !rows.isEmpty && rows.count == ids.count && rows.allSatisfy(model.isActivationLocked)
         let states = Set(rows.map(\.activation))
-        let items: [(String, ActivationState)] = [("Activate", .on), ("Activate Temporarily", .temporary), ("Deactivate", .off)]
+        let items: [(String, ActivationState)] = [("Activate", .on), ("Deactivate", .off)]
         return items.map { title, state in
             let item = ClosureMenuItem(title) { Task { await model.setActivation(ids, state) } }
             item.isEnabled = !allLocked

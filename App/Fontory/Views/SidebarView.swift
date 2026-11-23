@@ -10,9 +10,14 @@ struct SidebarView: View {
         List(selection: scope) {
             Section("Library") {
                 libraryRow("All Fonts", "textformat", .all, model.counts.all)
+                libraryRow("System", "lock", .system, model.counts.system)
+                    .help("Fonts that ship with macOS (read-only)")
+                libraryRow("User", "person", .user, model.counts.user)
+                    .help("Fonts active outside Fontory: /Library/Fonts, ~/Library/Fonts, Font Book, Adobe and other apps")
                 libraryRow("Activated", "checkmark.circle", .activated, model.counts.activated)
-                libraryRow("Temporarily Activated", "clock", .temporary, model.counts.temporary)
+                    .help("Everything active on this Mac: System, User and the fonts Fontory activated")
                 libraryRow("Deactivated", "circle", .deactivated, model.counts.deactivated)
+                    .help("Library fonts that are active nowhere")
                 libraryRow("Offline", "externaldrive.badge.xmark", .offline, model.counts.offline)
                 libraryRow("Last Import", "square.and.arrow.down", .recentImport, model.counts.lastImport)
             }
@@ -26,13 +31,13 @@ struct SidebarView: View {
                 ForEach(model.userLocations) { LocationNode(location: $0) }
             }
 
-            Section("System") {
+            Section("Installed Fonts") {
                 Toggle(isOn: $model.query.includeSystem) {
                     Label("Show System Fonts", systemImage: "eye")
                 }
                 .toggleStyle(.checkbox)
                 .selectionDisabled()
-                ForEach(model.systemLocations) { LocationNode(location: $0) }
+                ForEach(model.installedLocations) { LocationNode(location: $0) }
             }
         }
         .listStyle(.sidebar)
@@ -162,6 +167,7 @@ private struct LocationRow: View {
         case .folder: return "folder"
         case .fileSet: return "doc.on.doc"
         case .system: return "lock"
+        case .userInstalled: return "person.crop.square"
         }
     }
 
@@ -270,7 +276,7 @@ struct LocationMenu: View {
             .disabled(!location.online)
         Button("Reveal in Finder") { model.revealLocation(location.id) }
             .disabled(!location.online)
-        if location.kind != .system {
+        if !location.kind.isReadOnly {
             Button("Relink…") { chooseRelinkTarget(for: location, model: model) }
             Divider()
             Button("Remove from Library…") { model.confirmRemoveLocation(location.id) }

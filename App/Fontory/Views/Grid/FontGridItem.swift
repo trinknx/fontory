@@ -104,7 +104,7 @@ final class FontGridItem: NSCollectionViewItem {
     }
 
     /// Shows `row` (or a placeholder while it loads) on `background`.
-    func configure(faceID: Int64, row: FaceRow?, locked: Bool, background: CGColor) {
+    func configure(faceID: Int64, row: FaceRow?, background: CGColor) {
         if self.faceID != faceID { previewLayer.contents = nil }
         self.faceID = faceID
         view.layer?.backgroundColor = background
@@ -119,15 +119,7 @@ final class FontGridItem: NSCollectionViewItem {
         }
         label.stringValue = row.style.isEmpty ? row.family : "\(row.family) — \(row.style)"
         view.toolTip = row.fullName
-        if locked {
-            dot.state = .locked
-        } else {
-            switch row.activation {
-            case .off: dot.state = .off
-            case .on: dot.state = .on
-            case .temporary: dot.state = .temporary
-            }
-        }
+        dot.state = ActivationDot.State(row.activationStatus)
         dot.isOffline = !row.online
         offlineBadge.isHidden = row.online
         previewLayer.opacity = row.online ? 1 : 0.4
@@ -153,9 +145,21 @@ private final class GridCellView: NSView {
     }
 }
 
-/// The activation dot. Click toggles; press and hold (0.4 s) opens the activation menu.
+/// The activation dot. Click toggles; press and hold (0.4 s) opens the activation menu. Fonts active outside Fontory
+/// and system fonts show their own, inert look.
 final class ActivationDot: NSView {
-    enum State { case placeholder, off, on, temporary, locked }
+    enum State {
+        case placeholder, off, on, external, locked
+
+        init(_ status: ActivationStatus) {
+            switch status {
+            case .system: self = .locked
+            case .external: self = .external
+            case .on: self = .on
+            case .off: self = .off
+            }
+        }
+    }
 
     static let holdDelay: TimeInterval = 0.4
 
@@ -183,7 +187,7 @@ final class ActivationDot: NSView {
         fatalError("init(coder:) is not supported")
     }
 
-    private var isInteractive: Bool { state != .locked && state != .placeholder }
+    private var isInteractive: Bool { state == .on || state == .off }
 
     private func refresh() {
         let symbol: String
@@ -193,10 +197,10 @@ final class ActivationDot: NSView {
         case .placeholder: symbol = "circle"; tint = .quaternaryLabelColor; help = ""
         case .off: symbol = "circle"; tint = .secondaryLabelColor; help = "Off — click to activate, hold for more"
         case .on: symbol = "circle.fill"; tint = .systemGreen; help = "Active — click to deactivate, hold for more"
-        case .temporary: symbol = "circle.lefthalf.filled"; tint = .systemOrange; help = "Temporarily active — click to deactivate, hold for more"
+        case .external: symbol = "circle.inset.filled"; tint = .systemBlue; help = "Active outside Fontory"
         case .locked: symbol = "lock.fill"; tint = .tertiaryLabelColor; help = "System font — always available"
         }
-        if isOffline && state != .locked { tint = .tertiaryLabelColor }
+        if isOffline && isInteractive { tint = .tertiaryLabelColor }
         imageView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: help)
         imageView.contentTintColor = tint
         toolTip = help.isEmpty ? nil : help

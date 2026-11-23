@@ -30,9 +30,6 @@ struct FontoryApp: App {
                     .keyboardShortcut("0")
                 Divider()
             }
-            CommandMenu("Fonts") {
-                Button("Clear Temporary Fonts") { Task { await model.clearTemporary() } }
-            }
         }
 
         Settings {
@@ -94,7 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         !keepRunningInMenuBar
     }
 
-    /// Temporary activations are cleared before quitting. That work is async, so termination waits for it
+    /// Faces still temporary (left by an older version; the UI no longer creates them) are cleared before quitting. That work is async, so termination waits for it
     /// (at most 5 s) instead of running it in `applicationWillTerminate`, which cannot await.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if quitPrepared { return .terminateNow }

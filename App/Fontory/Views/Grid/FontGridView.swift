@@ -356,7 +356,7 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         guard faceIDs.indices.contains(index) else { return }
         let id = faceIDs[index]
         let row = model.cachedRow(id)
-        item.configure(faceID: id, row: row, locked: row.map(model.isActivationLocked) ?? false, background: preview.background)
+        item.configure(faceID: id, row: row, background: preview.background)
         guard let row else {
             item.wantedKey = nil
             needRow(at: index)
