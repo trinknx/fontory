@@ -23,6 +23,8 @@ public struct LibraryQuery: Sendable, Hashable {
     public var includeSystem: Bool = true
     public var sort: Sort = .family
     public var ascending: Bool = true
+    /// Toolbar filters, ANDed with everything else.
+    public var filters = LibraryFilters()
 
     public init(scope: Scope = .all, includeSystem: Bool = true, sort: Sort = .family, ascending: Bool = true) {
         self.scope = scope
@@ -146,6 +148,9 @@ extension LibraryQuery {
             clauses += w.clauses
             bindings += w.bindings
         }
+        let extra = filters.clauses()
+        clauses += extra.clauses
+        bindings += extra.bindings
         return (clauses, bindings)
     }
 }

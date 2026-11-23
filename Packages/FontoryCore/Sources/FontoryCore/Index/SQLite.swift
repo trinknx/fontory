@@ -53,6 +53,25 @@ public final class Database: @unchecked Sendable {
             let msg = String(cString: sqlite3_errmsg(h))
             throw SQLiteError(code: fnRC, message: "fontory_fold: \(msg)")
         }
+        // fontory_covers(ranges, needed): 1 when every scalar in `needed` lies in the coverage `ranges` (library filters).
+        let coversRC = sqlite3_create_function_v2(h, "fontory_covers", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC, nil, { ctx, argc, argv in
+            guard argc == 2, let argv, let a = argv[0], let b = argv[1],
+                  sqlite3_value_type(a) == SQLITE_BLOB, sqlite3_value_type(b) == SQLITE_BLOB else { sqlite3_result_null(ctx); return }
+            let ranges = UnsafeRawBufferPointer(start: sqlite3_value_blob(a), count: Int(sqlite3_value_bytes(a)))
+            let runs: NeededRuns
+            if let aux = sqlite3_get_auxdata(ctx, 1) {
+                runs = Unmanaged<NeededRuns>.fromOpaque(aux).takeUnretainedValue()
+            } else {
+                // `needed` is a bound parameter, the same for every row: decode it once per statement.
+                runs = NeededRuns(needed: UnsafeRawBufferPointer(start: sqlite3_value_blob(b), count: Int(sqlite3_value_bytes(b))))
+                sqlite3_set_auxdata(ctx, 1, Unmanaged.passRetained(runs).toOpaque(), { Unmanaged<NeededRuns>.fromOpaque($0!).release() })
+            }
+            sqlite3_result_int(ctx, runs.covered(by: ranges) ? 1 : 0)
+        }, nil, nil, nil)
+        guard coversRC == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(h))
+            throw SQLiteError(code: coversRC, message: "fontory_covers: \(msg)")
+        }
         if readOnly {
             try execute("PRAGMA query_only=ON")
         } else {
