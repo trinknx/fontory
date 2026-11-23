@@ -223,6 +223,12 @@ public final class PreviewRenderer: Sendable {
         sizedFont(fileURL, faceIndex, pointSize: pointSize, features: .standard, allCaps: false)
     }
 
+    /// The face at `pointSize` with `features` applied (small caps without `c2sc`), from the shared font cache. The
+    /// Text tab's body text sets with it.
+    public func font(fileURL: URL, faceIndex: Int, pointSize: CGFloat, features: PreviewFeatures) -> CTFont? {
+        sizedFont(fileURL, faceIndex, pointSize: pointSize, features: features, allCaps: false)
+    }
+
     /// The styled text of a request, as drawn. For tests.
     func attributedText(fileURL: URL, faceIndex: Int, request: PreviewRequest) -> NSAttributedString? {
         guard let font = sizedFont(for: request, fileURL, faceIndex) else { return nil }

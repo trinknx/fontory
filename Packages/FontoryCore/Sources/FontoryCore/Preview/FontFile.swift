@@ -37,4 +37,22 @@ enum MetricGuides {
         stroke(baseline, baselineColor)
         ctx.restoreGState()
     }
+
+    /// Dashed baseline (accent) and x-height (faint) of one line of body text, `width` points long from `x`.
+    static func drawLineGuides(_ ctx: CGContext, font: CTFont, x: CGFloat, baseline: CGFloat, width: CGFloat,
+                               foreground: CGColor, scale: CGFloat) {
+        let neutral = foreground.copy(alpha: 0.28) ?? foreground
+        ctx.saveGState()
+        ctx.setLineWidth(1 / scale)
+        ctx.setLineDash(phase: 0, lengths: [3, 3])
+        func stroke(_ y: CGFloat, _ color: CGColor) {
+            let snapped = ((y * scale).rounded() + 0.5) / scale
+            ctx.setStrokeColor(color)
+            ctx.strokeLineSegments(between: [CGPoint(x: x, y: snapped), CGPoint(x: x + width, y: snapped)])
+        }
+        let xHeight = CTFontGetXHeight(font)
+        if xHeight > 0 { stroke(baseline + xHeight, neutral) }
+        stroke(baseline, baselineColor)
+        ctx.restoreGState()
+    }
 }
