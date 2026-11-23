@@ -15,9 +15,15 @@ struct LibraryCounts: Sendable, Equatable {
 enum LibraryError: LocalizedError {
     case alreadySystemLocation(String)
     case notReachable(String)
+    case overlapsLocation(new: String, existing: String, inside: Bool)
+    case locationOffline(String)
 
     var errorDescription: String? {
         switch self {
+        case .overlapsLocation(let new, let existing, let inside):
+            inside ? "“\(new)” is inside “\(existing)”, which is already in the library."
+                   : "“\(new)” contains “\(existing)”, which is already in the library. Remove “\(existing)” first."
+        case .locationOffline(let name): "“\(name)” is offline. Connect its drive first."
         case .alreadySystemLocation(let name): "“\(name)” is a system font folder and is already in the library."
         case .notReachable(let name): "“\(name)” is not reachable."
         }
@@ -111,47 +117,67 @@ final class LibraryBackend: Sendable {
         return added
     }
 
+    /// Whether `inner` lies strictly inside `outer` on the same volume.
+    private static func contains(_ outer: LocationRecord, _ inner: VolumeRef) -> Bool {
+        guard outer.volumeUUID == inner.volumeUUID, outer.relativePath != inner.relativePath else { return false }
+        return outer.relativePath.isEmpty || inner.relativePath.hasPrefix(outer.relativePath + "/")
+    }
+
+    private static func contains(_ outer: VolumeRef, _ inner: LocationRecord) -> Bool {
+        guard outer.volumeUUID == inner.volumeUUID, outer.relativePath != inner.relativePath else { return false }
+        return outer.relativePath.isEmpty || inner.relativePath.hasPrefix(outer.relativePath + "/")
+    }
+
+    /// Adds a folder location. Refuses a system folder and any folder inside or containing another location
+    /// (its fonts would be indexed twice). Re-adding the same folder, or a file set's folder, reuses that location.
     func addFolder(_ url: URL) throws -> LocationRecord {
         let ref = try VolumeIdentity.ref(for: url)
-        if let existing = try store.locations().first(where: { $0.volumeUUID == ref.volumeUUID && $0.relativePath == ref.relativePath }),
+        let all = try store.locations()
+        if let existing = all.first(where: { $0.volumeUUID == ref.volumeUUID && $0.relativePath == ref.relativePath }),
            existing.kind == .system {
             throw LibraryError.alreadySystemLocation(existing.displayName)
+        }
+        if let outer = all.first(where: { Self.contains($0, ref) }) {
+            throw LibraryError.overlapsLocation(new: url.lastPathComponent, existing: outer.displayName, inside: true)
+        }
+        if let inner = all.first(where: { Self.contains(ref, $0) }) {
+            throw LibraryError.overlapsLocation(new: url.lastPathComponent, existing: inner.displayName, inside: false)
         }
         return try store.upsertLocation(kind: .folder, volumeUUID: ref.volumeUUID, relativePath: ref.relativePath,
                                         displayName: url.lastPathComponent, lastKnownPath: url.standardizedFileURL.path)
     }
 
-    /// The folder or system location whose tree already contains `folder`, if any.
-    func coveringLocation(of folder: URL) throws -> LocationRecord? {
-        let path = folder.resolvingSymlinksInPath().standardizedFileURL.path
-        return try store.locations().first { loc in
-            guard loc.kind != .fileSet, loc.online else { return false }
-            let root = URL(fileURLWithPath: loc.lastKnownPath).resolvingSymlinksInPath().standardizedFileURL.path
-            return path == root || path.hasPrefix(root + "/")
-        }
+    enum FileTarget {
+        /// A folder or system location already covers the files: rescan it.
+        case covered(LocationRecord)
+        case fileSet(LocationRecord)
     }
 
-    /// The `.fileSet` location for `folder`, created if needed.
-    func fileSetLocation(for folder: URL) throws -> LocationRecord {
+    /// Where individual files from `folder` go: the folder/system location that already contains them, else the
+    /// `.fileSet` location for exactly that folder (created if needed). Never changes an existing location's kind.
+    func fileTarget(for folder: URL) throws -> FileTarget {
         let ref = try VolumeIdentity.ref(for: folder)
-        if let existing = try store.locations().first(where: { $0.volumeUUID == ref.volumeUUID && $0.relativePath == ref.relativePath }),
-           existing.kind == .fileSet {
-            return existing
+        let all = try store.locations()
+        let covering = all.first { loc in
+            loc.kind != .fileSet && loc.volumeUUID == ref.volumeUUID
+                && (loc.relativePath == ref.relativePath || Self.contains(loc, ref))
         }
-        return try store.upsertLocation(kind: .fileSet, volumeUUID: ref.volumeUUID, relativePath: ref.relativePath,
-                                        displayName: folder.lastPathComponent, lastKnownPath: folder.standardizedFileURL.path)
+        if let covering {
+            guard covering.online else { throw LibraryError.locationOffline(covering.displayName) }
+            return .covered(covering)
+        }
+        if let existing = all.first(where: { $0.volumeUUID == ref.volumeUUID && $0.relativePath == ref.relativePath }) {
+            return .fileSet(existing)  // necessarily a file set: folder and system kinds matched above
+        }
+        return .fileSet(try store.upsertLocation(kind: .fileSet, volumeUUID: ref.volumeUUID, relativePath: ref.relativePath,
+                                                 displayName: folder.lastPathComponent, lastKnownPath: folder.standardizedFileURL.path))
     }
 
     /// Points a location at a new folder. Its files keep their ids (and activation) when their relative paths match.
     func relink(_ id: Int64, to url: URL) throws {
         let ref = try VolumeIdentity.ref(for: url)
-        let s = try store.database.prepare("""
-        UPDATE locations SET volume_uuid = ?, relative_path = ?, display_name = ?, last_known_path = ?, online = 1 WHERE id = ?
-        """)
-        defer { s.reset() }
-        try s.bind([.text(ref.volumeUUID), .text(ref.relativePath), .text(url.lastPathComponent),
-                    .text(url.standardizedFileURL.path), .int(id)])
-        _ = try s.step()
+        try store.relinkLocation(id, volumeUUID: ref.volumeUUID, relativePath: ref.relativePath,
+                                 displayName: url.lastPathComponent, lastKnownPath: url.standardizedFileURL.path)
     }
 
     // MARK: File sets
@@ -233,27 +259,18 @@ final class LibraryBackend: Sendable {
     // MARK: Counts
 
     func counts(includeSystem: Bool) throws -> LibraryCounts {
-        let s = try store.database.prepare("""
-        SELECT faces.activation, locations.online, files.location_id, locations.kind,
-          files.import_batch = (SELECT MAX(import_batch) FROM files), COUNT(*)
-        FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
-        GROUP BY 1, 2, 3, 4, 5
-        """)
-        defer { s.reset() }
         var c = LibraryCounts()
-        while try s.step() {
-            let n = Int(s.int64(5))
-            let location = s.int64(2)
-            c.perLocation[location, default: 0] += n
-            if !includeSystem && s.int64(3) == Int64(LocationKind.system.rawValue) { continue }
-            c.all += n
-            switch ActivationState(rawValue: Int(s.int64(0))) ?? .off {
-            case .on: c.activated += n
-            case .temporary: c.temporary += n
-            case .off: c.deactivated += n
+        for g in try store.faceCountGroups() {
+            c.perLocation[g.locationID, default: 0] += g.count
+            if !includeSystem && g.kind == .system { continue }
+            c.all += g.count
+            switch g.activation {
+            case .on: c.activated += g.count
+            case .temporary: c.temporary += g.count
+            case .off: c.deactivated += g.count
             }
-            if s.int64(1) == 0 { c.offline += n }
-            if s.int64(4) != 0 { c.lastImport += n }
+            if !g.online { c.offline += g.count }
+            if g.inLatestImport { c.lastImport += g.count }
         }
         return c
     }

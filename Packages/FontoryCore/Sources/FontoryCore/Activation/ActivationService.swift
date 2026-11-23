@@ -106,6 +106,20 @@ public actor ActivationService {
         return report
     }
 
+    /// For a launch without restore: nothing from the previous run is registered, so temporary faces go off
+    /// in the DB without touching the registrar. On faces keep their state.
+    public func forgetTemporary() -> ActivationReport {
+        var report = ActivationReport()
+        do {
+            let ids = try store.faceIDs(state: .temporary)
+            try store.setActivation(faceIDs: ids, state: .off, at: now())
+            report.changedFaceIDs = ids
+        } catch {
+            report.failures[-1] = "\(error)"
+        }
+        return report
+    }
+
     public func clearTemporary() async -> ActivationReport {
         do {
             return await set(try store.faceIDs(state: .temporary), to: .off)

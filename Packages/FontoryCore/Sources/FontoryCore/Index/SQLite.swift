@@ -25,18 +25,36 @@ public final class Database: @unchecked Sendable {
     private var cache: [String: Statement] = [:]
     private var transactionDepth = 0
 
-    public init(path: String) throws {
+    public let path: String
+    public let isReadOnly: Bool
+
+    /// `readOnly` opens an existing database file for reading only (a second connection beside a writer;
+    /// with WAL it reads the last committed state while the writer has a transaction open).
+    public init(path: String, readOnly: Bool = false) throws {
+        self.path = path
+        self.isReadOnly = readOnly
         var h: OpaquePointer?
-        let rc = sqlite3_open_v2(path, &h, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil)
+        let mode = readOnly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+        let rc = sqlite3_open_v2(path, &h, mode | SQLITE_OPEN_FULLMUTEX, nil)
         guard rc == SQLITE_OK, let h else {
             let msg = h.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
             if let h { sqlite3_close(h) }
             throw SQLiteError(code: rc, message: msg)
         }
         handle = h
-        try execute("PRAGMA journal_mode=WAL")
-        try execute("PRAGMA foreign_keys=ON")
-        try execute("PRAGMA synchronous=NORMAL")
+        if readOnly {
+            try execute("PRAGMA query_only=ON")
+        } else {
+            try execute("PRAGMA journal_mode=WAL")
+            try execute("PRAGMA foreign_keys=ON")
+            try execute("PRAGMA synchronous=NORMAL")
+        }
+    }
+
+    /// Holds the connection lock for the whole body. Statements are cached per SQL string and shared, so every
+    /// prepare → bind → step… → reset sequence must run inside this to keep concurrent callers from interleaving.
+    public func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        try lock.withLock(body)
     }
 
     deinit {

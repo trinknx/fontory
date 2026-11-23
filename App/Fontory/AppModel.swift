@@ -178,8 +178,12 @@ final class AppModel {
         if UserDefaults.standard.bool(forKey: SettingsKey.restoreOnLaunch) {
             let report = await backend.activation.restoreOnLaunch()
             present(report, state: .on, context: "Restoring activated fonts")
-            invalidateRows()
+        } else {
+            // Nothing from the previous run is registered; temporary activations do not outlive it.
+            let report = await backend.activation.forgetTemporary()
+            present(report, state: .off, context: "Resetting temporary fonts")
         }
+        invalidateRows()
         // 5. Incremental background rescan of the online user locations (and the system folders added just now).
         for loc in locations where loc.online && (loc.kind != .system || newSystem.contains(loc.id)) {
             rescan(loc.id)
@@ -242,13 +246,13 @@ final class AppModel {
         guard generation == refreshGeneration else { return }
         switch result {
         case .success(let (ids, index, families)):
-            rowCache.removeAll()
+            // Rows are keyed by face id and do not depend on the query, so the cache survives refreshes;
+            // it is dropped only when activation changes or a scan finishes.
             indexByID = index
             if ids != faceIDs { faceIDs = ids }
             if wantFamilies { self.families = families }
             let kept = selection.filter { index[$0] != nil }
             if kept.count != selection.count { selection = kept }
-            rowsVersion &+= 1
         case .failure(let error):
             Self.log.error("query failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -317,17 +321,17 @@ final class AppModel {
         guard let backend else { return }
         let byFolder = Dictionary(grouping: urls) { $0.deletingLastPathComponent().standardizedFileURL }
         for (folder, files) in byFolder {
-            let covering = await runBackground { try backend.coveringLocation(of: folder) }
-            if let covering = covering ?? nil {
+            guard let target = await runBackground({ try backend.fileTarget(for: folder) },
+                                                   failureTitle: "The fonts could not be added") else { continue }
+            switch target {
+            case .covered(let covering):
                 rescan(covering.id)
-                continue
+            case .fileSet(let loc):
+                await reloadLocations()
+                scanProgress[loc.id] = ScanProgress(locationID: loc.id, phase: .parsing, total: files.count)
+                let progress = await runBackground { try backend.importFiles(files, into: loc) }
+                scanProgress[loc.id] = progress ?? ScanProgress(locationID: loc.id, phase: .aborted(reason: "import failed"))
             }
-            guard let loc = await runBackground({ try backend.fileSetLocation(for: folder) },
-                                                failureTitle: "The fonts could not be added") else { continue }
-            await reloadLocations()
-            scanProgress[loc.id] = ScanProgress(locationID: loc.id, phase: .parsing, total: files.count)
-            let progress = await runBackground { try backend.importFiles(files, into: loc) }
-            scanProgress[loc.id] = progress ?? ScanProgress(locationID: loc.id, phase: .aborted(reason: "import failed"))
         }
         query.scope = .recentImport
         await scanFinished()
@@ -390,6 +394,7 @@ final class AppModel {
     }
 
     private func scanFinished() async {
+        invalidateRows()
         await reloadLocations()
         refreshCounts()
         scheduleRefresh()
