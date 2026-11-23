@@ -36,6 +36,7 @@ struct MainWindow: View {
         .toolbar { BrowserToolbar(model: model) }
         .frame(minWidth: 820, minHeight: 480)
         .modelAlert(model, inSettings: false)
+        .sheet(item: $model.tagPanel) { TagPanel(model: model, request: $0) }
         .alert("Save Preview Text as Preset", isPresented: $model.isNamingPreset) {
             TextField("Name", text: $presetName)
             Button("Save") {

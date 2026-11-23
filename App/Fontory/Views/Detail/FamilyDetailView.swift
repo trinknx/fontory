@@ -364,12 +364,14 @@ struct FamilyInfoView: View {
             InfoRow("Status", status(info))
             InfoRow("Last activated", info.lastActivated.map(Self.date) ?? "Never")
         }
-        InfoSection("Notes") {
+        InfoSection("Tags and notes") {
+            GridRow {
+                InfoLabel("Tags")
+                FaceTagsView(model: model, faceID: info.id)
+            }
             GridRow {
                 InfoLabel("Notes")
-                Text(info.note?.isEmpty == false ? info.note! : "No notes")
-                    .foregroundStyle(info.note?.isEmpty == false ? .primary : .secondary)
-                    .textSelection(.enabled)
+                NoteEditor(model: model, faceID: info.id, stored: info.note)
             }
         }
     }
@@ -414,6 +416,138 @@ struct FamilyInfoView: View {
 
     private static func date(_ d: Date) -> String {
         d.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+/// The face's own tags as chips (full path for nested ones), and a button opening the ⌘T panel for this face.
+private struct FaceTagsView: View {
+    let model: AppModel
+    let faceID: Int64
+    @State private var tagIDs: (faceID: Int64, ids: Set<Int64>)?
+
+    private struct LoadKey: Equatable {
+        let faceID: Int64
+        let version: Int
+    }
+
+    var body: some View {
+        let paths = (tagIDs?.ids ?? []).map { model.tagPath($0) }.filter { !$0.isEmpty }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        ChipFlow(spacing: 6) {
+            if tagIDs != nil, paths.isEmpty {
+                Text("No tags").foregroundStyle(.secondary)
+            }
+            ForEach(paths, id: \.self) { path in
+                Text(path)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                    .textSelection(.enabled)
+            }
+            Button("Edit Tags…") { model.showTagPanel(for: [faceID]) }
+                .controlSize(.small)
+                .help("Assign tags to this style (⌘T)")
+        }
+        .opacity(tagIDs?.faceID == faceID ? 1 : 0.6)
+        .task(id: LoadKey(faceID: faceID, version: model.tagAssignmentVersion)) {
+            let id = faceID
+            guard let map = await model.faceTagMap([id]), !Task.isCancelled else { return }
+            tagIDs = (id, map[id] ?? [])
+        }
+    }
+}
+
+/// Lays its children out in rows, wrapping at the available width.
+private struct ChipFlow: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(width: proposal.width ?? .infinity, subviews: subviews)
+        let width = rows.map(\.width).max() ?? 0
+        let height = rows.map(\.height).reduce(0, +) + spacing * CGFloat(max(0, rows.count - 1))
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(width: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for index in row.indexes {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: y + (row.height - size.height) / 2), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+
+    private struct Row {
+        var indexes: [Int] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func arrange(width: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = []
+        var current = Row()
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            let needed = current.indexes.isEmpty ? size.width : current.width + spacing + size.width
+            if !current.indexes.isEmpty, needed > width {
+                rows.append(current)
+                current = Row()
+            }
+            current.width = current.indexes.isEmpty ? size.width : current.width + spacing + size.width
+            current.height = max(current.height, size.height)
+            current.indexes.append(index)
+        }
+        if !current.indexes.isEmpty { rows.append(current) }
+        return rows
+    }
+}
+
+/// The face's note, editable. Each keystroke goes to the model under the face the editor shows (`draftFaceID`),
+/// which writes it 0.5 s after typing stops; a style change or leaving the page writes it at once.
+private struct NoteEditor: View {
+    let model: AppModel
+    let faceID: Int64
+    let stored: String?
+
+    @State private var draft = ""
+    @State private var draftFaceID: Int64?
+
+    var body: some View {
+        TextEditor(text: $draft)
+            .font(.body)
+            .scrollContentBackground(.hidden)
+            .padding(4)
+            .frame(minHeight: 70, maxHeight: 160)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(nsColor: .separatorColor)))
+            .overlay(alignment: .topLeading) {
+                if draft.isEmpty {
+                    Text("Add a note").foregroundStyle(.tertiary).padding(.horizontal, 9).padding(.vertical, 4)
+                        .allowsHitTesting(false)
+                }
+            }
+            .onAppear(perform: load)
+            .onChange(of: faceID) { _, _ in
+                // The previous style's typing is already pending under its own id; write it now.
+                Task { await model.flushNotes() }
+                load()
+            }
+            .onChange(of: draft) { _, text in
+                guard let id = draftFaceID, text != model.note(for: id, stored: id == faceID ? stored : nil) else { return }
+                model.editNote(text, faceID: id)
+            }
+            .onDisappear { Task { await model.flushNotes() } }
+    }
+
+    private func load() {
+        draftFaceID = faceID
+        draft = model.note(for: faceID, stored: stored)
     }
 }
 

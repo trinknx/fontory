@@ -542,6 +542,23 @@ final class AppModel {
     @ObservationIgnored var organizationGeneration = 0
     /// The last ⌥-click applied to a tag row, to apply each click once (see `optionClickTag`).
     @ObservationIgnored var lastOptionClick: (tagID: Int64, time: TimeInterval)?
+    /// Bumped after every tag change (assignments included), so views showing a face's tags reload them.
+    var tagAssignmentVersion = 0
+    /// The ⌘T tag panel, when shown.
+    var tagPanel: TagPanelRequest?
+
+    // MARK: Notes (actions in AppModel+Notes.swift)
+
+    /// Typed notes not yet written, by face.
+    @ObservationIgnored var pendingNotes: [Int64: String] = [:]
+    /// Notes written (or being written) this session, by face: newer than a `FaceInfo` read before the write.
+    @ObservationIgnored var savedNotes: [Int64: String] = [:]
+    /// The debounced save of `pendingNotes`.
+    @ObservationIgnored var noteSaveTask: Task<Void, Never>?
+    /// The last note write; each write waits for the previous one, so they land in order.
+    @ObservationIgnored var noteWriteChain: Task<Void, Never>?
+    /// Note write batches started (for the smoke check of the debounce).
+    @ObservationIgnored var noteWriteCount = 0
 
     // MARK: Private
 
@@ -661,6 +678,7 @@ final class AppModel {
 
     func prepareForQuit() async {
         flushPreviewSave()
+        await flushNotes()
         await backend?.activation.prepareForQuit()
     }
 

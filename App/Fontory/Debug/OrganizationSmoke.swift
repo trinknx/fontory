@@ -1,4 +1,5 @@
 #if DEBUG
+import AppKit
 import Foundation
 import FontoryCore
 import SwiftUI
@@ -43,6 +44,8 @@ enum OrganizationSmoke {
             let model = AppModel()
             await model.attachBackendForSmoke(backend)
             await steps(model, faces: faces)
+            await assignmentSteps(model, faces: faces)
+            await noteSteps(model, faces: faces)
         } catch {
             check(false, "setup", "\(error)")
         }
@@ -184,6 +187,149 @@ enum OrganizationSmoke {
         await model.deleteTag(c)
         let all = await shown(model)
         check(model.query.scope == .all && all.count == 3, "deleting the selected tag falls back to All")
+    }
+
+    // MARK: Task 6: assigning tags, notes
+
+    private static func directTags(_ model: AppModel, _ ids: [Int64]) async -> [Int64: Set<Int64>] {
+        await model.faceTagMap(ids) ?? [:]
+    }
+
+    private static func assignmentSteps(_ model: AppModel, faces: [String: Int64]) async {
+        guard let serif = faces["Smoke Serif"], let sans = faces["Smoke Sans"], let mono = faces["Smoke Mono"] else { return }
+        guard let t = await model.createTag(name: "Display", parentID: nil),
+              let sub = await model.createTag(name: "Headline", parentID: t) else {
+            check(false, "create Display and Display/Headline", model.alert?.message ?? "")
+            return
+        }
+        check(model.tagPath(sub) == "Display/Headline", "tag path of a nested tag", model.tagPath(sub))
+        check(model.plainTagTree().contains { $0.tag.id == sub && $0.depth == 1 }
+              && !model.plainTagTree().contains { $0.tag.kind == .smart }, "plain tag tree: subtags indented, no smart tags")
+
+        // Mixed state: setTag on one face of a 2-face selection, read back with tagIDs(forFaces:).
+        await model.setTag(t, onFaces: [serif], included: true)
+        let map = await directTags(model, [serif, sans])
+        let states = AppModel.tagStates(map, faces: [serif, sans])
+        check(states[t] == .mixed, "1 of 2 selected faces tagged: mixed", "\(states)")
+        check(AppModel.tagStates(map, faces: [serif])[t] == .on && AppModel.tagStates(map, faces: [sans])[t] == nil,
+              "on for the tagged face alone, off for the other")
+
+        // Toggling mixed adds to all; toggling on removes from all.
+        await model.toggleTag(t, onFaces: [serif, sans], from: .mixed)
+        var after = AppModel.tagStates(await directTags(model, [serif, sans]), faces: [serif, sans])
+        check(after[t] == .on, "toggling a mixed tag adds it to the whole selection", "\(after)")
+        await model.toggleTag(t, onFaces: [serif, sans], from: .on)
+        after = AppModel.tagStates(await directTags(model, [serif, sans]), faces: [serif, sans])
+        check(after[t] == nil, "toggling an 'on' tag removes it from the whole selection", "\(after)")
+
+        // Drops: plain drop adds, ⌥-drop removes; Style, smart and Library rows refuse.
+        var ok = await model.dropFaces([serif, mono], on: .tag(t), removing: false)
+        var direct = await directTags(model, [serif, sans, mono])
+        check(ok && direct[serif]?.contains(t) == true && direct[mono]?.contains(t) == true && direct[sans] == nil,
+              "drop fonts on a tag tags them", "\(direct)")
+        ok = await model.dropFaces([mono], on: .tag(t), removing: true)
+        direct = await directTags(model, [serif, mono])
+        check(ok && direct[serif]?.contains(t) == true && direct[mono]?.contains(t) != true, "⌥-drop removes the tag", "\(direct)")
+        let before = model.organizationCounts
+        let smart = model.tags.first { $0.kind == .smart }
+        check(smart != nil, "a smart tag exists for the refusal check")
+        let refusedStyle = await model.dropFaces([sans], on: .scope(.styleClass(.serif)), removing: false)
+        let refusedSmart = await model.dropFaces([sans], on: .tag(smart?.id ?? -1), removing: false)
+        let refusedLibrary = await model.dropFaces([sans], on: .scope(.all), removing: false)
+        check(!refusedStyle && !model.acceptsFaceDrop(on: .scope(.styleClass(.serif))), "drop on a Style row is refused")
+        check(!refusedSmart && smart.map { !model.acceptsFaceDrop(on: .tag($0.id)) } == true, "drop on a smart tag is refused")
+        check(!refusedLibrary && !model.acceptsFaceDrop(on: .scope(.all)), "drop on a Library row is ignored")
+        let sansTags = await directTags(model, [sans])
+        check(model.organizationCounts == before && sansTags[sans] == nil,
+              "refused drops change nothing")
+
+        // Drag payload round trip.
+        check(FaceDrag.decode(Data(FaceDrag.encode([serif, mono]).utf8)) == [serif, mono], "drag payload round trip")
+
+        // Context menu: Tags ▸ with checkbox states once loaded, toggling through the item, New Tag….
+        _ = NSApplication.shared
+        let menu = FontContextMenu.make(for: [serif, mono], model: model)
+        let tagsMenu = menu.items.first { $0.title == "Tags" }?.submenu
+        check(tagsMenu?.items.last?.title == "New Tag…", "context menu has Tags ▸ … New Tag…")
+        let displayItem = tagsMenu?.items.first { $0.title == "Display" }
+        let headlineItem = tagsMenu?.items.first { $0.title == "Headline" }
+        for _ in 0..<50 where displayItem?.isEnabled != true { try? await Task.sleep(for: .milliseconds(20)) }
+        check(displayItem?.state == .mixed && displayItem?.isEnabled == true, "menu: Display mixed for serif+mono",
+              "\(String(describing: displayItem?.state))")
+        check(headlineItem?.indentationLevel == 1 && headlineItem?.state == .off, "menu: Headline indented, off")
+        if let tagsMenu, let displayItem, let index = tagsMenu.items.firstIndex(of: displayItem) {
+            tagsMenu.performActionForItem(at: index)
+            var tagged = false
+            for _ in 0..<100 {
+                let m = await directTags(model, [serif, mono])
+                if m[serif]?.contains(t) == true && m[mono]?.contains(t) == true { tagged = true; break }
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+            check(tagged, "menu: choosing a mixed tag adds it to the whole selection")
+        }
+
+        // "New Tag…" (after its name prompt): creates the tag at the top level and tags the selection.
+        let created = await model.createTagAndAssign(name: "Việt Nam", faces: [serif, mono])
+        direct = await directTags(model, [serif, sans, mono])
+        check(created != nil && model.tag(created ?? -1)?.parentID == nil
+              && direct[serif]?.contains(created ?? -1) == true && direct[mono]?.contains(created ?? -1) == true
+              && direct[sans] == nil, "New Tag… creates a top-level tag and tags the selection", "\(direct)")
+        let again = await model.createTagAndAssign(name: "viet nam", faces: [sans])
+        check(again == created && model.alert == nil, "New Tag… with an existing name (case/diacritics) reuses it")
+        model.alert = nil
+
+        // ⌘T panel matching: subsequence, case- and diacritic-insensitive.
+        check(TagSearch.score("vn", in: "Việt Nam") != nil && TagSearch.score("VIET", in: "Việt Nam") == 0,
+              "fuzzy: diacritic- and case-insensitive")
+        check(TagSearch.score("dep", in: "Đẹp") == 0, "fuzzy: đ matches d")
+        check(TagSearch.score("dh", in: "Display/Headline") != nil && TagSearch.score("head", in: "Display/Headline") == 1
+              && TagSearch.score("xyz", in: "Display/Headline") == nil, "fuzzy: subsequence and last-name prefix")
+        model.selection = [sans, serif]
+        check(Set(model.tagPanelTargets) == [sans, serif], "⌘T targets the selection")
+        model.selection = []
+        check(model.tagPanelTargets.isEmpty, "⌘T has nothing to act on without a selection")
+        model.showTagPanel()
+        check(model.tagPanel == nil, "⌘T does nothing without a selection")
+        model.showTagPanel(for: [mono])
+        check(model.tagPanel?.faceIDs == [mono], "Edit Tags… opens the panel for one face")
+        model.tagPanel = nil
+    }
+
+    private static func noteSteps(_ model: AppModel, faces: [String: Int64]) async {
+        guard let serif = faces["Smoke Serif"], let sans = faces["Smoke Sans"] else { return }
+        // Typing: five keystrokes 50 ms apart, then the 0.5 s debounce: one write with the last text.
+        let writes = model.noteWriteCount
+        var typed = ""
+        for ch in "zebra" {
+            typed.append(ch)
+            model.editNote(typed, faceID: serif)
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        check(model.noteWriteCount == writes, "no note write while typing")
+        try? await Task.sleep(for: .milliseconds(800))
+        await model.flushNotes()  // waits for the write in flight; nothing pending
+        let info = await model.faceInfo(serif)
+        check(model.noteWriteCount == writes + 1 && info?.note == "zebra", "note debounce writes once, with the last text",
+              "writes \(model.noteWriteCount - writes), note \(String(describing: info?.note))")
+        check(model.note(for: serif, stored: nil) == "zebra", "the editor gets the saved note back")
+
+        // A style change mid-typing keeps each face's keystrokes.
+        model.editNote("first face", faceID: sans)
+        model.editNote("zebra stripes", faceID: serif)
+        await model.flushNotes()
+        let sansNote = await model.faceInfo(sans)?.note
+        let serifNote = await model.faceInfo(serif)?.note
+        check(sansNote == "first face" && serifNote == "zebra stripes", "flush on style change keeps both faces' notes",
+              "\(String(describing: sansNote)) / \(String(describing: serifNote))")
+
+        // Notes are found by search.
+        model.query.scope = .all
+        model.searchScope = [.notes]
+        model.searchText = "stripes"
+        let found = await shown(model)
+        check(found == [serif], "a note set through the model is found by search", "\(found)")
+        model.searchText = ""
+        model.searchScope = Set(SearchText.Field.allCases)
     }
 }
 #endif

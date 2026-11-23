@@ -2,6 +2,7 @@ import AppKit
 import FontoryCore
 import SwiftUI
 import os
+import UniformTypeIdentifiers
 
 /// The zoomable font grid: an `NSCollectionView` with a flow layout, wrapped for SwiftUI.
 /// Every input is passed in explicitly so SwiftUI calls `updateNSView` exactly when one of them changes.
@@ -120,6 +121,9 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         cv.dataSource = self
         cv.delegate = self
         cv.prefetchDataSource = self
+        // Fonts drag to sidebar tags (face ids) and to Finder (their files, copied).
+        cv.setDraggingSourceOperationMask(.copy, forLocal: true)
+        cv.setDraggingSourceOperationMask(.copy, forLocal: false)
         collectionView = cv
 
         let scroll = NSScrollView()
@@ -495,6 +499,33 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         pushSelection()
     }
 
+    // MARK: Dragging
+
+    /// The faces of the drag being started (the selection, or the unselected cell that was dragged).
+    private var draggedFaceIDs: [Int64] = []
+
+    func collectionView(_ collectionView: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool {
+        draggedFaceIDs = indexPaths.map(\.item).sorted().compactMap { faceIDs.indices.contains($0) ? faceIDs[$0] : nil }
+        return !draggedFaceIDs.isEmpty
+    }
+
+    /// One pasteboard item per dragged cell: its file URL (for Finder), and the ids of every dragged face (each item
+    /// carries the whole list, so a drop target reading only the first item still gets them all).
+    func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
+        guard faceIDs.indices.contains(indexPath.item) else { return nil }
+        let id = faceIDs[indexPath.item]
+        let ids = draggedFaceIDs.contains(id) ? draggedFaceIDs : [id]
+        let item = NSPasteboardItem()
+        item.setString(FaceDrag.encode(ids), forType: FaceDrag.pasteboardType)
+        if let url = model.cachedRow(id)?.fileURL { item.setString(url.absoluteString, forType: .fileURL) }
+        return item
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, draggingSession session: NSDraggingSession,
+                        endedAt screenPoint: NSPoint, dragOperation operation: NSDragOperation) {
+        draggedFaceIDs = []
+    }
+
     private func pushSelection() {
         let ids = Set(collectionView.selectionIndexPaths.compactMap { faceIDs.indices.contains($0.item) ? faceIDs[$0.item] : nil })
         if model.selection != ids { model.selection = ids }
@@ -614,3 +645,56 @@ final class FontCollectionView: NSCollectionView {
     }
 }
 
+
+/// Fonts dragged out of the browser: their face ids as comma-separated UTF-8 text under `local.fontory.face-ids`.
+enum FaceDrag {
+    static let pasteboardType = NSPasteboard.PasteboardType(UTType.fontoryFaceIDs.identifier)
+
+    static func encode(_ ids: [Int64]) -> String { ids.map(String.init).joined(separator: ",") }
+
+    static func decode(_ data: Data) -> [Int64] {
+        String(decoding: data, as: UTF8.self).split(separator: ",").compactMap { Int64($0) }
+    }
+
+    /// Reads the dragged face ids (deduplicated, in order) from every provider that has them and hands them to
+    /// `handler` on the main actor. Returns whether any provider carries face ids.
+    static func load(_ providers: [NSItemProvider], _ handler: @escaping @MainActor @Sendable ([Int64]) -> Void) -> Bool {
+        let matching = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fontoryFaceIDs.identifier) }
+        guard !matching.isEmpty else { return false }
+        let collected = Collected()
+        let group = DispatchGroup()
+        for provider in matching {
+            group.enter()
+            _ = provider.loadDataRepresentation(for: .fontoryFaceIDs) { data, _ in
+                if let data { collected.append(decode(data)) }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            let ids = collected.ids
+            MainActor.assumeIsolated { if !ids.isEmpty { handler(ids) } }
+        }
+        return true
+    }
+
+    private final class Collected: @unchecked Sendable {
+        private let lock = NSLock()
+        private var seen: Set<Int64> = []
+        private var ordered: [Int64] = []
+
+        func append(_ ids: [Int64]) {
+            lock.lock(); defer { lock.unlock() }
+            for id in ids where seen.insert(id).inserted { ordered.append(id) }
+        }
+
+        var ids: [Int64] {
+            lock.lock(); defer { lock.unlock() }
+            return ordered
+        }
+    }
+}
+
+extension UTType {
+    /// Fonts dragged from the browser (see `FaceDrag`). Declared in Info.plist.
+    static let fontoryFaceIDs = UTType(exportedAs: "local.fontory.face-ids", conformingTo: .data)
+}

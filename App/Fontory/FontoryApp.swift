@@ -51,6 +51,11 @@ struct FontoryApp: App {
                     .keyboardShortcut("p", modifiers: [.option, .command])
                 Divider()
             }
+            CommandMenu("Font") {
+                Button("Tags…") { if model.browserIsKey { model.showTagPanel() } }
+                    .keyboardShortcut("t")
+                    .disabled(!model.isBrowserKey || (model.selection.isEmpty && (model.detail == nil || model.detailSelection.isEmpty)))
+            }
         }
 
         Settings {

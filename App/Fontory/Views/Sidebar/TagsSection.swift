@@ -107,16 +107,21 @@ private struct TagRow: View {
     }
 }
 
-/// Plain tags accept dropped tags (nesting). Smart tags accept nothing. Font drops (Task 6) go here too.
+/// Plain tags accept dropped tags (nesting) and dropped fonts (tagged; ⌥-drop untags). Smart tags accept nothing.
 private struct TagDropTarget: ViewModifier {
     @Environment(AppModel.self) private var model
     let tag: TagRecord
     @Binding var isTargeted: Bool
 
     func body(content: Content) -> some View {
-        if tag.kind == .tag {
-            content.onDrop(of: [.fontoryTag], isTargeted: $isTargeted) { providers in
+        if model.acceptsFaceDrop(on: .tag(tag.id)) {
+            content.onDrop(of: [.fontoryTag, .fontoryFaceIDs], isTargeted: $isTargeted) { providers in
                 let target = tag.id
+                // ⌥ held when the mouse is released: remove the tag instead.
+                let removing = NSEvent.modifierFlags.contains(.option)
+                if FaceDrag.load(providers, { ids in
+                    Task { await model.dropFaces(ids, on: .tag(target), removing: removing) }
+                }) { return true }
                 return TagDrag.loadTagID(providers) { id in Task { await model.dropTag(id, onto: target) } }
             }
         } else {

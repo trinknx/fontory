@@ -1,6 +1,7 @@
 import AppKit
 import FontoryCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
@@ -64,12 +65,7 @@ struct SidebarView: View {
                     .allowsHitTesting(false)
             }
         }
-        .dropDestination(for: URL.self) { urls, _ in
-            let fileURLs = urls.filter(\.isFileURL)
-            guard !fileURLs.isEmpty else { return false }
-            model.importDropped(fileURLs)
-            return true
-        } isTargeted: { isDropTargeted = $0 }
+        .onDrop(of: [.fileURL], delegate: ImportDrop(model: model, isTargeted: $isDropTargeted))
     }
 
     /// Tag rows may be selected together (⌘-click); the model turns the list's change into a scope, reading the
@@ -321,5 +317,54 @@ extension EventModifiers {
         if flags.contains(.option) { insert(.option) }
         if flags.contains(.shift) { insert(.shift) }
         if flags.contains(.control) { insert(.control) }
+    }
+}
+
+/// Font files and folders dropped on the sidebar are imported. Fonts dragged from the browser also carry file URLs;
+/// they are refused here (only plain tag rows take them), so dropping them on a Library or Style row does nothing.
+private struct ImportDrop: DropDelegate {
+    let model: AppModel
+    @Binding var isTargeted: Bool
+
+    private func isImport(_ info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.fileURL]) && !info.hasItemsConforming(to: [.fontoryFaceIDs])
+    }
+
+    func validateDrop(info: DropInfo) -> Bool { isImport(info) }
+
+    func dropEntered(info: DropInfo) { isTargeted = isImport(info) }
+
+    func dropExited(info: DropInfo) { isTargeted = false }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        isImport(info) ? DropProposal(operation: .copy) : DropProposal(operation: .forbidden)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        isTargeted = false
+        guard isImport(info) else { return false }
+        let providers = info.itemProviders(for: [.fileURL])
+        let collected = URLBox()
+        let group = DispatchGroup()
+        for provider in providers {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url, url.isFileURL { collected.append(url) }
+                group.leave()
+            }
+        }
+        let model = model
+        group.notify(queue: .main) {
+            let urls = collected.urls
+            MainActor.assumeIsolated { if !urls.isEmpty { model.importDropped(urls) } }
+        }
+        return !providers.isEmpty
+    }
+
+    private final class URLBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var list: [URL] = []
+        func append(_ url: URL) { lock.lock(); list.append(url); lock.unlock() }
+        var urls: [URL] { lock.lock(); defer { lock.unlock() }; return list }
     }
 }

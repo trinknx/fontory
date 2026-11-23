@@ -165,6 +165,7 @@ extension AppModel {
 
     /// After tags or assignments change: counts, and the browser when it shows something tag-based.
     private func afterTagChange() async {
+        tagAssignmentVersion += 1
         await reloadOrganization()
         switch query.scope {
         case .tags(let picks):
@@ -315,5 +316,146 @@ extension AppModel {
         let query = LibraryQuery(scope: .tags([tagPick(id)]), includeSystem: query.includeSystem)
         guard let ids = await runBackground({ try backend.store.faceIDs(for: query) }), !ids.isEmpty else { return }
         await setActivation(ids, on ? .on : .off)
+    }
+
+    // MARK: Assigning (drag and drop, context menu, ⌘T panel, Info)
+
+    /// Plain tags in sidebar tree order with their depth (smart tags take no assignments).
+    func plainTagTree() -> [(tag: TagRecord, depth: Int)] {
+        var out: [(tag: TagRecord, depth: Int)] = []
+        func walk(_ parentID: Int64?, _ depth: Int) {
+            for tag in childTags(of: parentID) where tag.kind == .tag {
+                out.append((tag, depth))
+                walk(tag.id, depth + 1)
+            }
+        }
+        walk(nil, 0)
+        return out
+    }
+
+    /// "Parent/Child" for a nested tag, the name alone at the top level.
+    func tagPath(_ id: Int64) -> String {
+        var parts: [String] = []
+        var next: Int64? = id
+        var seen: Set<Int64> = []
+        while let current = next, seen.insert(current).inserted, let record = tag(current) {
+            parts.append(record.name)
+            next = record.parentID
+        }
+        return parts.reversed().joined(separator: "/")
+    }
+
+    /// Direct tags of each face (faces without tags are absent), read off the main actor. Nil on failure.
+    func faceTagMap(_ faceIDs: [Int64]) async -> [Int64: Set<Int64>]? {
+        guard let backend, !faceIDs.isEmpty else { return faceIDs.isEmpty ? [:] : nil }
+        return await runBackground { try backend.store.tagIDs(forFaces: faceIDs) }
+    }
+
+    /// The checkbox state of every tag in `map` for the faces `faceIDs`: on when all have it, mixed when some do.
+    /// Tags no face has are absent (off).
+    nonisolated static func tagStates(_ map: [Int64: Set<Int64>], faces faceIDs: [Int64]) -> [Int64: TagCheckState] {
+        let faces = Set(faceIDs)
+        guard !faces.isEmpty else { return [:] }
+        var counts: [Int64: Int] = [:]
+        for face in faces { for tagID in map[face] ?? [] { counts[tagID, default: 0] += 1 } }
+        return counts.mapValues { $0 == faces.count ? .on : .mixed }
+    }
+
+    /// A checkbox click: on removes the tag from every face, off or mixed adds it to every face.
+    func toggleTag(_ tagID: Int64, onFaces faceIDs: [Int64], from state: TagCheckState) async {
+        await setTag(tagID, onFaces: faceIDs, included: state != .on)
+    }
+
+    /// "New Tag…" and the panel's Return on an unknown name: a top-level tag named `name` (an existing top-level
+    /// tag with that name, ignoring case and diacritics, is reused) assigned to `faceIDs`. Returns its id.
+    @discardableResult
+    func createTagAndAssign(name: String, faces faceIDs: [Int64]) async -> Int64? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let key = TagSearch.fold(trimmed)
+        let id: Int64
+        if let existing = tags.first(where: { $0.parentID == nil && $0.kind == .tag && TagSearch.fold($0.name) == key }) {
+            id = existing.id
+        } else {
+            guard let created = await createTag(name: trimmed, parentID: nil) else { return nil }
+            id = created
+        }
+        await setTag(id, onFaces: faceIDs, included: true)
+        return id
+    }
+
+    /// Fonts dragged from the browser may be dropped on plain tag rows only; Style rows, smart tags and Library
+    /// rows refuse them.
+    func acceptsFaceDrop(on item: SidebarItem) -> Bool {
+        if case .tag(let id) = item { return tag(id)?.kind == .tag }
+        return false
+    }
+
+    /// Fonts dropped on a sidebar row: a plain tag is added to them, or removed with ⌥ (`removing`). Returns
+    /// whether the drop was taken.
+    @discardableResult
+    func dropFaces(_ faceIDs: [Int64], on item: SidebarItem, removing: Bool) async -> Bool {
+        guard !faceIDs.isEmpty, acceptsFaceDrop(on: item), case .tag(let id) = item else { return false }
+        await setTag(id, onFaces: faceIDs, included: !removing)
+        return true
+    }
+
+    /// The faces ⌘T acts on: the selected styles on the family page, else the browser selection, in list order.
+    var tagPanelTargets: [Int64] {
+        if detail != nil, !detailSelection.isEmpty { return detailSelection.sorted() }
+        guard !selection.isEmpty else { return [] }
+        let ordered = faceIDs.filter(selection.contains)
+        return ordered.count == selection.count ? ordered : selection.sorted()
+    }
+
+    /// ⌘T: the tag panel for `faceIDs` (default: `tagPanelTargets`). Does nothing without faces.
+    func showTagPanel(for faceIDs: [Int64]? = nil) {
+        let targets = faceIDs ?? tagPanelTargets
+        guard !targets.isEmpty else { return }
+        tagPanel = TagPanelRequest(faceIDs: targets)
+    }
+}
+
+/// A tag's checkbox for a set of faces.
+enum TagCheckState: Sendable, Hashable {
+    case off, on, mixed
+}
+
+/// What the ⌘T panel is open for.
+struct TagPanelRequest: Identifiable {
+    let id = UUID()
+    let faceIDs: [Int64]
+}
+
+/// Tag name matching for the ⌘T panel: case- and diacritic-insensitive subsequence matching.
+enum TagSearch {
+    /// Folded for comparison: case and diacritics removed, and đ read as d (a letter of its own, not an accent).
+    static func fold(_ s: String) -> String {
+        s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            .replacingOccurrences(of: "đ", with: "d")
+    }
+
+    /// Nil when `query` is not a subsequence of `candidate`; else a rank, lower is better: 0 the path starts with
+    /// it, 1 the last name starts with it, 2 it is contained, 3+ a scattered subsequence (more gaps rank lower).
+    static func score(_ query: String, in candidate: String) -> Int? {
+        let q = fold(query.trimmingCharacters(in: .whitespacesAndNewlines))
+        if q.isEmpty { return 0 }
+        let c = fold(candidate)
+        if c.hasPrefix(q) { return 0 }
+        if let last = c.split(separator: "/").last, last.hasPrefix(q) { return 1 }
+        if c.contains(q) { return 2 }
+        var gaps = 0
+        var qi = q.startIndex
+        var previousMatched = true
+        for ch in c where qi < q.endIndex {
+            if ch == q[qi] {
+                if !previousMatched { gaps += 1 }
+                previousMatched = true
+                qi = q.index(after: qi)
+            } else {
+                previousMatched = false
+            }
+        }
+        return qi == q.endIndex ? 3 + gaps : nil
     }
 }
