@@ -8,7 +8,7 @@ enum ViewMode: String, CaseIterable, Sendable {
     case grid, list
 }
 
-/// The family page's tabs. Only Styles and Info exist yet; the others are shown disabled ("Coming soon").
+/// The family page's tabs. Styles, Characters and Info exist; the others are shown disabled ("Coming soon").
 enum DetailTab: String, CaseIterable, Sendable {
     case styles, characters, text, features, variables, info
 
@@ -23,7 +23,7 @@ enum DetailTab: String, CaseIterable, Sendable {
         }
     }
 
-    var isAvailable: Bool { self == .styles || self == .info }
+    var isAvailable: Bool { self == .styles || self == .characters || self == .info }
 }
 
 /// How the family page lists styles: one big preview per style, or one compact line each.
@@ -241,12 +241,15 @@ enum SettingsKey {
     static let showSystemFonts = "showSystemFonts"
     static let detailPointSize = "detail.pointSize"
     static let detailLayout = "detail.layout"
+    static let glyphCellSize = "detail.glyphCellSize"
+    static let glyphOrder = "detail.glyphOrder"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
             keepRunningInMenuBar: true, showSystemFonts: true,
             "zoom.grid": 0.25, "zoom.list": 0.25,
             detailPointSize: AppModel.defaultDetailPointSize, detailLayout: DetailLayout.rows.rawValue,
+            glyphCellSize: AppModel.defaultGlyphCellSize, glyphOrder: GlyphOrder.unicode.rawValue,
         ])
         // Activation is always restored at launch now; drop the old "restore on launch" switch.
         UserDefaults.standard.removeObject(forKey: "restoreOnLaunch")
@@ -335,6 +338,26 @@ final class AppModel {
     nonisolated static let detailPointSizeRange: ClosedRange<Double> = 8...200
     @ObservationIgnored private var detailGeneration = 0
 
+    // MARK: Characters tab
+
+    /// Side of a glyph cell in points (its own slider; persisted).
+    var glyphCellSize: Double {
+        didSet { if glyphCellSize != oldValue { UserDefaults.standard.set(glyphCellSize, forKey: SettingsKey.glyphCellSize) } }
+    }
+    nonisolated static let defaultGlyphCellSize = 72.0
+    nonisolated static let glyphCellSizeRange: ClosedRange<Double> = 40...200
+    var glyphFilter: GlyphFilter = .all
+    var glyphSearch = ""
+    var glyphOrder: GlyphOrder {
+        didSet { if glyphOrder != oldValue { UserDefaults.standard.set(glyphOrder.rawValue, forKey: SettingsKey.glyphOrder) } }
+    }
+    /// Bumped when rescans may have changed font files, so the Characters tab lists its face again.
+    private(set) var glyphsVersion = 0
+    /// Inventories of the recently shown faces, computed off the main actor.
+    @ObservationIgnored let glyphInventories = GlyphInventoryCache()
+    /// Renders and caches the glyph cells.
+    @ObservationIgnored let glyphPipeline: GlyphPipeline
+
     // MARK: Locations
 
     private(set) var locations: [LocationRecord] = []
@@ -386,6 +409,7 @@ final class AppModel {
         let renderer = PreviewRenderer()
         previewRenderer = renderer
         previewPipeline = PreviewPipeline(renderer: renderer)
+        glyphPipeline = GlyphPipeline(renderer: renderer)
         let defaults = UserDefaults.standard
         query = LibraryQuery(includeSystem: defaults.bool(forKey: SettingsKey.showSystemFonts))
         zoom = [.grid: defaults.double(forKey: "zoom.grid"), .list: defaults.double(forKey: "zoom.list")]
@@ -394,6 +418,9 @@ final class AppModel {
         detailLayout = defaults.string(forKey: SettingsKey.detailLayout).flatMap(DetailLayout.init(rawValue:)) ?? .rows
         let size = defaults.double(forKey: SettingsKey.detailPointSize)
         detailPointSize = Self.detailPointSizeRange.contains(size) ? size : Self.defaultDetailPointSize
+        let cell = defaults.double(forKey: SettingsKey.glyphCellSize)
+        glyphCellSize = Self.glyphCellSizeRange.contains(cell) ? cell : Self.defaultGlyphCellSize
+        glyphOrder = defaults.string(forKey: SettingsKey.glyphOrder).flatMap(GlyphOrder.init(rawValue:)) ?? .unicode
     }
 
     // MARK: Startup
@@ -525,6 +552,7 @@ final class AppModel {
         }
         guard result.changed else { return }
         if result.locationsChanged { await reloadLocations() }
+        forgetGlyphs()
         invalidateRows()
         refreshCounts()
         scheduleRefresh()
@@ -691,6 +719,14 @@ final class AppModel {
         previewRenderer.forgetFailures()
     }
 
+    /// A rescan may have replaced files: glyphs are listed and drawn afresh. (Not on activation changes, which
+    /// also invalidate the rows but leave the files alone.)
+    private func forgetGlyphs() {
+        glyphsVersion &+= 1
+        glyphInventories.removeAll()
+        glyphPipeline.removeAllImages()
+    }
+
     // MARK: Locations
 
     /// The user's folders and file sets.
@@ -840,6 +876,7 @@ final class AppModel {
     }
 
     private func scanFinished() async {
+        forgetGlyphs()
         invalidateRows()
         await reloadLocations()
         refreshCounts()
@@ -964,6 +1001,7 @@ final class AppModel {
             // First, before any await: nothing of ours may keep a file on the volume open, or the eject fails
             // with "disk in use". Pending renders are dropped and parsed fonts released.
             previewPipeline.cancelAll()
+            glyphPipeline.cancelAll()
             previewRenderer.forgetFonts(under: volumeURL)
             for id in ids { forgetPreviewFonts(of: id) }
             for i in locations.indices where ids.contains(locations[i].id) { locations[i].online = false }
@@ -1151,6 +1189,7 @@ final class AppModel {
         detailSelection = []
         previewPipeline.cancelAll(lane: .detailHeader)
         previewPipeline.cancelAll(lane: .detailStyles)
+        glyphPipeline.cancelAll()
     }
 
     /// Re-reads the shown family's faces (after a refresh); leaves the page when none is left.
@@ -1190,6 +1229,12 @@ final class AppModel {
     @ObservationIgnored var zoomAnchorsOnPointer = false
 
     func adjustZoom(by delta: Double) {
+        if detail != nil, detailTab == .characters {
+            // On the Characters tab the zoom commands change the cell size (8 pt per step).
+            let r = Self.glyphCellSizeRange
+            glyphCellSize = min(r.upperBound, max(r.lowerBound, (glyphCellSize + delta * 80).rounded()))
+            return
+        }
         if detail != nil {
             // On the family page the zoom commands change its own preview size (8 pt per step).
             let r = Self.detailPointSizeRange
@@ -1201,6 +1246,10 @@ final class AppModel {
     }
 
     func resetZoom() {
+        if detail != nil, detailTab == .characters {
+            glyphCellSize = Self.defaultGlyphCellSize
+            return
+        }
         if detail != nil {
             detailPointSize = Self.defaultDetailPointSize
             return

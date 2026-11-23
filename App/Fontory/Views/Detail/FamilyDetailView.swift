@@ -86,15 +86,17 @@ struct FamilyDetailView: View {
         case .styles:
             FamilyStylesView(model: model, faceIDs: detail.faceIDs, rowsVersion: model.rowsVersion, preview: model.preview,
                              pointSize: model.detailPointSize, layout: model.detailLayout, selection: model.detailSelection)
+        case .characters:
+            CharactersTabView(model: model, detail: detail, faceID: focusedFaceID)
         case .info:
-            FamilyInfoView(model: model, detail: detail, faceID: infoFaceID, rowsVersion: model.rowsVersion)
+            FamilyInfoView(model: model, detail: detail, faceID: focusedFaceID, rowsVersion: model.rowsVersion)
         default:
             Text("Coming soon").foregroundStyle(.secondary)
         }
     }
 
-    /// Info shows the first selected style, or the family's representative.
-    private var infoFaceID: Int64 {
+    /// Characters and Info show the first selected style, or the family's representative.
+    private var focusedFaceID: Int64 {
         detail.faceIDs.first(where: model.detailSelection.contains) ?? detail.representativeID
     }
 
