@@ -540,8 +540,8 @@ final class AppModel {
     /// The smart tag whose rule editor should be shown. Hook for the smart tag editor sheet (Task 8).
     var editingSmartTagID: Int64?
     @ObservationIgnored var organizationGeneration = 0
-    /// The mouse-down event number of the last ⌥-click applied to a tag row (applied once per click).
-    @ObservationIgnored var lastOptionClickEvent: Int?
+    /// The last ⌥-click applied to a tag row, to apply each click once (see `optionClickTag`).
+    @ObservationIgnored var lastOptionClick: (tagID: Int64, time: TimeInterval)?
 
     // MARK: Private
 

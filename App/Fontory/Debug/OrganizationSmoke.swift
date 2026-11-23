@@ -97,19 +97,26 @@ enum OrganizationSmoke {
         let underA = await shown(model)
         check(underA == [serif], "select A shows the face tagged B", "\(underA)")
 
-        // ⌥-click as the sidebar reports it: the list's selection change and the row's click handler both see the
-        // same click (event 101); it must invert exactly once.
-        model.applySidebarSelection([.tag(a)], modifiers: .option, clickEvent: 101)
-        model.optionClickTag(a, modifiers: .option, clickEvent: 101)
+        // ⌥-click as the sidebar reports it: the list's selection change at mouse-down (t) and the row's click
+        // handler at mouse-up (t + 0.1 s); it must invert exactly once.
+        let t = ProcessInfo.processInfo.systemUptime + 1000
+        model.applySidebarSelection([.tag(a)], modifiers: .option, time: t)
+        model.optionClickTag(a, modifiers: .option, time: t + 0.1)
         let inverted = await shown(model)
         check(!inverted.contains(serif) && inverted == [sans, mono], "⌥-select A hides it", "\(inverted)")
         check(model.selectedTagPicks.first?.inverted == true && model.sidebarSelection == [.tag(a)], "⌥-select A is an inverted pick")
-        // A second ⌥-click reported only by the row handler (list silent on the selected row) flips it back.
-        model.optionClickTag(a, modifiers: .option, clickEvent: 102)
-        check(model.selectedTagPicks.first?.inverted == false, "⌥-click on the selected inverted tag un-inverts it")
-        // Reported only by the list (click beside the row's content): applied too.
-        model.applySidebarSelection([.tag(a)], modifiers: .option, clickEvent: 103)
-        check(model.selectedTagPicks.first?.inverted == true, "⌥-click reported only by the list inverts")
+        // A second genuine ⌥-click 1 s later, reported by both paths (down, then up 0.1 s later), inverts back once.
+        model.applySidebarSelection([.tag(a)], modifiers: .option, time: t + 1)
+        model.optionClickTag(a, modifiers: .option, time: t + 1.1)
+        check(model.selectedTagPicks.first?.inverted == false, "second ⌥-click 1 s later un-inverts it, once")
+        // Reported only by the row handler (list silent on the selected row): applied.
+        model.optionClickTag(a, modifiers: .option, time: t + 2.1)
+        check(model.selectedTagPicks.first?.inverted == true, "⌥-click reported only by the row handler inverts")
+        // Reported only by the list (click outside the handler's shape): applied.
+        model.applySidebarSelection([.tag(a)], modifiers: .option, time: t + 3)
+        check(model.selectedTagPicks.first?.inverted == false, "⌥-click reported only by the list un-inverts")
+        model.applySidebarSelection([.tag(a)], modifiers: .option, time: t + 4)
+        check(model.selectedTagPicks.first?.inverted == true, "⌥-click again inverts (A shown without its fonts)")
 
         // ⌘-click union with a second tag.
         guard let c = await model.createTag(name: "c", parentID: nil) else { check(false, "create c"); return }

@@ -77,7 +77,7 @@ struct SidebarView: View {
     private var selection: Binding<Set<SidebarItem>> {
         Binding(get: { model.sidebarSelection },
                 set: { model.applySidebarSelection($0, modifiers: EventModifiers(NSApp.currentEvent?.modifierFlags ?? []),
-                                                   clickEvent: NSApp.currentEvent?.mouseClickNumber) })
+                                                   time: NSApp.currentEvent?.timestamp ?? ProcessInfo.processInfo.systemUptime) })
     }
 
     private func libraryRow(_ title: String, _ symbol: String, _ scope: LibraryQuery.Scope, _ count: Int) -> some View {
@@ -312,16 +312,6 @@ func chooseRelinkTarget(for location: LocationRecord, model: AppModel) {
     panel.message = "Choose the new place of “\(location.displayName)”."
     guard panel.runModal() == .OK, let url = panel.url else { return }
     Task { await model.relink(location.id, to: url) }
-}
-
-extension NSEvent {
-    /// For a left mouse-down/up/drag, the number of the click's mouse-down event (shared by its mouse-up); else nil.
-    var mouseClickNumber: Int? {
-        switch type {
-        case .leftMouseDown, .leftMouseUp, .leftMouseDragged: eventNumber
-        default: nil
-        }
-    }
 }
 
 extension EventModifiers {

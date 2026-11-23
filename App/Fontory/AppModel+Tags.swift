@@ -71,9 +71,10 @@ extension AppModel {
     }
 
     /// Applies a selection change made by the sidebar list. The list handles ⌘-click by itself; the clicked row is
-    /// recovered from the difference, and `modifiers` decide the meaning (see `selectTag`). `clickEvent` is the
-    /// mouse-down event number of the click, when it is one (see `optionClickTag`).
-    func applySidebarSelection(_ new: Set<SidebarItem>, modifiers: EventModifiers, clickEvent: Int? = nil) {
+    /// recovered from the difference, and `modifiers` decide the meaning (see `selectTag`). `time` is the click's
+    /// event timestamp (system uptime clock; see `optionClickTag`).
+    func applySidebarSelection(_ new: Set<SidebarItem>, modifiers: EventModifiers,
+                               time: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         let old = sidebarSelection
         let added = new.subtracting(old)
         let removed = old.subtracting(new)
@@ -90,7 +91,7 @@ extension AppModel {
         switch clicked {
         case .tag(let id)?:
             if modifiers.contains(.option) {
-                optionClickTag(id, modifiers: modifiers, clickEvent: clickEvent)
+                optionClickTag(id, modifiers: modifiers, time: time)
             } else {
                 selectTag(id, modifiers: modifiers)
             }
@@ -133,14 +134,16 @@ extension AppModel {
         query.scope = .tags(picks)
     }
 
-    /// An ⌥-click on a tag row. Both the list's selection change and the row's click handler report it (the list
-    /// alone may stay silent on an already-selected row, the handler alone may miss the row's edges), so it is
-    /// applied once per mouse-down event number. Mouse-up carries its mouse-down's number.
-    func optionClickTag(_ id: Int64, modifiers: EventModifiers, clickEvent: Int?) {
-        if let clickEvent {
-            guard clickEvent != lastOptionClickEvent else { return }
-            lastOptionClickEvent = clickEvent
-        }
+    /// Two reports of the same tag within this many seconds are one ⌥-click.
+    static let optionClickWindow: TimeInterval = 0.4
+
+    /// An ⌥-click on a tag row. Both the list's selection change (mouse-down) and the row's click handler
+    /// (mouse-up) may report it: the list alone can stay silent on an already-selected row, the handler alone can
+    /// miss the row's edges. A report for the same tag within `optionClickWindow` of the last applied one is the same
+    /// click and is dropped. `time` uses the system uptime clock (`NSEvent.timestamp`).
+    func optionClickTag(_ id: Int64, modifiers: EventModifiers, time: TimeInterval) {
+        if let last = lastOptionClick, last.tagID == id, abs(time - last.time) < Self.optionClickWindow { return }
+        lastOptionClick = (id, time)
         selectTag(id, modifiers: modifiers)
     }
 

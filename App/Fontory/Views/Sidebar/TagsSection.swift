@@ -76,17 +76,22 @@ private struct TagRow: View {
     }
 
     var body: some View {
-        Group {
+        // The count is part of the row content (not `.badge`, which the list draws outside it), and the whole row
+        // width takes clicks, so the ⌥-click handler below sees clicks anywhere on the row.
+        HStack(spacing: 4) {
             if model.renamingTagID == tag.id {
                 TagNameField(tag: tag)
             } else {
                 Label(tag.name, systemImage: symbol)
+                    .lineLimit(1)
             }
+            Spacer(minLength: 4)
+            Text(model.tagCount(tag).formatted())
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
         }
-        // The whole row width takes clicks, so the ⌥-click handler below sees clicks right of the name too.
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .badge(model.tagCount(tag))
         .tag(SidebarItem.tag(tag.id))
         .help(pick?.inverted == true ? "Showing fonts without “\(tag.name)”" : "")
         .background(RoundedRectangle(cornerRadius: 4).fill(isTargeted ? Color.accentColor.opacity(0.25) : .clear))
@@ -94,7 +99,7 @@ private struct TagRow: View {
         // watched here too; `optionClickTag` applies each click once, whichever path reports it first.
         .simultaneousGesture(TapGesture().onEnded {
             guard let event = NSApp.currentEvent, event.modifierFlags.contains(.option) else { return }
-            model.optionClickTag(tag.id, modifiers: EventModifiers(event.modifierFlags), clickEvent: event.mouseClickNumber)
+            model.optionClickTag(tag.id, modifiers: EventModifiers(event.modifierFlags), time: event.timestamp)
         })
         .onDrag { TagDrag.provider(for: tag.id) }
         .modifier(TagDropTarget(tag: tag, isTargeted: $isTargeted))
