@@ -130,4 +130,69 @@ import Testing
         #expect(ids.count == 20_000)
         #expect(elapsed < .milliseconds(100), "took \(elapsed)")
     }
+
+    private func searchStore() throws -> FontStore {
+        let store = try FontStore(database: Database(path: ":memory:"))
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "R", displayName: "R", lastKnownPath: "/r")
+        let batch = try store.nextImportBatch()
+        let defs: [(String, String, String, String?)] = [
+            ("AvenirNext-Regular", "Avenir Next", "Regular", nil),
+            ("CafeSans-Regular", "Caf\u{E9} Sans", "Regular", nil),
+            ("HelveticaNeue-Italic", "Helvetica Neue", "Italic", nil),
+            ("Helvetica-Bold", "Helvetica", "Bold", nil),
+            ("Foo-Italic", "Foo", "Italic", "Zed"),
+        ]
+        for (i, d) in defs.enumerated() {
+            var face = Fixture.face(d.0, family: d.1, style: d.2, weight: 400)
+            face.designer = d.3
+            _ = try store.insertFile(FileRecord(locationID: loc.id, relativePath: "f\(i).otf", size: 1, mtime: Date(), format: "otf", fingerprint: "\(i)"), faces: [face], importBatch: batch)
+        }
+        return store
+    }
+
+    private func names(_ store: FontStore, _ q: String, scope: Set<SearchText.Field> = Set(SearchText.Field.allCases)) throws -> [String] {
+        var query = LibraryQuery()
+        query.search = SearchText(q, scope: scope)
+        let ids = try store.faceIDs(for: query)
+        let rows = try store.rows(ids: ids)
+        return ids.map { rows[$0]!.fullName }
+    }
+
+    @Test func searchContainsAndDiacritics() throws {
+        let store = try searchStore()
+        #expect(try names(store, "avenir") == ["Avenir Next Regular"])
+        #expect(try names(store, "cafe") == ["Caf\u{E9} Sans Regular"])
+        #expect(try names(store, "helv ital") == ["Helvetica Neue Italic"])
+        #expect(try names(store, "zed") == ["Foo Italic"])
+        #expect(try names(store, "zed", scope: [.family]).isEmpty)
+        #expect(try names(store, "#tag").count == 5)
+    }
+
+    @Test func searchExactAndSuffix() throws {
+        let store = try searchStore()
+        #expect(try names(store, "\"helvetica\"") == ["Helvetica Bold"])
+        #expect(try names(store, "\"HELVETICA NEUE\"") == ["Helvetica Neue Italic"])
+        #expect(try names(store, "\"Helvetica Neue Italic\"") == ["Helvetica Neue Italic"])
+        #expect(try names(store, "*italic").sorted() == ["Foo Italic", "Helvetica Neue Italic"])
+        #expect(try names(store, "helv* *bold") == ["Helvetica Bold"])
+        #expect(try names(store, "*100%").isEmpty)
+    }
+
+    @Test func search20kUnder100ms() throws {
+        let store = try FontStore(database: Database(path: ":memory:"))
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "R", displayName: "R", lastKnownPath: "/r")
+        let batch = try store.nextImportBatch()
+        try store.database.transaction {
+            for i in 0..<20_000 {
+                _ = try store.insertFile(FileRecord(locationID: loc.id, relativePath: "f\(i).otf", size: 1, mtime: Date(), format: "otf", fingerprint: "\(i)"),
+                                         faces: [Fixture.face("PS-\(i)", family: "Family\(i / 4) Grotesk", style: "S\(i % 4)", weight: 400)], importBatch: batch)
+            }
+        }
+        var q = LibraryQuery()
+        q.search = SearchText("family12 grot")
+        var ids: [Int64] = []
+        let elapsed = try ContinuousClock().measure { ids = try store.faceIDs(for: q) }
+        #expect(ids.count == 444)
+        #expect(elapsed < .milliseconds(100), "took \(elapsed)")
+    }
 }

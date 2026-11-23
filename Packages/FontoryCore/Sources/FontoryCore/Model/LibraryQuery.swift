@@ -12,7 +12,7 @@ public struct LibraryQuery: Sendable, Hashable {
     }
 
     public var scope: Scope = .all
-    // Task 4 adds: public var search: SearchText? = nil
+    public var search: SearchText? = nil
     public var includeSystem: Bool = true
     public var sort: Sort = .family
     public var ascending: Bool = true
@@ -53,7 +53,15 @@ extension LibraryQuery {
             }
         }
         if !includeSystem { clauses.append("locations.kind != 2") }
-        // Task 4: the search clause (faces_fts MATCH) is appended to `clauses` here.
+        if let search {
+            if let match = search.ftsMatch {
+                clauses.append("faces.id IN (SELECT rowid FROM faces_fts WHERE faces_fts MATCH ?)")
+                bindings.append(.text(match))
+            }
+            let w = search.whereClauses(effectiveFamily: Self.effectiveFamily)
+            clauses += w.clauses
+            bindings += w.bindings
+        }
 
         let dir = ascending ? "ASC" : "DESC"
         let order: String
