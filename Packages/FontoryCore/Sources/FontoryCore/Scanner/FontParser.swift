@@ -53,6 +53,8 @@ public enum FontParser {
         let outline = outlineType(tables)
         let isColor = !tables.isDisjoint(with: [tag("COLR"), tag("sbix"), tag("SVG "), tag("CBDT")])
 
+        let styleClass = classify(font: font, family: family, fullName: fullName, style: style,
+                                  monospace: symbolic.contains(.traitMonoSpace), classMask: Int(symbolic.rawValue >> 28), tables: tables)
         return ParsedFace(
             faceIndex: index, postScriptName: psName, family: family, style: style, fullName: fullName,
             weight: min(900, max(100, 100 + (weightTrait + 1) * 400)),
@@ -73,9 +75,8 @@ public enum FontParser {
             isBitmap: outline == .bitmap,
             hasGSUB: tables.contains(tag("GSUB")),
             hasGPOS: tables.contains(tag("GPOS")),
-            styleClass: classify(font: font, family: family, fullName: fullName, style: style,
-                                 monospace: symbolic.contains(.traitMonoSpace), classMask: Int(symbolic.rawValue >> 28), tables: tables),
-            metadata: FaceMetadata.read(font, tables: tables))
+            styleClass: styleClass,
+            metadata: FaceMetadata.read(font, tables: tables, styleClass: styleClass))
     }
 
     /// Style class and metadata of one face, from one font made from its descriptor. Used by the background backfill.
@@ -91,7 +92,7 @@ public enum FontParser {
         let tables = availableTables(font)
         let styleClass = classify(font: font, family: family, fullName: fullName, style: style,
                                   monospace: symbolic.contains(.traitMonoSpace), classMask: Int(symbolic.rawValue >> 28), tables: tables)
-        return (styleClass, FaceMetadata.read(font, tables: tables))
+        return (styleClass, FaceMetadata.read(font, tables: tables, styleClass: styleClass))
     }
 
     private static func classify(font: CTFont, family: String, fullName: String, style: String,

@@ -165,6 +165,47 @@ import Testing
         }
     }
 
+    /// Figure style the way the scanner computes it: with the face's style class.
+    private func scannedFigures(_ path: String) -> [(name: String, figure: FigureStyle, styleClass: StyleClass)]? {
+        guard FileManager.default.fileExists(atPath: path) else {
+            Issue.record("fixture not installed, skipped: \(path)", severity: .warning)
+            return nil
+        }
+        let descriptors = (CTFontManagerCreateFontDescriptorsFromURL(URL(fileURLWithPath: path) as CFURL) as? [CTFontDescriptor]) ?? []
+        return descriptors.map {
+            let r = FontParser.backfill(descriptor: $0, fallbackName: "x")
+            return (CTFontCopyPostScriptName(CTFontCreateWithFontDescriptor($0, 12, nil)) as String, r.metadata.figureStyle, r.styleClass)
+        }
+    }
+
+    @Test func versionIsBumpedForTheFigureRule() {
+        #expect(FaceMetadata.version == 2)
+    }
+
+    @Test func capsOnlyFacesAreNotOldstyle() throws {
+        // Their x-height is as tall as their caps, so a "0" no taller than 1.1 x-height says nothing.
+        for path in ["/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf", "/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf"] {
+            if let faces = scannedFigures(path) { #expect(faces.allSatisfy { $0.figure == .lining }, "\(path): \(faces)") }
+        }
+        if let faces = scannedFigures("/System/Library/Fonts/Supplemental/Iowan Old Style.ttc"),
+           let titling = faces.first(where: { $0.name.contains("Titling") }) {
+            #expect(titling.figure != .oldstyle, "\(titling)")
+        }
+    }
+
+    @Test func symbolFacesHaveUnknownFigures() throws {
+        for name in ["Wingdings", "Webdings", "Wingdings 2", "Wingdings 3"] {
+            if let faces = scannedFigures("/System/Library/Fonts/Supplemental/\(name).ttf") {
+                #expect(faces.allSatisfy { $0.styleClass == .symbol && $0.figure == .unknown }, "\(name): \(faces)")
+            }
+        }
+    }
+
+    @Test func realFacesKeepTheirFigureStyle() throws {
+        if let faces = scannedFigures(TempFonts.hoeflerText) { #expect(faces.contains { $0.figure == .oldstyle }) }
+        if let faces = scannedFigures("/System/Library/Fonts/Helvetica.ttc") { #expect(faces.allSatisfy { $0.figure == .lining }) }
+    }
+
     // MARK: Store and backfill
 
     private func meta(_ store: FontStore) throws -> [(classVersion: Int, metaVersion: Int, features: String, figure: Int, ranges: Data?)] {

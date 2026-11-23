@@ -10,7 +10,7 @@ public enum FigureStyle: Int, Sendable, CaseIterable {
 /// opening font files: its character coverage, its layout feature tags, and its default figure style.
 /// Bump `version` to re-extract every face in the background (`FaceBackfill`).
 public struct FaceMetadata: Sendable, Hashable {
-    public static let version = 1
+    public static let version = 2
 
     /// The face's cmap as merged scalar ranges.
     public var coverage: CoverageRanges
@@ -28,15 +28,16 @@ public struct FaceMetadata: Sendable, Hashable {
     /// What a present but unparsable file gets: nothing, stamped with the current version so it is not retried.
     public static let empty = FaceMetadata(coverage: CoverageRanges(scalars: []), features: [], figureStyle: .unknown)
 
-    public static func read(_ font: CTFont) -> FaceMetadata {
-        read(font, tables: FontParser.availableTables(font))
+    public static func read(_ font: CTFont, styleClass: StyleClass? = nil) -> FaceMetadata {
+        read(font, tables: FontParser.availableTables(font), styleClass: styleClass)
     }
 
     /// `tables`: the face's table tags (`CTFontCopyAvailableTables`), when the caller already has them.
-    static func read(_ font: CTFont, tables: Set<UInt32>) -> FaceMetadata {
+    /// `styleClass`: the face's class when the caller has computed it; symbol faces get `.unknown` figures.
+    static func read(_ font: CTFont, tables: Set<UInt32>, styleClass: StyleClass? = nil) -> FaceMetadata {
         FaceMetadata(coverage: CoverageRanges(characterSet: CTFontCopyCharacterSet(font)),
                      features: features(font, tables: tables),
-                     figureStyle: figureStyle(font))
+                     figureStyle: styleClass == .symbol ? .unknown : figureStyle(font))
     }
 
     /// `faces.features`: `" liga smcp "`, a space before the first tag and after each; empty for no tags.
@@ -99,7 +100,9 @@ public struct FaceMetadata: Sendable, Hashable {
     // MARK: Figures
 
     /// Oldstyle when the default glyphs of "3 4 5 7 9" all descend below the baseline by more than 5% of the em, or
-    /// when the glyph of "0" is no taller than 1.1 × the x-height; otherwise lining. No digits: unknown.
+    /// when the glyph of "0" is no taller than 1.1 × the x-height (tested only when the x-height is below 0.8 × the
+    /// cap height, so caps-only faces, whose x-height is as tall as their caps, are not misread); otherwise lining.
+    /// No digits: unknown. Symbol faces never get here (`read` returns unknown for them).
     static func figureStyle(_ font: CTFont) -> FigureStyle {
         let characters = Array("034579".utf16)
         var glyphs = [CGGlyph](repeating: 0, count: characters.count)
@@ -112,8 +115,8 @@ public struct FaceMetadata: Sendable, Hashable {
         let em = CTFontGetSize(font)  // font units scaled to the point size: one em = the size
         let descenders = present.filter { $0 != 0 }
         if !descenders.isEmpty && descenders.allSatisfy({ rects[$0].minY < -0.05 * em }) { return .oldstyle }
-        let xHeight = CTFontGetXHeight(font)
-        if present.first == 0, xHeight > 0, rects[0].height <= 1.1 * xHeight { return .oldstyle }
+        let xHeight = CTFontGetXHeight(font), capHeight = CTFontGetCapHeight(font)
+        if present.first == 0, xHeight > 0, xHeight < 0.8 * capHeight, rects[0].height <= 1.1 * xHeight { return .oldstyle }
         return .lining
     }
 }
