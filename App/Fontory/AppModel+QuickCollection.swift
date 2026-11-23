@@ -154,11 +154,14 @@ extension AppModel {
         if progress.done > 0 { scheduleStyleCountsReload() }
     }
 
-    private func faceBackfillEnded() {
+    /// Internal for the smoke run, which stands in for a backfill.
+    func faceBackfillEnded() {
         faceBackfillTask = nil
         faceBackfillRunning -= 1
         faceBackfillProgress = nil
         if faceBackfillRerun { startFaceBackfill() }
+        // Hashing waits for the backfill to be idle (both read every file).
+        duplicateSearchAfterFaceBackfill()
     }
 
     static let styleCountsInterval: Duration = .seconds(1)

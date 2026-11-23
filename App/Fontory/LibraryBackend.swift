@@ -201,9 +201,14 @@ final class LibraryBackend: Sendable {
     }
 
     /// Indexes the given files (direct children of the location's folder) into a `.fileSet` location.
-    func importFiles(_ urls: [URL], into location: LocationRecord) throws -> ScanProgress {
+    ///
+    /// The user named these files, so an exclusion of one of them (Remove from Library) is deleted and the file is
+    /// imported again. With `skipDuplicates` ("Skip duplicates on import"), a new file whose fingerprint an indexed file
+    /// in another location has is not indexed and counts in `skippedDuplicates`, as in a scan.
+    func importFiles(_ urls: [URL], into location: LocationRecord, skipDuplicates: Bool = false) throws -> ScanProgress {
         var progress = ScanProgress(locationID: location.id, phase: .done, total: urls.count)
         let indexed = Dictionary(try store.files(in: location.id).map { ($0.relativePath, $0) }, uniquingKeysWith: { a, _ in a })
+        let exclusions = try store.exclusions(locationID: location.id)
         var batch: Int64?
         for url in urls {
             progress.processed += 1
@@ -217,6 +222,14 @@ final class LibraryBackend: Sendable {
                 guard record.size != file.size || record.mtime != file.mtime || record.fingerprint != fp else { continue }
                 try store.replaceFaces(fileID: record.id, size: file.size, mtime: file.mtime, fingerprint: fp, faces: faces)
             } else {
+                if skipDuplicates, !(try store.fingerprintsIndexed([fp], outside: location.id).isEmpty) {
+                    progress.skippedDuplicates += 1
+                    continue
+                }
+                // An explicit re-import wins over an exclusion.
+                if exclusions[file.relativePath] != nil {
+                    try store.includeAgain(locationID: location.id, relativePath: file.relativePath)
+                }
                 if batch == nil { batch = try store.nextImportBatch() }
                 let record = FileRecord(locationID: location.id, relativePath: file.relativePath, size: file.size,
                                         mtime: file.mtime, format: file.format, fingerprint: fp)
@@ -225,6 +238,21 @@ final class LibraryBackend: Sendable {
         }
         try store.markScanned(location.id, at: Date())
         return progress
+    }
+
+    /// Files the user added again that lie in a folder location: their exclusions (Remove from Library) are deleted, so
+    /// the rescan that follows indexes them. An explicit re-import wins over an exclusion.
+    func deleteExclusions(of urls: [URL], in location: LocationRecord) throws {
+        guard let root = Self.resolve(location) else { return }
+        let exclusions = try store.exclusions(locationID: location.id)
+        guard !exclusions.isEmpty else { return }
+        let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        for url in urls {
+            let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+            guard path.hasPrefix(rootPath + "/") else { continue }
+            let relative = String(path.dropFirst(rootPath.count + 1))
+            if exclusions[relative] != nil { try store.includeAgain(locationID: location.id, relativePath: relative) }
+        }
     }
 
     /// Re-parses changed files of a `.fileSet` location. Missing files are kept (a file set has no folder listing
@@ -294,7 +322,7 @@ final class LibraryBackend: Sendable {
         var smartCounts: [Int64: Int]
     }
 
-    /// What the style backfill can change: the Style counts and the counts of `smartTags` (those testing the style).
+    /// What the face backfill can change: the Style counts and the counts of `smartTags` (those testing the style).
     func styleOrganization(smartTags: [TagRecord], includeSystem: Bool) throws -> StyleOrganization {
         StyleOrganization(perStyle: try store.styleCounts(includeSystem: includeSystem),
                           smartCounts: try smartCounts(smartTags, includeSystem: includeSystem))

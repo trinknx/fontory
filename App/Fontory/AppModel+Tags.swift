@@ -160,7 +160,7 @@ extension AppModel {
 
     // MARK: Loading
 
-    /// What an organization reload reads: everything, or only what the style backfill can change (the Style
+    /// What an organization reload reads: everything, or only what the face backfill can change (the Style
     /// counts and the smart tags whose rule tests the style).
     enum OrganizationReload: Sendable {
         case full, styles

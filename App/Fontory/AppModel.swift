@@ -584,7 +584,7 @@ final class AppModel {
     /// The ⌘T tag panel, when shown.
     var tagPanel: TagPanelRequest?
 
-    // MARK: Quick Collection and style backfill (actions in AppModel+QuickCollection.swift)
+    // MARK: Quick Collection and face backfill (actions in AppModel+QuickCollection.swift)
 
     /// Faces in the Quick Collection, loaded off the main actor at launch and kept in step with every write (set
     /// at once by the actions, then confirmed from the store). Grid cells read it when configured.
@@ -595,7 +595,7 @@ final class AppModel {
     @ObservationIgnored var quickCollectionWriteChain: Task<Void, Never>?
     /// Writes started and not yet confirmed (smoke hook).
     @ObservationIgnored var quickCollectionWritesPending = 0
-    /// The running style backfill's progress; nil when none runs or it has nothing to do.
+    /// The running face backfill's progress (style class and v4 metadata); nil when none runs or it has nothing to do.
     var faceBackfillProgress: BackfillProgress?
     /// The running backfill (at most one); it clears itself when it ends.
     @ObservationIgnored var faceBackfillTask: Task<Void, Never>?
@@ -630,8 +630,10 @@ final class AppModel {
     var checkedDuplicateFiles: Set<Int64> = []
     /// Hashing progress while a search hashes candidate files.
     var duplicateProgress: BackfillProgress?
-    /// A search (hashing, then grouping) is running.
+    /// A search (hashing, then grouping) is running, or waits for the face backfill.
     var isFindingDuplicates = false
+    /// A hashing search waits for the face backfill to be idle ("Waiting for font details…").
+    var isWaitingForFaceBackfill = false
     /// Remove from Library or Move to Trash is running.
     var isRemovingDuplicates = false
     /// Settings → Duplicates: excluded files (removed from the library, skipped by rescans).
@@ -1111,16 +1113,20 @@ final class AppModel {
                                                    failureTitle: "The fonts could not be added") else { continue }
             switch target {
             case .covered(let covering):
+                // Added again by the user: an exclusion of one of them (Remove from Library) no longer applies.
+                _ = await runBackground { try backend.deleteExclusions(of: files, in: covering) }
                 rescan(covering.id)
             case .fileSet(let loc):
                 await reloadLocations()
                 scanProgress[loc.id] = ScanProgress(locationID: loc.id, phase: .parsing, total: files.count)
-                let progress = await runBackground { try backend.importFiles(files, into: loc) }
+                let skip = skipDuplicatesOnImport
+                let progress = await runBackground { try backend.importFiles(files, into: loc, skipDuplicates: skip) }
                 scanProgress[loc.id] = progress ?? ScanProgress(locationID: loc.id, phase: .aborted(reason: "import failed"))
             }
         }
         query.scope = .recentImport
         await scanFinished()
+        await loadExcludedFiles()
     }
 
     /// Imports whatever was dropped: folders become locations, files are added individually.

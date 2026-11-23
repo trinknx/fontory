@@ -46,18 +46,15 @@ struct DuplicatesView: View {
         }
     }
 
-    private var progressText: String {
-        if let p = model.duplicateProgress { return "Comparing files… \(p.done.formatted()) of \(p.total.formatted())" }
-        return "Looking for duplicates…"
-    }
+    private var progressText: String { model.duplicateSearchStatus }
 
     private var header: some View {
         HStack(spacing: 8) {
             Button("Find Again") { model.findDuplicates() }
                 .disabled(model.isFindingDuplicates)
-            Button("Select Copies to Remove") { model.selectCopiesToRemove() }
+            Button("Select Copies to Remove") { Task { await model.selectCopiesToRemove() } }
                 .disabled(exact.isEmpty || model.isRemovingDuplicates)
-                .help("Keeps one file per exact group (active, then OTF > TTF > …, then the location ranked higher in Settings) and checks the others")
+                .help("Keeps one file per exact group (active, then with tags or notes, then OTF > TTF > …, then the location ranked higher in Settings) and checks the others")
             Spacer(minLength: 8)
             if model.isFindingDuplicates {
                 ProgressView().controlSize(.small)
@@ -70,7 +67,7 @@ struct DuplicatesView: View {
             Spacer(minLength: 8)
             Button("Remove from Library") { Task { await model.removeCheckedFromLibrary() } }
                 .disabled(model.checkedRemovableFiles.isEmpty || model.isRemovingDuplicates)
-                .help("Removes the checked files from the library; they stay on disk and rescans skip them")
+                .help("Removes the checked files from the library; they stay on disk and rescans skip them. Asks first when fonts with tags or notes would lose them.")
             Button("Move to Trash…") { model.moveCheckedToTrash() }
                 .disabled(model.checkedRemovableFiles.isEmpty || model.isRemovingDuplicates)
         }

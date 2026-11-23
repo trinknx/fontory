@@ -40,6 +40,8 @@ struct RemovalCandidate: Sendable {
     var isProtected: Bool
     /// Faces with activation, tags, notes or Quick Collection membership (the "N fonts removed" notice).
     var userDataFaces: Int
+    /// Faces with tags, a note or Quick Collection membership, which Remove from Library loses (it confirms first).
+    var organizedFaces: Int
 }
 
 /// Library → Duplicates: the search (hashing, then grouping), the checkboxes and the two removals. Store calls and
@@ -51,6 +53,7 @@ extension AppModel {
     func showDuplicates() {
         closeFamilyDetail()
         isShowingDuplicates = true
+        isShowingFilters = false  // the view ignores filters (`filtersAvailable`)
         findDuplicates()
         Task { await loadExcludedFiles() }
     }
@@ -71,10 +74,20 @@ extension AppModel {
 
     /// Starts a search; without `hashing` only the groups are read (from the hashes stored). Never two at once: a start
     /// while one runs (or while an unmount is handled) runs once more afterwards.
+    ///
+    /// Hashing never overlaps the face backfill (both read every file): a hashing search asked for while the backfill
+    /// runs waits ("Waiting for font details…") and starts when the backfill is idle (`duplicateSearchAfterFaceBackfill`).
+    /// Any start meanwhile joins that pending search.
     func startDuplicateSearch(hashing: Bool) {
         guard let backend, !duplicateSearchStopped else { return }
+        if isWaitingForFaceBackfill { return }
         if unmountsInProgress > 0 || duplicateTask != nil {
             duplicateRerun = (duplicateRerun ?? false) || hashing
+            return
+        }
+        if hashing && faceBackfillTask != nil {
+            isWaitingForFaceBackfill = true
+            isFindingDuplicates = true
             return
         }
         duplicateRerun = nil
@@ -98,6 +111,21 @@ extension AppModel {
             }
             self?.duplicateSearchEnded(snapshot, cancelled: Task.isCancelled)
         }
+    }
+
+    /// The Duplicates view's progress line while a search runs.
+    var duplicateSearchStatus: String {
+        if isWaitingForFaceBackfill { return "Waiting for font details…" }
+        if let p = duplicateProgress { return "Comparing files… \(p.done.formatted()) of \(p.total.formatted())" }
+        return "Looking for duplicates…"
+    }
+
+    /// The face backfill ended (and no rerun started): runs the hashing search that waited for it.
+    func duplicateSearchAfterFaceBackfill() {
+        guard isWaitingForFaceBackfill, faceBackfillTask == nil else { return }
+        isWaitingForFaceBackfill = false
+        isFindingDuplicates = duplicateTask != nil
+        startDuplicateSearch(hashing: true)
     }
 
     /// An unmount began: stops hashing (it may read from the volume) without a rerun. The handler calls
@@ -207,17 +235,23 @@ extension AppModel {
     }
 
     /// Select Copies to Remove: per exact group, every file but the one `KeepPolicy` keeps (protected files never).
-    /// Same-font groups are never selected. Replaces the checked set.
-    func selectCopiesToRemove() {
+    /// Same-font groups are never selected. Replaces the checked set. Which files carry tags, notes or Quick Collection
+    /// membership (keep rule 1b) is read from the store off the main actor.
+    func selectCopiesToRemove() async {
+        guard let backend else { return }
+        let exactGroups = duplicateGroups.filter { $0.kind == .exact }
+        let fileIDs = exactGroups.flatMap(\.fileIDs)
+        guard let userData = await runBackground({ try backend.store.userDataFaceCounts(fileIDs: fileIDs) },
+                                                 failureTitle: "The fonts could not be read") else { return }
         let policy = KeepPolicy(locationRank: effectiveLocationRank)
         var checked = Set<Int64>()
-        for group in duplicateGroups where group.kind == .exact {
+        for group in exactGroups {
             var rows: [Int64: FaceRow] = [:]
             for fileID in group.fileIDs {
                 for row in duplicateFacesByFile[fileID] ?? [] { rows[row.id] = row }
             }
             let files = duplicateFiles.filter { group.fileIDs.contains($0.key) }
-            checked.formUnion(policy.filesToRemove(in: group, rows: rows, files: files))
+            checked.formUnion(policy.filesToRemove(in: group, rows: rows, files: files, userDataFiles: Set(userData.keys)))
         }
         checkedDuplicateFiles = checked.filter { !isProtectedDuplicate($0) }
     }
@@ -235,12 +269,14 @@ extension AppModel {
             if byFile[row.fileID] == nil { order.append(row.fileID) }
             byFile[row.fileID, default: []].append(row)
         }
+        let organized = try store.userDataFaceCounts(fileIDs: order)
         return try order.map { fileID in
             let faces = byFile[fileID] ?? []
             return RemovalCandidate(
                 fileID: fileID, locationID: faces[0].locationID, name: faces[0].fullName, url: faces[0].fileURL,
                 activeFaceIDs: faces.filter { $0.activation != .off }.map(\.id),
-                isProtected: isProtected(faces), userDataFaces: try store.userDataFaceCount(fileIDs: [fileID]))
+                isProtected: isProtected(faces), userDataFaces: try store.userDataFaceCount(fileIDs: [fileID]),
+                organizedFaces: organized[fileID] ?? 0)
         }
     }
 
@@ -274,13 +310,28 @@ extension AppModel {
 
     /// Remove from Library: deactivates the checked files' active faces, then removes the files from the index and
     /// excludes them, so rescans skip them. The files stay on disk. Faces with user data count in the location's
-    /// "N fonts removed" notice.
-    func removeCheckedFromLibrary() async {
-        let ids = checkedRemovableFiles
+    /// "N fonts removed" notice. When faces of the files have tags, notes or Quick Collection membership, which go with
+    /// them, it asks first (`confirmed` is the alert's answer); otherwise it goes ahead.
+    func removeCheckedFromLibrary(confirmed: Bool = false) async {
+        await removeFromLibrary(checkedRemovableFiles, confirmed: confirmed)
+    }
+
+    func removeFromLibrary(_ ids: [Int64], confirmed: Bool) async {
         guard !ids.isEmpty, let backend, !isRemovingDuplicates else { return }
         isRemovingDuplicates = true
         defer { isRemovingDuplicates = false }
         guard let plan = await candidates(for: ids) else { return }
+        let organized = plan.filter { !$0.isProtected }.reduce(0) { $0 + $1.organizedFaces }
+        if organized > 0 && !confirmed {
+            let files = ids.count == 1 ? "1 font file" : "\(ids.count.formatted()) font files"
+            alert = AlertItem(
+                title: "Remove \(files) from the library?",
+                message: "\(organized == 1 ? "1 font" : "\(organized.formatted()) fonts") with tags or notes will lose them "
+                    + "(tags, notes and Quick Collection membership). The files stay on disk, and rescans skip them.",
+                actionTitle: "Remove", isDestructive: true,
+                action: { [weak self] in Task { await self?.removeFromLibrary(ids, confirmed: true) } })
+            return
+        }
         var failures = plan.filter(\.isProtected).map { TrashResult.Failure(fileID: $0.fileID, name: $0.name, message: Self.protectedMessage) }
         let (ok, failed) = await deactivate(plan.filter { !$0.isProtected })
         failures += failed
@@ -323,19 +374,25 @@ extension AppModel {
         defer { isRemovingDuplicates = false }
         guard let plan = await candidates(for: ids) else { return result }
         result.failures = plan.filter(\.isProtected).map { .init(fileID: $0.fileID, name: $0.name, message: Self.protectedMessage) }
-        let (ok, failed) = await deactivate(plan.filter { !$0.isProtected })
-        result.failures += failed
-        var recycled: [RemovalCandidate] = []
-        for c in ok {
+        // Reachability first: an offline or missing file is reported and left as it is (not deactivated).
+        var reachable: [RemovalCandidate] = []
+        for c in plan where !c.isProtected {
             guard let url = c.url else {
                 result.failures.append(.init(fileID: c.fileID, name: c.name, message: "Its location is offline."))
                 continue
             }
-            let name = "\(c.name) (\(url.lastPathComponent))"
             guard await Self.fileExists(url) else {
-                result.failures.append(.init(fileID: c.fileID, name: name, message: "The file is missing."))
+                result.failures.append(.init(fileID: c.fileID, name: "\(c.name) (\(url.lastPathComponent))", message: "The file is missing."))
                 continue
             }
+            reachable.append(c)
+        }
+        let (ok, failed) = await deactivate(reachable)
+        result.failures += failed
+        var recycled: [RemovalCandidate] = []
+        for c in ok {
+            guard let url = c.url else { continue }
+            let name = "\(c.name) (\(url.lastPathComponent))"
             // Parsed fonts may hold the file open.
             previewRenderer.forgetFonts(under: url)
             let (trashed, error) = await recycleFile(url)
@@ -343,15 +400,19 @@ extension AppModel {
                 recycled.append(c)
                 result.trashedURLs.append(trashed)
             } else {
-                result.failures.append(.init(fileID: c.fileID, name: name, message: error ?? "The file is still there."))
+                let message = error ?? "The file is still there."
+                result.failures.append(.init(fileID: c.fileID, name: name,
+                                             message: c.activeFaceIDs.isEmpty ? message : message + " (it was deactivated)"))
             }
         }
         let gone = recycled.map(\.fileID)
         if !gone.isEmpty {
-            // Gone from disk: deleted from the index, no exclusion.
-            if await runBackground({ try backend.store.deleteFiles(gone) }, failureTitle: "The trashed fonts could not be removed from the library") != nil {
+            // Gone from disk: deleted from the index, no exclusion. A row the watcher's rescan already deleted (and
+            // counted in its own notice) is not counted again.
+            if let deleted = await runBackground({ try backend.store.deleteFiles(gone) },
+                                                 failureTitle: "The trashed fonts could not be removed from the library") {
                 result.recycled = gone
-                noteRemovals(recycled)
+                noteRemovals(recycled.filter { deleted.contains($0.fileID) })
                 checkedDuplicateFiles.subtract(gone)
             }
         }
@@ -428,9 +489,18 @@ extension AppModel {
     }
 
     #if DEBUG
-    /// Smoke hook: waits until no search runs and none is pending.
+    /// Smoke hook: waits until no search runs and none is pending (one waiting for the face backfill included).
     func waitForDuplicateSearchForSmoke() async {
-        while let task = duplicateTask { await task.value }
+        while true {
+            if let task = duplicateTask {
+                await task.value
+            } else if isWaitingForFaceBackfill, let backfill = faceBackfillTask {
+                await backfill.value
+                if isWaitingForFaceBackfill && faceBackfillTask == backfill { return }  // a stand-in task (smoke)
+            } else {
+                return
+            }
+        }
     }
     #endif
 }
