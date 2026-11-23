@@ -23,7 +23,7 @@ enum DetailTab: String, CaseIterable, Sendable {
         }
     }
 
-    var isAvailable: Bool { self == .styles || self == .characters || self == .info }
+    var isAvailable: Bool { self == .styles || self == .characters || self == .text || self == .info }
 }
 
 /// How the family page lists styles: one big preview per style, or one compact line each.
@@ -39,6 +39,60 @@ struct FamilyDetail: Equatable, Sendable {
     var faceIDs: [Int64]
     /// The face the header previews and Info shows while no style is selected.
     var representativeID: Int64
+}
+
+/// The Text tab's specimen source: a built-in sample, or the preview text of the browser.
+enum TextSample: String, CaseIterable, Sendable {
+    case english, vietnamese, previewText
+
+    var title: String {
+        switch self {
+        case .english: BodyTextSamples.english.name
+        case .vietnamese: BodyTextSamples.vietnamese.name
+        case .previewText: "Preview Text"
+        }
+    }
+}
+
+/// Alignment of the Text tab's body text; unlike the one-line previews it can justify.
+enum BodyTextAlignment: String, CaseIterable, Sendable {
+    case left, center, right, justified
+
+    var ctAlignment: CTTextAlignment {
+        switch self {
+        case .left: .left
+        case .center: .center
+        case .right: .right
+        case .justified: .justified
+        }
+    }
+
+    var nsAlignment: NSTextAlignment {
+        switch self {
+        case .left: .left
+        case .center: .center
+        case .right: .right
+        case .justified: .justified
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .left: "Align Left"
+        case .center: "Align Center"
+        case .right: "Align Right"
+        case .justified: "Justify"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .left: "text.alignleft"
+        case .center: "text.aligncenter"
+        case .right: "text.alignright"
+        case .justified: "text.justify"
+        }
+    }
 }
 
 enum PreviewAlignment: String, CaseIterable, Sendable {
@@ -243,6 +297,12 @@ enum SettingsKey {
     static let detailLayout = "detail.layout"
     static let glyphCellSize = "detail.glyphCellSize"
     static let glyphOrder = "detail.glyphOrder"
+    static let textSample = "detail.text.sample"
+    static let textCustom = "detail.text.custom"
+    static let textColumns = "detail.text.columns"
+    static let textAlignment = "detail.text.alignment"
+    static let textPointSize = "detail.text.pointSize"
+    static let textLineHeight = "detail.text.lineHeight"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -250,6 +310,8 @@ enum SettingsKey {
             "zoom.grid": 0.25, "zoom.list": 0.25,
             detailPointSize: AppModel.defaultDetailPointSize, detailLayout: DetailLayout.rows.rawValue,
             glyphCellSize: AppModel.defaultGlyphCellSize, glyphOrder: GlyphOrder.unicode.rawValue,
+            textSample: TextSample.english.rawValue, textColumns: 1, textAlignment: BodyTextAlignment.left.rawValue,
+            textPointSize: AppModel.defaultTextPointSize, textLineHeight: AppModel.defaultTextLineHeight,
         ])
         // Activation is always restored at launch now; drop the old "restore on launch" switch.
         UserDefaults.standard.removeObject(forKey: "restoreOnLaunch")
@@ -358,6 +420,56 @@ final class AppModel {
     /// Renders and caches the glyph cells.
     @ObservationIgnored let glyphPipeline: GlyphPipeline
 
+    // MARK: Text tab
+
+    /// The built-in sample the specimen shows while the text has not been edited (persisted).
+    var textSample: TextSample {
+        didSet { if textSample != oldValue { UserDefaults.standard.set(textSample.rawValue, forKey: SettingsKey.textSample) } }
+    }
+    /// The edited specimen text, app-wide (not per font); nil shows `textSample`. Persisted.
+    var textCustom: String? {
+        didSet {
+            guard textCustom != oldValue else { return }
+            if let textCustom { UserDefaults.standard.set(textCustom, forKey: SettingsKey.textCustom) }
+            else { UserDefaults.standard.removeObject(forKey: SettingsKey.textCustom) }
+        }
+    }
+    var textColumns: Int {
+        didSet { if textColumns != oldValue { UserDefaults.standard.set(textColumns, forKey: SettingsKey.textColumns) } }
+    }
+    var textAlignment: BodyTextAlignment {
+        didSet { if textAlignment != oldValue { UserDefaults.standard.set(textAlignment.rawValue, forKey: SettingsKey.textAlignment) } }
+    }
+    /// Body size of the specimen, independent of the header and Styles sizes.
+    var textPointSize: Double {
+        didSet { if textPointSize != oldValue { UserDefaults.standard.set(textPointSize, forKey: SettingsKey.textPointSize) } }
+    }
+    /// Baseline-to-baseline distance as a multiple of the point size.
+    var textLineHeight: Double {
+        didSet { if textLineHeight != oldValue { UserDefaults.standard.set(textLineHeight, forKey: SettingsKey.textLineHeight) } }
+    }
+    nonisolated static let defaultTextPointSize = 18.0
+    nonisolated static let textPointSizeRange: ClosedRange<Double> = 9...72
+    nonisolated static let defaultTextLineHeight = 1.4
+    nonisolated static let textLineHeightRange: ClosedRange<Double> = 0.9...2.5
+
+    /// The text of a sample; Preview Text uses the browser's typed text, or what `row` previews.
+    func text(of sample: TextSample, row: FaceRow?) -> String {
+        switch sample {
+        case .english: return BodyTextSamples.english.text
+        case .vietnamese: return BodyTextSamples.vietnamese.text
+        case .previewText:
+            if let row { return preview.text(for: row) }
+            return preview.text.isEmpty ? PreviewSamples.dynamicText(scriptsBitmask: 1, style: preview.dynamicStyle) : preview.text
+        }
+    }
+
+    /// Chooses a sample; it replaces any edited text.
+    func chooseTextSample(_ sample: TextSample) {
+        textSample = sample
+        textCustom = nil
+    }
+
     // MARK: Locations
 
     private(set) var locations: [LocationRecord] = []
@@ -421,6 +533,14 @@ final class AppModel {
         let cell = defaults.double(forKey: SettingsKey.glyphCellSize)
         glyphCellSize = Self.glyphCellSizeRange.contains(cell) ? cell : Self.defaultGlyphCellSize
         glyphOrder = defaults.string(forKey: SettingsKey.glyphOrder).flatMap(GlyphOrder.init(rawValue:)) ?? .unicode
+        textSample = defaults.string(forKey: SettingsKey.textSample).flatMap(TextSample.init(rawValue:)) ?? .english
+        textCustom = defaults.string(forKey: SettingsKey.textCustom)
+        textColumns = min(3, max(1, defaults.integer(forKey: SettingsKey.textColumns)))
+        textAlignment = defaults.string(forKey: SettingsKey.textAlignment).flatMap(BodyTextAlignment.init(rawValue:)) ?? .left
+        let textSize = defaults.double(forKey: SettingsKey.textPointSize)
+        textPointSize = Self.textPointSizeRange.contains(textSize) ? textSize : Self.defaultTextPointSize
+        let lineHeight = defaults.double(forKey: SettingsKey.textLineHeight)
+        textLineHeight = Self.textLineHeightRange.contains(lineHeight) ? lineHeight : Self.defaultTextLineHeight
     }
 
     // MARK: Startup
@@ -1235,6 +1355,12 @@ final class AppModel {
             glyphCellSize = min(r.upperBound, max(r.lowerBound, (glyphCellSize + delta * 80).rounded()))
             return
         }
+        if detail != nil, detailTab == .text {
+            // On the Text tab the zoom commands change the body size (1 pt per step).
+            let r = Self.textPointSizeRange
+            textPointSize = min(r.upperBound, max(r.lowerBound, (textPointSize + delta * 10).rounded()))
+            return
+        }
         if detail != nil {
             // On the family page the zoom commands change its own preview size (8 pt per step).
             let r = Self.detailPointSizeRange
@@ -1248,6 +1374,10 @@ final class AppModel {
     func resetZoom() {
         if detail != nil, detailTab == .characters {
             glyphCellSize = Self.defaultGlyphCellSize
+            return
+        }
+        if detail != nil, detailTab == .text {
+            textPointSize = Self.defaultTextPointSize
             return
         }
         if detail != nil {

@@ -273,7 +273,7 @@ struct PreviewOptionsView: View {
 }
 
 /// An icon button that toggles an option; tinted while on.
-private struct OptionToggle<Content: View>: View {
+struct OptionToggle<Content: View>: View {
     let help: String
     @Binding var isOn: Bool
     @ViewBuilder let content: Content
@@ -286,7 +286,7 @@ private struct OptionToggle<Content: View>: View {
     }
 }
 
-private struct IconToggleStyle: ToggleStyle {
+struct IconToggleStyle: ToggleStyle {
     func makeBody(configuration: Configuration) -> some View {
         Button {
             configuration.isOn.toggle()

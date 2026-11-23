@@ -88,6 +88,8 @@ struct FamilyDetailView: View {
                              pointSize: model.detailPointSize, layout: model.detailLayout, selection: model.detailSelection)
         case .characters:
             CharactersTabView(model: model, detail: detail, faceID: focusedFaceID)
+        case .text:
+            TextTabView(model: model, detail: detail, faceID: focusedFaceID)
         case .info:
             FamilyInfoView(model: model, detail: detail, faceID: focusedFaceID, rowsVersion: model.rowsVersion)
         default:
@@ -95,7 +97,7 @@ struct FamilyDetailView: View {
         }
     }
 
-    /// Characters and Info show the first selected style, or the family's representative.
+    /// Characters, Text and Info show the first selected style, or the family's representative.
     private var focusedFaceID: Int64 {
         detail.faceIDs.first(where: model.detailSelection.contains) ?? detail.representativeID
     }
