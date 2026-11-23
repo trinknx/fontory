@@ -55,6 +55,9 @@ public struct SmartRule: Sendable, Hashable, Codable {
 
     private enum CodingKeys: String, CodingKey { case match, inverted, conditions }
 
+    /// "Script supported" values: the script name at each `scripts_bitmask` bit (the value is the index).
+    public static var scriptNames: [String] { ScriptCoverage.scripts.map(\.name) }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         match = try c.decodeIfPresent(Match.self, forKey: .match) ?? .all

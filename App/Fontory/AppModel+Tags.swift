@@ -225,18 +225,73 @@ extension AppModel {
         renamingTagID = id
     }
 
-    /// ⊕ New Smart Tag…: creates an empty smart tag (matches every font) and opens its editor.
-    func newSmartTag() async {
-        guard let id = await createTag(name: untitledName("Untitled Smart Tag", parentID: nil), parentID: nil,
-                                       kind: .smart, ruleJSON: SmartRule().encoded()) else { return }
-        renamingTagID = id
-        editSmartTag(id)
+    /// ⊕ New Smart Tag…: opens the editor on a new, unsaved smart tag (one "Name contains" row). Nothing is
+    /// written until Save.
+    func newSmartTag() {
+        var rule = SmartRule()
+        rule.conditions = [SmartRule.Condition(field: .name, op: .contains, value: .text(""))]
+        smartTagEditor = SmartTagEditorState(tagID: nil, name: untitledName("Untitled Smart Tag", parentID: nil), rule: rule)
     }
 
-    /// Opens the smart tag editor. Task 8 presents its sheet from `editingSmartTagID`.
+    /// Edit…: opens the editor on an existing smart tag.
     func editSmartTag(_ id: Int64) {
-        guard tag(id)?.kind == .smart else { return }
-        editingSmartTagID = id
+        guard let record = tag(id), record.kind == .smart else { return }
+        let rule = SmartRule.decode(record.ruleJSON ?? "") ?? SmartRule()
+        smartTagEditor = SmartTagEditorState(tagID: id, name: record.name, rule: rule)
+    }
+
+    /// Cancel: drops the draft.
+    func cancelSmartTagEditor() {
+        smartTagEditor?.countTask?.cancel()
+        smartTagEditor = nil
+    }
+
+    /// Save: writes the name and rule (a new smart tag is created at the top level). A `TagError` (empty or
+    /// duplicate name) shows the alert and keeps the sheet and its draft. Returns success.
+    @discardableResult
+    func saveSmartTag(_ editor: SmartTagEditorState) async -> Bool {
+        guard !editor.isSaving else { return false }
+        editor.isSaving = true
+        defer { editor.isSaving = false }
+        let name = editor.name
+        let json = editor.rule.encoded()
+        let savedID: Int64?
+        if let id = editor.tagID {
+            savedID = await tagWrite("The smart tag could not be saved") { store in
+                try store.renameTag(id, to: name)
+                try store.setTagRule(id, ruleJSON: json)
+                return id
+            }
+        } else {
+            savedID = await tagWrite("The smart tag could not be created") {
+                try $0.createTag(name: name, parentID: nil, kind: .smart, ruleJSON: json)
+            }
+        }
+        guard let savedID else { return false }
+        editor.countTask?.cancel()
+        if smartTagEditor === editor { smartTagEditor = nil }
+        await afterTagChange()
+        // A new smart tag is shown at once.
+        if editor.tagID == nil, tag(savedID) != nil { query.scope = .tags([tagPick(savedID)]) }
+        return true
+    }
+
+    /// The editor's live count, debounced 150 ms; only the latest request's result is kept.
+    func scheduleSmartTagCount(_ editor: SmartTagEditorState) {
+        guard let backend else { return }
+        editor.countGeneration += 1
+        let generation = editor.countGeneration
+        editor.countTask?.cancel()
+        let countQuery = LibraryQuery(scope: .tags([TagPick(tagID: editor.tagID ?? -1, inverted: false, rule: editor.rule)]),
+                                      includeSystem: query.includeSystem)
+        editor.countTask = Task { [weak self, weak editor] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self else { return }
+            let count = await self.runBackground({ try backend.store.faceIDs(for: countQuery).count },
+                                                 failureTitle: "smart tag count")
+            guard let editor, let count, generation == editor.countGeneration else { return }
+            editor.matchCount = count
+        }
     }
 
     func renameTag(_ id: Int64, to name: String) async {
@@ -270,7 +325,7 @@ extension AppModel {
         let doomed = descendantTagIDs(of: id)
         guard await tagWrite("The tag could not be deleted", { try $0.deleteTag(id) }) != nil else { return }
         if let renaming = renamingTagID, doomed.contains(renaming) { renamingTagID = nil }
-        if let editing = editingSmartTagID, doomed.contains(editing) { editingSmartTagID = nil }
+        if let editing = smartTagEditor?.tagID, doomed.contains(editing) { cancelSmartTagEditor() }
         let picks = selectedTagPicks
         if !picks.isEmpty {
             let kept = picks.filter { !doomed.contains($0.tagID) }

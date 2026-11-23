@@ -38,6 +38,7 @@ struct MainWindow: View {
         .frame(minWidth: 820, minHeight: 480)
         .modelAlert(model, inSettings: false)
         .sheet(item: $model.tagPanel) { TagPanel(model: model, request: $0) }
+        .sheet(item: $model.smartTagEditor) { SmartTagEditor(editor: $0, model: model) }
         .alert("Save Preview Text as Preset", isPresented: $model.isNamingPreset) {
             TextField("Name", text: $presetName)
             Button("Save") {
@@ -98,6 +99,8 @@ private struct BrowserWindowReader: NSViewRepresentable {
 private struct ModelAlert: ViewModifier {
     let model: AppModel
     let inSettings: Bool
+    /// The smart tag editor sheet presents the alerts while it is shown (the window behind it cannot).
+    var inSheet = false
 
     func body(content: Content) -> some View {
         content.alert(model.alert?.title ?? "", isPresented: presented, presenting: model.alert) { item in
@@ -113,7 +116,8 @@ private struct ModelAlert: ViewModifier {
     }
 
     private var presented: Binding<Bool> {
-        Binding(get: { model.alert != nil && Self.settingsIsKey == inSettings },
+        Binding(get: { model.alert != nil && Self.settingsIsKey == inSettings
+                        && (inSettings || (model.smartTagEditor != nil) == inSheet) },
                 set: { if !$0 { model.alert = nil } })
     }
 
@@ -123,7 +127,7 @@ private struct ModelAlert: ViewModifier {
 }
 
 extension View {
-    func modelAlert(_ model: AppModel, inSettings: Bool) -> some View {
-        modifier(ModelAlert(model: model, inSettings: inSettings))
+    func modelAlert(_ model: AppModel, inSettings: Bool, inSheet: Bool = false) -> some View {
+        modifier(ModelAlert(model: model, inSettings: inSettings, inSheet: inSheet))
     }
 }

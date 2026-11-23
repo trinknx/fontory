@@ -48,6 +48,7 @@ enum OrganizationSmoke {
             await noteSteps(model, faces: faces)
             await quickCollectionSteps(model, faces: faces)
             await backfillSteps(model, backend: backend, folder: dir)
+            await smartEditorSteps(model, backend: backend)
         } catch {
             check(false, "setup", "\(error)")
         }
@@ -163,11 +164,16 @@ enum OrganizationSmoke {
         let sansShown = await shown(model)
         check(sansShown == [sans], "Style ▸ Sans shows the sans face")
 
-        // Smart tag: empty rule matches everything until the editor (Task 8) sets one.
-        await model.newSmartTag()
+        // Smart tag: New Smart Tag… opens the editor on an unsaved draft; Save creates it.
+        let tagsBefore = model.tags.count
+        model.newSmartTag()
+        check(model.smartTagEditor?.tagID == nil && model.tags.count == tagsBefore,
+              "New Smart Tag opens the editor without creating a tag")
+        if let editor = model.smartTagEditor {
+            await model.saveSmartTag(editor)
+        }
         let smart = model.tags.first { $0.kind == .smart }
-        check(smart != nil && model.renamingTagID == smart?.id && model.editingSmartTagID == smart?.id,
-              "New Smart Tag creates it, starts rename and asks for the editor")
+        check(smart != nil && model.smartTagEditor == nil, "Save creates the smart tag and closes the editor", model.alert?.message ?? "")
         if let smart {
             check(model.smartTagCounts[smart.id] == 3, "smart tag count", "\(model.smartTagCounts)")
             model.selectTag(smart.id, modifiers: [])
@@ -625,6 +631,155 @@ enum OrganizationSmoke {
         } catch {
             check(false, "20k drag setup", "\(error)")
         }
+    }
+
+    // MARK: Task 8: smart tag editor
+
+    /// Waits out the editor's debounced count.
+    private static func editorCount(_ model: AppModel, _ editor: SmartTagEditorState) async -> Int? {
+        model.scheduleSmartTagCount(editor)
+        await editor.countTask?.value
+        return editor.matchCount
+    }
+
+    private static func smartEditorSteps(_ model: AppModel, backend: LibraryBackend) async {
+        let store = backend.store
+        // Extra faces: two variable script faces, a static script face, a variable sans; weights 300/700/900.
+        do {
+            let loc = try store.upsertLocation(kind: .folder, volumeUUID: "SMOKE-SMART", relativePath: "Smart",
+                                               displayName: "Smart", lastKnownPath: "/nonexistent/smart")
+            let batch = try store.nextImportBatch()
+            let defs: [(String, StyleClass, Bool, Double)] = [
+                ("Brush VF", .script, true, 300), ("Hand VF", .script, true, 700),
+                ("Hand Static", .script, false, 700), ("Grotesk VF", .sans, true, 900),
+            ]
+            for (i, (name, style, variable, weight)) in defs.enumerated() {
+                let face = ParsedFace(postScriptName: "Smart\(i)", family: "Smart \(name)", style: "Regular",
+                                      fullName: "Smart \(name)", weight: weight, isVariable: variable, glyphCount: 10,
+                                      styleClass: style)
+                let file = FileRecord(locationID: loc.id, relativePath: "Smart\(i).ttf", size: 10,
+                                      mtime: Date(timeIntervalSince1970: 1000), format: "ttf", fingerprint: "smart-\(i)")
+                _ = try store.insertFile(file, faces: [face], importBatch: batch)
+            }
+        } catch {
+            check(false, "smart editor seed", "\(error)")
+            return
+        }
+        await model.reloadOrganization()
+
+        // "Style is Script AND Variable is yes", built as the sheet builds it.
+        model.newSmartTag()
+        guard let editor = model.smartTagEditor else { check(false, "editor opens"); return }
+        editor.name = "Script VF"
+        editor.match = .all
+        editor.rows = []
+        editor.addRow()
+        editor.rows[0].condition = SmartRule.Condition(field: .styleClass, op: .is, value: .int(Int64(StyleClass.script.rawValue)))
+        editor.addRow()
+        editor.rows[1].condition = SmartRule.Condition(field: .variable, op: .yes)
+        for row in editor.rows {
+            let c = row.condition
+            check(SmartRuleSchema.ops(for: c.field).contains(c.op), "editor offers \(c.field.rawValue) \(c.op.rawValue)")
+        }
+        let live = await editorCount(model, editor)
+        let core = (try? store.faceIDs(for: LibraryQuery(scope: .tags([TagPick(tagID: -1, rule: editor.rule)])))).map(\.count)
+        check(live == 2 && live == core, "live count: Script AND Variable matches 2", "live \(String(describing: live)), core \(String(describing: core))")
+        await model.saveSmartTag(editor)
+        guard let scriptVF = model.tags.first(where: { $0.name == "Script VF" }) else {
+            check(false, "Script VF saved", model.alert?.message ?? "")
+            return
+        }
+        let shownIDs = await shown(model)
+        check(model.selectedTagPicks.map(\.tagID) == [scriptVF.id] && shownIDs.count == 2 && model.smartTagCounts[scriptVF.id] == 2,
+              "saved smart tag: scope count equals the core count (2)", "shown \(shownIDs.count), row \(String(describing: model.smartTagCounts[scriptVF.id]))")
+
+        // Edit…: drop the Variable row; the count follows.
+        model.editSmartTag(scriptVF.id)
+        guard let edit = model.smartTagEditor, edit.tagID == scriptVF.id else { check(false, "Edit… opens the editor"); return }
+        check(edit.name == "Script VF" && edit.rows.count == 2, "Edit… loads name and rule")
+        edit.removeRow(edit.rows[1].id)
+        let editedLive = await editorCount(model, edit)
+        check(editedLive == 3, "live count after removing a row: 3", "\(String(describing: editedLive))")
+        await model.saveSmartTag(edit)
+        let reshown = await shown(model)
+        check(model.smartTagEditor == nil && model.smartTagCounts[scriptVF.id] == 3 && reshown.count == 3,
+              "editing an existing smart tag updates its count", "\(String(describing: model.smartTagCounts[scriptVF.id])), shown \(reshown.count)")
+
+        // Invert: the checkbox is off with no rows (the built rule ignores it); with a row it inverts.
+        model.editSmartTag(scriptVF.id)
+        if let inv = model.smartTagEditor {
+            inv.inverted = true
+            let invCount = await editorCount(model, inv)
+            let total = (try? store.faceIDs(for: LibraryQuery()))?.count ?? -1
+            check(invCount == total - 3, "inverted rule matches the other fonts", "\(String(describing: invCount)) of \(total)")
+            inv.rows = []
+            check(inv.rule.inverted == false, "no rows: Invert is not applied")
+            model.cancelSmartTagEditor()
+        }
+        let afterCancel = model.tag(scriptVF.id).flatMap { SmartRule.decode($0.ruleJSON ?? "") }
+        check(model.smartTagEditor == nil && afterCancel?.conditions.count == 1 && afterCancel?.inverted == false,
+              "Cancel discards the draft")
+
+        // Save with a duplicate name: alert, sheet and draft kept.
+        model.newSmartTag()
+        if let dup = model.smartTagEditor {
+            dup.name = "script vf"
+            dup.rows[0].condition = SmartRule.Condition(field: .italic, op: .no)
+            let tagsBefore = model.tags.count
+            let saved = await model.saveSmartTag(dup)
+            check(!saved && model.alert?.message == TagError.duplicateName.message && model.smartTagEditor === dup
+                  && dup.name == "script vf" && dup.rows.count == 1 && dup.rows[0].condition.field == .italic
+                  && model.tags.count == tagsBefore,
+                  "duplicate name: alert shown, sheet and draft kept", model.alert?.message ?? "no alert")
+            model.alert = nil
+            dup.name = "   "
+            let savedEmpty = await model.saveSmartTag(dup)
+            check(!savedEmpty && model.alert?.message == TagError.emptyName.message && model.smartTagEditor === dup,
+                  "empty name: alert shown, sheet kept")
+            model.alert = nil
+            model.cancelSmartTagEditor()
+        }
+
+        // Weight/width stops map to stored units and round-trip through the saved JSON.
+        let weights = SmartRuleSchema.weightStops.map(\.value)
+        let widths = SmartRuleSchema.widthStops.map(\.value)
+        check(weights == [100, 200, 300, 400, 500, 600, 700, 800, 900] && widths == Array(1...9).map(Double.init),
+              "stops are OS/2 units (weight 100–900, width 1–9)")
+        var roundTrips = true
+        for (stops, field) in [(SmartRuleSchema.weightStops, SmartRule.Field.weight), (SmartRuleSchema.widthStops, .width)] {
+            for lo in stops.indices { for hi in lo..<stops.count {
+                var rule = SmartRule()
+                rule.conditions = [SmartRule.Condition(field: field, op: .between, value: .range(stops[lo].value, stops[hi].value))]
+                guard let back = SmartRule.decode(rule.encoded()),
+                      case .range(let a, let b) = SmartTagEditorState(tagID: nil, name: "x", rule: back).rule.conditions.first?.value,
+                      SmartRuleSchema.stopIndex(for: a, in: stops) == lo, SmartRuleSchema.stopIndex(for: b, in: stops) == hi
+                else { roundTrips = false; continue }
+            } }
+        }
+        check(roundTrips, "every weight/width stop pair round-trips")
+        check(SmartRuleSchema.stopIndex(for: 437, in: SmartRuleSchema.weightStops) == 3, "an in-between weight snaps to the nearest stop")
+
+        // "Weight between Bold and Black": 3 faces (700, 700, 900); the seeded faces are 400.
+        model.newSmartTag()
+        if let w = model.smartTagEditor {
+            w.rows[0].condition = SmartRule.Condition(field: .weight, op: .between, value: .range(700, 900))
+            let n = await editorCount(model, w)
+            check(n == 3, "Weight between Bold and Black matches 3", "\(String(describing: n))")
+            model.cancelSmartTagEditor()
+        }
+
+        // Every field's default value with its first operator compiles to a real condition (not match-nothing).
+        var allValid = true
+        for field in SmartRuleSchema.fieldOrder {
+            for op in SmartRuleSchema.ops(for: field) {
+                let value = SmartRuleSchema.defaultValue(for: field, tags: model.plainTagTree().map(\.tag),
+                                                         locations: model.locations.filter { !$0.autoIndexed })
+                var rule = SmartRule()
+                rule.conditions = [SmartRule.Condition(field: field, op: op, value: value)]
+                if rule.sqlClause().sql == "(0)" { allValid = false; print("  invalid: \(field) \(op)") }
+            }
+        }
+        check(allValid, "every offered field/operator pair compiles to a real condition")
     }
 }
 #endif

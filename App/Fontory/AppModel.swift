@@ -537,8 +537,8 @@ final class AppModel {
     var renamingTagID: Int64?
     /// Expanded tag rows in the sidebar tree.
     var expandedTagIDs: Set<Int64> = []
-    /// The smart tag whose rule editor should be shown. Hook for the smart tag editor sheet (Task 8).
-    var editingSmartTagID: Int64?
+    /// The smart tag editor sheet's draft, while it is shown (see `SmartTagEditor`).
+    var smartTagEditor: SmartTagEditorState?
     @ObservationIgnored var organizationGeneration = 0
     /// The last ⌥-click applied to a tag row, to apply each click once (see `optionClickTag`).
     @ObservationIgnored var lastOptionClick: (tagID: Int64, time: TimeInterval)?

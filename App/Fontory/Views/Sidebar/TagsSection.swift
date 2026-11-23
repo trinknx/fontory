@@ -229,7 +229,7 @@ struct SidebarAddButton: View {
         HStack {
             Menu {
                 Button("New Tag") { Task { await model.newTag() } }
-                Button("New Smart Tag…") { Task { await model.newSmartTag() } }
+                Button("New Smart Tag…") { model.newSmartTag() }
                 Divider()
                 Button("Import Fonts…") { model.showImportPanel() }
             } label: {
