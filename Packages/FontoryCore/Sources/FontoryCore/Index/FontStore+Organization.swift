@@ -249,9 +249,9 @@ extension FontStore {
         let s = try database.prepare("SELECT name FROM tags WHERE parent_id IS ? AND id != ?")
         defer { s.reset() }
         try s.bind([parentID.map { .int($0) } ?? .null, .int(excluding ?? -1)])
-        let folded = name.folding(options: [.caseInsensitive], locale: nil)
+        let folded = TagName.fold(name)
         while try s.step() {
-            if s.text(0).folding(options: [.caseInsensitive], locale: nil) == folded { throw TagError.duplicateName }
+            if TagName.fold(s.text(0)) == folded { throw TagError.duplicateName }
         }
     }
 }

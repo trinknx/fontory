@@ -112,6 +112,26 @@ import Testing
         #expect(try ids(w.s, .all, search: "#!serif").count == 5)
     }
 
+    @Test func hashTagFoldsNonASCIICase() throws {
+        let w = try world()
+        let s = w.s
+        let dep = try s.createTag(name: "Đẹp", parentID: nil)
+        let elan = try s.createTag(name: "Élan", parentID: nil)
+        let an = try s.createTag(name: "Ấn", parentID: nil)
+        let nested = try s.createTag(name: "Đẹp", parentID: an)
+        try s.addTag(dep, toFaces: [w.face("Alpha-Bold")])
+        try s.addTag(elan, toFaces: [w.face("Beta-Regular")])
+        try s.addTag(nested, toFaces: [w.face("Beta-Black")])
+        for q in ["#đẹp", "#ĐẸP", "#Đẹp"] {
+            #expect(try ids(s, .all, search: q) == [w.face("Alpha-Bold"), w.face("Beta-Black")], "\(q)")
+        }
+        for q in ["#élan", "#ÉLAN"] { #expect(try ids(s, .all, search: q) == [w.face("Beta-Regular")], "\(q)") }
+        for q in ["#ấn/đẹp", "#Ấn/ĐẸP"] { #expect(try ids(s, .all, search: q) == [w.face("Beta-Black")], "\(q)") }
+        #expect(try ids(s, .all, search: "#ấn") == [w.face("Beta-Black")])
+        let not = try ids(s, .all, search: "#!đẹp")
+        #expect(not == Set(w.f.faceIDs.values).subtracting([w.face("Alpha-Bold"), w.face("Beta-Black")]))
+    }
+
     @Test func tagNamesAreBoundNotInterpolated() throws {
         let w = try world()
         #expect(try ids(w.s, .all, search: "#a'b\"--").isEmpty)

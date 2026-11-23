@@ -111,12 +111,13 @@ public struct SearchText: Sendable, Hashable {
                         SELECT id, name, name FROM tags WHERE parent_id IS NULL
                         UNION ALL SELECT tags.id, tags.name, p.path || '/' || tags.name FROM tags JOIN p ON tags.parent_id = p.id),
                       d(id) AS (
-                        SELECT id FROM p WHERE lower(name) = ? OR lower(path) = ?
+                        SELECT id FROM p WHERE fontory_fold(name) = ? OR fontory_fold(path) = ?
                         UNION SELECT tags.id FROM tags JOIN d ON tags.parent_id = d.id)
                       SELECT id FROM d))
                     """
-                bindings.append(.text(lowered))
-                bindings.append(.text(lowered))
+                let folded = TagName.fold(t.text)
+                bindings.append(.text(folded))
+                bindings.append(.text(folded))
                 if let style = StyleClass.browsable.first(where: { $0.title.lowercased() == lowered }) {
                     matches += " OR faces.style_class = ?"
                     bindings.append(.int(Int64(style.rawValue)))
