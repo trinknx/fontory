@@ -318,4 +318,19 @@ import Testing
         try f.store.setActivation(faceIDs: [id], state: .on, at: Date())
         #expect(try f.store.rows(ids: [id])[id]?.externalActive == false)
     }
+
+    @Test func privateSystemFacesAreNeitherListedNorCounted() throws {
+        var f = try Fixture.make()
+        let sys = try f.store.upsertLocation(kind: .system, volumeUUID: "SYS", relativePath: "System/Library/Fonts", displayName: "System Fonts", lastKnownPath: "/System/Library/Fonts")
+        try f.add(sys.id, "SFNS.ttf", [Fixture.face(".SFNS-Regular", family: ".SF NS", style: "Regular", weight: 400),
+                                       Fixture.face("SFNS-Public", family: "SF", style: "Regular", weight: 400, index: 1)], 0)
+        // A dot-named face in a user's folder is the user's business: still shown.
+        try f.add(f.locA.id, "Dot.otf", [Fixture.face(".Dot", family: "Dot", style: "Regular", weight: 400)], 0)
+        #expect(try names(f, LibraryQuery(scope: .system)) == ["SFNS-Public"])
+        #expect(!(try names(f, LibraryQuery())).contains(".SFNS-Regular"))
+        #expect(try names(f, LibraryQuery()).contains(".Dot"))
+        #expect(try f.store.families(for: LibraryQuery(scope: .system)).map(\.name) == ["SF"])
+        let c = LibraryCounts(groups: try f.store.faceCountGroups(), includeSystem: true)
+        #expect(c.system == 1 && c.all == 8 && c.perLocation[sys.id] == 1)
+    }
 }

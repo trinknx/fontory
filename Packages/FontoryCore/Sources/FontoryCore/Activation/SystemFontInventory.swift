@@ -33,7 +33,8 @@ public struct InventoryResult: Sendable, Equatable {
 /// - A registered file inside a scanned location that has not indexed it yet is left to that location's scan.
 /// - Nothing is ever written into a user's location (folder or file set): a registered file in a file set's folder
 ///   that the set does not list is not indexed, and a folder the user owns is never turned into an auto-indexed one.
-/// - Private faces are ignored: dot-prefixed PostScript names or files, and FontServices' Reserved fonts.
+/// - Private faces are ignored: dot-prefixed PostScript names, dot-prefixed files under /System, and FontServices'
+///   Reserved fonts. Hidden files elsewhere are kept: Adobe Fonts syncs its fonts as `.r/.12345.otf`.
 ///
 /// All database changes of one pass are applied in one transaction. Paths are matched in both their standardized
 /// and their symlink-resolved spelling, like `CoreTextRegistrar` matches registration errors.
@@ -61,7 +62,8 @@ public actor SystemFontInventory {
     private let readFile: @Sendable (URL) -> FileContents?
     private let volumeRef: @Sendable (URL) -> VolumeRef?
     private let resolvePath: @Sendable (String) -> String
-    /// Registered files that could not be read this session; not read again on every pass.
+    /// Registered files that could not be read this session, keyed by path, size and modification date: not read
+    /// again on every pass, but read again once the file changes (still being written or synced when registered).
     private var unreadable = Set<String>()
 
     public init(
@@ -111,10 +113,18 @@ public actor SystemFontInventory {
         path == "/System" || path.hasPrefix(systemPrefix)
     }
 
-    /// Fonts macOS keeps for itself: hidden files, and FontServices' Reserved fonts.
+    /// Fonts macOS keeps for itself: hidden files under /System, and FontServices' Reserved fonts. Hidden files
+    /// elsewhere are public fonts (Adobe Fonts stores its synced fonts that way).
     static func isPrivatePath(_ path: String) -> Bool {
-        if (path as NSString).lastPathComponent.hasPrefix(".") { return true }
+        if isSystemPath(path) && (path as NSString).lastPathComponent.hasPrefix(".") { return true }
         return path.contains("/FontServices.framework/") && path.contains("/Reserved/")
+    }
+
+    private static func unreadableKey(_ path: String) -> String {
+        let values = try? URL(fileURLWithPath: path).resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let size = values?.fileSize.map(String.init) ?? "?"
+        let mtime = values?.contentModificationDate.map { String($0.timeIntervalSince1970) } ?? "?"
+        return "\(path)|\(size)|\(mtime)"
     }
 
     /// CoreText names the face in the fragment (`postscript-name=…`); a dot-prefixed name is a private face.
@@ -222,16 +232,18 @@ public actor SystemFontInventory {
 
         // 6. Read the new files, outside any transaction.
         var reads: [(file: NewFile, contents: FileContents)] = []
-        for file in newFiles where !unreadable.contains(file.path) {
+        for file in newFiles {
             if case .newAutoLocation(let folder) = file.target, refs[folder] == nil { continue }
+            let key = Self.unreadableKey(file.path)
+            if unreadable.contains(key) { continue }
             guard var contents = readFile(URL(fileURLWithPath: file.path)) else {
                 result.failedFiles += 1
-                unreadable.insert(file.path)
+                unreadable.insert(key)
                 Self.log.debug("active font could not be read: \(file.path, privacy: .public)")
                 continue
             }
             contents.faces.removeAll { $0.postScriptName.hasPrefix(".") }
-            if contents.faces.isEmpty { unreadable.insert(file.path); continue }
+            if contents.faces.isEmpty { unreadable.insert(key); continue }
             reads.append((file, contents))
         }
 

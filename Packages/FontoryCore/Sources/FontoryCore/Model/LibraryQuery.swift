@@ -32,10 +32,13 @@ public struct LibraryQuery: Sendable, Hashable {
 /// filtered by scope, ordered by sort. Shared by `faceIDs` and `families`.
 extension LibraryQuery {
     static let effectiveFamily = "COALESCE(faces.custom_family, faces.family)"
+    /// macOS's private faces (PostScript name starting with ".", e.g. ".SFNS-Regular") in system locations are never
+    /// shown or counted. Shared with `FontStore.faceCountGroups`.
+    static let publicFaceClause = "NOT (locations.kind = 2 AND substr(faces.postscript_name, 1, 1) = '.')"
     private static let randomModulus: UInt64 = 1_000_003
 
     func sql(columns: String) -> (sql: String, bindings: [SQLValue]) {
-        var clauses: [String] = []
+        var clauses: [String] = [Self.publicFaceClause]
         var bindings: [SQLValue] = []
 
         switch scope {

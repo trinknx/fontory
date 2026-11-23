@@ -224,6 +224,46 @@ final class Counter: @unchecked Sendable {
         #expect(calls.value == 1)
     }
 
+    @Test func adobeFontsHiddenFilesAreIndexedAsUser() async throws {
+        let f = try Fixture.make()
+        let inv = SystemFontInventory(
+            store: f.store,
+            readFile: { url in
+                SystemFontInventory.FileContents(size: 10, mtime: Date(timeIntervalSince1970: 1000), format: "otf", fingerprint: "fp-\(url.path)",
+                                                 faces: [Fixture.face("AdobeSans-Regular", family: "Adobe Sans", style: "Regular", weight: 400)])
+            },
+            volumeRef: { VolumeRef(volumeUUID: "ROOT", relativePath: String($0.path.dropFirst())) },
+            resolvePath: { $0 })
+        let path = "/Users/me/Library/Application Support/Adobe/CoreSync/plugins/livetype/.r/.12345.otf"
+        let result = try await inv.reconcile(available: [URL(string: "file://" + path.replacingOccurrences(of: " ", with: "%20") + "#postscript-name=AdobeSans-Regular")!])
+        #expect(result.indexedFiles == 1)
+        #expect(try names(f, .user) == ["AdobeSans-Regular"])
+        #expect(try names(f, .activated) == ["AdobeSans-Regular"])
+        let loc = try #require(try f.store.locations().first(where: \.autoIndexed))
+        #expect(loc.kind == .userInstalled && loc.lastKnownPath.hasSuffix("/livetype/.r"))
+        // Still active: kept on the next pass.
+        #expect(!(try await inv.reconcile(available: [url(path)])).changed)
+    }
+
+    @Test func unreadableFileIsReadAgainOnceItChanges() async throws {
+        let f = try Fixture.make()
+        let temp = try TempFonts()
+        defer { temp.cleanup() }
+        let file = try temp.write(Data([1, 2, 3]), as: "Syncing.otf")
+        let calls = Counter()
+        let inv = SystemFontInventory(
+            store: f.store, readFile: { _ in calls.increment(); return nil },
+            volumeRef: { VolumeRef(volumeUUID: "ROOT", relativePath: String($0.path.dropFirst())) },
+            resolvePath: { $0 })
+        _ = try await inv.reconcile(available: [file])
+        _ = try await inv.reconcile(available: [file])
+        #expect(calls.value == 1)
+        // The sync finishes: the file grows, so it is read again.
+        try Data(repeating: 7, count: 64).write(to: file)
+        _ = try await inv.reconcile(available: [file])
+        #expect(calls.value == 2)
+    }
+
     @Test func privateFacesAreIgnored() async throws {
         let f = try Fixture.make()
         let inv = SystemFontInventory(
@@ -237,7 +277,7 @@ final class Counter: @unchecked Sendable {
             resolvePath: { $0 })
         let result = try await inv.reconcile(available: [
             url("/System/Library/PrivateFrameworks/FontServices.framework/Versions/A/Resources/Reserved/Res.ttc"),
-            url("/Users/me/Fonts/.Secret.otf"),
+            url("/System/Library/AssetsV2/Font7/.Secret.otf"),
             URL(string: "file:///Users/me/Other/Priv.otf#postscript-name=.PrivFace")!,
             url("/Users/me/Fonts/Public.otf"),
         ])

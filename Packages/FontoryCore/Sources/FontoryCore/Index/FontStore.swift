@@ -600,6 +600,7 @@ public final class FontStore: Sendable {
             SELECT faces.activation, locations.online, files.location_id, locations.kind,
               files.import_batch = (SELECT MAX(import_batch) FROM files), COUNT(*), files.external_active != 0
             FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
+            WHERE \(LibraryQuery.publicFaceClause)
             GROUP BY 1, 2, 3, 4, 5, 7
             """)
             defer { s.reset() }
