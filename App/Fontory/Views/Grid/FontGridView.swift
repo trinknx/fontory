@@ -211,6 +211,8 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
     func update(rowsVersion new: Int) {
         guard new != rowsVersion else { return }
         rowsVersion = new
+        selectionURLs = [:]  // files may have moved
+        prefetchSelectionURLs()
         // The row cache was dropped; visible cells keep their content until the fresh rows arrive.
         let visible = collectionView.indexPathsForVisibleItems().map(\.item)
         if let lo = visible.min(), let hi = visible.max() {
@@ -238,6 +240,7 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         let current = Set(collectionView.selectionIndexPaths.compactMap { faceIDs.indices.contains($0.item) ? faceIDs[$0.item] : nil })
         guard new != current else { return }
         collectionView.selectionIndexPaths = Set(new.compactMap { indexByID[$0].map { IndexPath(item: $0, section: 0) } })
+        prefetchSelectionURLs()
     }
 
     func update(hidden new: Bool) {
@@ -501,34 +504,81 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
 
     // MARK: Dragging
 
-    /// The faces of the drag being started (the selection, or the unselected cell that was dragged).
-    private var draggedFaceIDs: [Int64] = []
+    /// The drag being started: the faces (the selection, or the unselected cell that was dragged), the face whose
+    /// pasteboard item carries the id list (encoded once), and the file URL each item carries (one per file).
+    private var dragPlan: FaceDrag.Plan?
+    /// File URLs of selected faces whose rows are not cached (the row cache keeps 4,000), read off the main actor
+    /// when the selection changes so a drag of a large selection has them all at hand. Offline faces map to nil.
+    private var selectionURLs: [Int64: URL?] = [:]
+    private var selectionURLGeneration = 0
 
-    func collectionView(_ collectionView: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool {
-        draggedFaceIDs = indexPaths.map(\.item).sorted().compactMap { faceIDs.indices.contains($0) ? faceIDs[$0] : nil }
-        return !draggedFaceIDs.isEmpty
+    /// Reads the file URLs of selected faces that have neither a cached row nor a looked-up URL.
+    private func prefetchSelectionURLs() {
+        let selection = model.selection
+        if selectionURLs.count > selection.count { selectionURLs = selectionURLs.filter { selection.contains($0.key) } }
+        let missing = selection.filter { selectionURLs[$0] == nil }
+        guard !missing.isEmpty, let store = model.backend?.store else { return }
+        selectionURLGeneration += 1
+        let generation = selectionURLGeneration
+        let ids = Array(missing)
+        Task { [weak self] in
+            let found = await self?.model.runBackground { try FaceDrag.fileURLs(store, ids) }
+            guard let self, let found, generation == self.selectionURLGeneration else { return }
+            for id in ids where self.model.selection.contains(id) { self.selectionURLs[id] = .some(found[id]) }
+        }
     }
 
-    /// One pasteboard item per dragged cell: its file URL (for Finder), and the ids of every dragged face (each item
-    /// carries the whole list, so a drop target reading only the first item still gets them all).
+    func collectionView(_ collectionView: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool {
+        let ids = indexPaths.map(\.item).sorted().compactMap { faceIDs.indices.contains($0) ? faceIDs[$0] : nil }
+        guard !ids.isEmpty else { return false }
+        dragPlan = makeDragPlan(ids)
+        return true
+    }
+
+    /// Unknown URLs up to this many are read at drag start (a few ms); more are read when a drop asks for them.
+    static let syncURLLimit = 256
+
+    /// Known URLs come from the selection prefetch and the row cache. Faces still unknown (a drag started before
+    /// the prefetch finished) are read now when few, else lazily, in one batch, when a drop target asks for files.
+    func makeDragPlan(_ ids: [Int64]) -> FaceDrag.Plan {
+        var urls: [Int64: URL] = [:]
+        var unknown: [Int64] = []
+        for id in ids {
+            if let known = selectionURLs[id] {
+                if let url = known { urls[id] = url }
+            } else if let row = model.cachedRow(id) {
+                if let url = row.fileURL { urls[id] = url }
+            } else {
+                unknown.append(id)
+            }
+        }
+        let store = model.backend?.store
+        if !unknown.isEmpty, unknown.count <= Self.syncURLLimit, let store, let found = try? FaceDrag.fileURLs(store, unknown) {
+            urls.merge(found) { a, _ in a }
+            unknown = []
+        }
+        return FaceDrag.Plan(faceIDs: ids, urls: urls, lazy: unknown, store: store)
+    }
+
+    /// The first dragged face's item carries the id list; every item carries its file URL unless an earlier face
+    /// of the same file (a collection) already does. A face with nothing to carry is left out of the drag (nil).
     func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
         guard faceIDs.indices.contains(indexPath.item) else { return nil }
         let id = faceIDs[indexPath.item]
-        let ids = draggedFaceIDs.contains(id) ? draggedFaceIDs : [id]
-        let item = NSPasteboardItem()
-        item.setString(FaceDrag.encode(ids), forType: FaceDrag.pasteboardType)
-        if let url = model.cachedRow(id)?.fileURL { item.setString(url.absoluteString, forType: .fileURL) }
-        return item
+        let plan: FaceDrag.Plan
+        if let current = dragPlan, current.contains(id) { plan = current } else { plan = makeDragPlan([id]); dragPlan = plan }
+        return plan.pasteboardItem(for: id)
     }
 
     func collectionView(_ collectionView: NSCollectionView, draggingSession session: NSDraggingSession,
                         endedAt screenPoint: NSPoint, dragOperation operation: NSDragOperation) {
-        draggedFaceIDs = []
+        dragPlan = nil
     }
 
     private func pushSelection() {
         let ids = Set(collectionView.selectionIndexPaths.compactMap { faceIDs.indices.contains($0.item) ? faceIDs[$0.item] : nil })
         if model.selection != ids { model.selection = ids }
+        prefetchSelectionURLs()
     }
 
     // MARK: NSCollectionViewPrefetching
@@ -646,51 +696,152 @@ final class FontCollectionView: NSCollectionView {
 }
 
 
-/// Fonts dragged out of the browser: their face ids as comma-separated UTF-8 text under `local.fontory.face-ids`.
+/// Fonts dragged out of the browser: their face ids as comma-separated UTF-8 text under `local.fontory.face-ids`,
+/// on one pasteboard item per drag, plus each file's URL for Finder.
 enum FaceDrag {
     static let pasteboardType = NSPasteboard.PasteboardType(UTType.fontoryFaceIDs.identifier)
 
-    static func encode(_ ids: [Int64]) -> String { ids.map(String.init).joined(separator: ",") }
+    #if DEBUG
+    /// Smoke counters: id lists encoded and decoded.
+    nonisolated(unsafe) static var encodeCount = 0
+    nonisolated(unsafe) static var decodeCount = 0
+    #endif
+
+    static func encode(_ ids: [Int64]) -> String {
+        #if DEBUG
+        encodeCount += 1
+        #endif
+        return ids.map(String.init).joined(separator: ",")
+    }
 
     static func decode(_ data: Data) -> [Int64] {
-        String(decoding: data, as: UTF8.self).split(separator: ",").compactMap { Int64($0) }
+        #if DEBUG
+        decodeCount += 1
+        #endif
+        return String(decoding: data, as: UTF8.self).split(separator: ",").compactMap { Int64($0) }
     }
 
-    /// Reads the dragged face ids (deduplicated, in order) from every provider that has them and hands them to
-    /// `handler` on the main actor. Returns whether any provider carries face ids.
-    static func load(_ providers: [NSItemProvider], _ handler: @escaping @MainActor @Sendable ([Int64]) -> Void) -> Bool {
-        let matching = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fontoryFaceIDs.identifier) }
-        guard !matching.isEmpty else { return false }
-        let collected = Collected()
-        let group = DispatchGroup()
-        for provider in matching {
-            group.enter()
-            _ = provider.loadDataRepresentation(for: .fontoryFaceIDs) { data, _ in
-                if let data { collected.append(decode(data)) }
-                group.leave()
+    /// The pasteboard contents of one drag, computed once at its start.
+    struct Plan {
+        let faceIDs: [Int64]
+        private let members: Set<Int64>
+        /// The face whose item carries `payload`.
+        let payloadOwner: Int64?
+        let payload: String
+        /// The URL each face's item carries: the first face of each file only.
+        let itemURLs: [Int64: URL]
+        /// Faces whose URL is read when a drop asks for it.
+        let lazy: LazyURLs?
+
+        @MainActor
+        init(faceIDs: [Int64], urls: [Int64: URL], lazy lazyIDs: [Int64] = [], store: FontStore? = nil) {
+            self.faceIDs = faceIDs
+            members = Set(faceIDs)
+            payloadOwner = faceIDs.first
+            payload = FaceDrag.encode(faceIDs)
+            var seen: Set<String> = []
+            var itemURLs: [Int64: URL] = [:]
+            for id in faceIDs {
+                if let url = urls[id], seen.insert(url.path).inserted { itemURLs[id] = url }
             }
+            self.itemURLs = itemURLs
+            lazy = lazyIDs.isEmpty || store == nil ? nil : LazyURLs(ids: lazyIDs, taken: seen, store: store!)
         }
-        group.notify(queue: .main) {
-            let ids = collected.ids
-            MainActor.assumeIsolated { if !ids.isEmpty { handler(ids) } }
+
+        func contains(_ id: Int64) -> Bool { members.contains(id) }
+
+        /// The item for `id`, or nil when it has nothing to carry.
+        @MainActor
+        func pasteboardItem(for id: Int64) -> NSPasteboardItem? {
+            let isOwner = id == payloadOwner
+            let url = itemURLs[id]
+            let isLazy = url == nil && lazy?.covers(id) == true
+            guard isOwner || url != nil || isLazy else { return nil }
+            let item = NSPasteboardItem()
+            if isOwner { item.setString(payload, forType: FaceDrag.pasteboardType) }
+            if let url {
+                item.setString(url.absoluteString, forType: .fileURL)
+            } else if isLazy, let lazy {
+                lazy.attach(item, faceID: id)
+            }
+            return item
+        }
+    }
+
+    /// File URLs read on demand for a drag whose faces were not all known at its start: the first request reads
+    /// them all in one batch. A face whose file is offline, or already carried by an earlier face, provides nothing.
+    @MainActor
+    final class LazyURLs: NSObject, NSPasteboardItemDataProvider {
+        private let ids: [Int64]
+        private let idSet: Set<Int64>
+        private let taken: Set<String>
+        private let store: FontStore
+        private var faceByItem: [ObjectIdentifier: Int64] = [:]
+        private var resolved: [Int64: URL]?
+        #if DEBUG
+        private(set) var reads = 0
+        #endif
+
+        init(ids: [Int64], taken: Set<String>, store: FontStore) {
+            self.ids = ids
+            idSet = Set(ids)
+            self.taken = taken
+            self.store = store
+        }
+
+        func covers(_ id: Int64) -> Bool { idSet.contains(id) }
+
+        func attach(_ item: NSPasteboardItem, faceID: Int64) {
+            faceByItem[ObjectIdentifier(item)] = faceID
+            item.setDataProvider(self, forTypes: [.fileURL])
+        }
+
+        /// The URL `faceID`'s item provides (nil: none), reading every lazy face's URL on first use.
+        func url(for faceID: Int64) -> URL? {
+            if resolved == nil {
+                #if DEBUG
+                reads += 1
+                #endif
+                let found = (try? FaceDrag.fileURLs(store, ids)) ?? [:]
+                var seen = taken
+                var out: [Int64: URL] = [:]
+                for id in ids {
+                    if let url = found[id], seen.insert(url.path).inserted { out[id] = url }
+                }
+                resolved = out
+            }
+            return resolved?[faceID]
+        }
+
+        nonisolated func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem, provideDataForType type: NSPasteboard.PasteboardType) {
+            // AppKit asks on the main thread; the item is set from here, outside the actor hop.
+            let key = ObjectIdentifier(item)
+            let url = MainActor.assumeIsolated { () -> URL? in
+                guard type == .fileURL, let id = faceByItem[key] else { return nil }
+                return self.url(for: id)
+            }
+            if let url { item.setString(url.absoluteString, forType: .fileURL) }
+        }
+    }
+
+    /// File URLs of `ids` in one batched read; offline faces are absent.
+    static func fileURLs(_ store: FontStore, _ ids: [Int64]) throws -> [Int64: URL] {
+        try store.rows(ids: ids).compactMapValues(\.fileURL)
+    }
+
+    /// Reads the dragged face ids from the one provider that carries them (the list is on a single item) and hands
+    /// them to `handler` on the main actor. Returns whether any provider carries face ids.
+    static func load(_ providers: [NSItemProvider], _ handler: @escaping @MainActor @Sendable ([Int64]) -> Void) -> Bool {
+        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fontoryFaceIDs.identifier) }) else {
+            return false
+        }
+        _ = provider.loadDataRepresentation(for: .fontoryFaceIDs) { data, _ in
+            guard let data else { return }
+            let ids = decode(data)
+            guard !ids.isEmpty else { return }
+            Task { @MainActor in handler(ids) }
         }
         return true
-    }
-
-    private final class Collected: @unchecked Sendable {
-        private let lock = NSLock()
-        private var seen: Set<Int64> = []
-        private var ordered: [Int64] = []
-
-        func append(_ ids: [Int64]) {
-            lock.lock(); defer { lock.unlock() }
-            for id in ids where seen.insert(id).inserted { ordered.append(id) }
-        }
-
-        var ids: [Int64] {
-            lock.lock(); defer { lock.unlock() }
-            return ordered
-        }
     }
 }
 

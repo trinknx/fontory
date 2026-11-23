@@ -43,11 +43,7 @@ struct TagPanel: View {
                 TagSearch.score(trimmed, in: model.tagPath(entry.tag.id)).map { ($0, index, entry.tag.id) }
             }
             out = scored.sorted { ($0.0, $0.1) < ($1.0, $1.1) }.map { .tag($0.2) }
-            let key = TagSearch.fold(trimmed)
-            let exists = tree.contains {
-                TagSearch.fold($0.tag.name) == key || TagSearch.fold(model.tagPath($0.tag.id)) == key
-            }
-            if !exists { out.append(.create(trimmed)) }
+            if !model.plainTagExists(named: trimmed) { out.append(.create(trimmed)) }
         }
         return out
     }

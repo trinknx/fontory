@@ -245,6 +245,7 @@ enum OrganizationSmoke {
 
         // Drag payload round trip.
         check(FaceDrag.decode(Data(FaceDrag.encode([serif, mono]).utf8)) == [serif, mono], "drag payload round trip")
+        await dragSteps(model, faces: faces)
 
         // Context menu: Tags ▸ with checkbox states once loaded, toggling through the item, New Tag….
         _ = NSApplication.shared
@@ -274,8 +275,23 @@ enum OrganizationSmoke {
         check(created != nil && model.tag(created ?? -1)?.parentID == nil
               && direct[serif]?.contains(created ?? -1) == true && direct[mono]?.contains(created ?? -1) == true
               && direct[sans] == nil, "New Tag… creates a top-level tag and tags the selection", "\(direct)")
-        let again = await model.createTagAndAssign(name: "viet nam", faces: [sans])
-        check(again == created && model.alert == nil, "New Tag… with an existing name (case/diacritics) reuses it")
+        let again = await model.createTagAndAssign(name: "VIỆT NAM", faces: [sans])
+        check(again == created && model.alert == nil, "New Tag… with an existing name (case only) reuses it")
+        let different = await model.createTagAndAssign(name: "viet nam", faces: [sans])
+        check(different != nil && different != created && model.alert == nil,
+              "New Tag… without the diacritics is a different tag")
+        model.alert = nil
+        // "Mới" next to "Môi": the same letters, different words.
+        let moi = await model.createTagAndAssign(name: "Môi", faces: [serif])
+        check(model.plainTagExists(named: "môi") && !model.plainTagExists(named: "Mới"),
+              "⌘T offers Create for “Mới” while “Môi” exists")
+        let moi2 = await model.createTagAndAssign(name: "Mới", faces: [mono])
+        let moiTags = await directTags(model, [serif, mono])
+        check(moi != nil && moi2 != nil && moi != moi2 && model.tag(moi2 ?? -1)?.name == "Mới"
+              && moiTags[mono]?.contains(moi ?? -1) == false && moiTags[serif]?.contains(moi2 ?? -1) == false,
+              "“Mới” is created next to “Môi”, each on its own font", "\(moiTags)")
+        check(model.plainTagExists(named: "Display/Headline") && model.plainTagExists(named: "display")
+              && !model.plainTagExists(named: "Headline"), "⌘T exists check: top-level names and full paths")
         model.alert = nil
 
         // ⌘T panel matching: subsequence, case- and diacritic-insensitive.
@@ -330,6 +346,115 @@ enum OrganizationSmoke {
         check(found == [serif], "a note set through the model is found by search", "\(found)")
         model.searchText = ""
         model.searchScope = Set(SearchText.Field.allCases)
+    }
+
+    /// The grid's drag source on the 3 seeded faces (payload on one item, one URL per file), then a 20,000-face
+    /// drag on a second temporary library: the id list is encoded once, read from one item and decoded once.
+    private static func dragSteps(_ model: AppModel, faces: [String: Int64]) async {
+        let ids = faces.values.sorted()
+        let grid = FontGridController(model: model, mode: .grid)
+        _ = grid.makeScrollView()
+        grid.update(faceIDs: ids)
+        let plan = grid.makeDragPlan(ids)
+        let items = ids.compactMap { plan.pasteboardItem(for: $0) }
+        let payloadItems = items.filter { $0.types.contains(FaceDrag.pasteboardType) }
+        let urls = items.compactMap { $0.string(forType: .fileURL) }
+        check(payloadItems.count == 1 && payloadItems.first?.string(forType: FaceDrag.pasteboardType) == FaceDrag.encode(ids)
+              && urls.count == 3 && Set(urls).count == 3, "drag: ids on one item, a file URL per face",
+              "payload items \(payloadItems.count), urls \(urls.count)")
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FontoryDragSmoke-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let backend = try LibraryBackend(databaseURL: dir.appendingPathComponent("library.sqlite"))
+            let store = backend.store
+            let loc = try store.upsertLocation(kind: .folder, volumeUUID: "SMOKE-DRAG", relativePath: "Fonts",
+                                               displayName: "Drag", lastKnownPath: dir.path)
+            let batch = try store.nextImportBatch()
+            // 200 collection files of 100 faces: 20,000 faces, 200 distinct files.
+            for f in 0..<200 {
+                let parsed = (0..<100).map { i in
+                    ParsedFace(faceIndex: i, postScriptName: "Drag\(f)-\(i)", family: "Drag \(f)", style: "S\(i)",
+                               fullName: "Drag \(f) S\(i)", glyphCount: 10, styleClass: .sans)
+                }
+                let file = FileRecord(locationID: loc.id, relativePath: "Drag\(f).ttc", size: 10,
+                                      mtime: Date(timeIntervalSince1970: 1000), format: "ttc", fingerprint: "drag-\(f)")
+                _ = try store.insertFile(file, faces: parsed, importBatch: batch)
+            }
+            let all = try store.faceIDs(for: LibraryQuery())
+            check(all.count == 20_000, "drag library has 20,000 faces", "\(all.count)")
+
+            let big = AppModel()
+            await big.attachBackendForSmoke(backend)
+            let bigGrid = FontGridController(model: big, mode: .grid)
+            _ = bigGrid.makeScrollView()
+            bigGrid.update(faceIDs: all)
+
+            // Worst case: nothing cached or prefetched. The plan reads nothing; the URLs are read once, in one
+            // batch, when a drop asks for the first one.
+            let encodes = FaceDrag.encodeCount
+            let clock = ContinuousClock()
+            let start = clock.now
+            let bigPlan = bigGrid.makeDragPlan(all)
+            let planTime = clock.now - start
+            let itemStart = clock.now
+            let bigItems = all.compactMap { bigPlan.pasteboardItem(for: $0) }
+            let itemTime = clock.now - itemStart
+            print("  20k drag, nothing known: plan \(planTime.formatted(.units(allowed: [.milliseconds]))), "
+                  + "items \(itemTime.formatted(.units(allowed: [.milliseconds])))")
+            let carrying = bigItems.filter { $0.types.contains(FaceDrag.pasteboardType) }
+            check(FaceDrag.encodeCount == encodes + 1 && carrying.count == 1, "20k drag: id list encoded once, on one item")
+            check(planTime + itemTime < .milliseconds(100), "20k drag start reads no files from the store",
+                  "\((planTime + itemTime).formatted(.units(allowed: [.milliseconds])))")
+            var lazyURLs: [String] = []
+            if let lazy = bigPlan.lazy {
+                let dropStart = clock.now
+                lazyURLs = all.compactMap { lazy.url(for: $0)?.absoluteString }
+                print("  20k drop asking for files: \((clock.now - dropStart).formatted(.units(allowed: [.milliseconds]))) (one batched read)")
+                check(lazy.reads == 1, "20k drag: lazy URLs read in one batch", "\(lazy.reads) reads")
+            }
+            check(lazyURLs.count == 200 && Set(lazyURLs).count == 200, "20k drag: one URL per collection file (200)",
+                  "\(lazyURLs.count)")
+            let bigURLs = lazyURLs
+
+            // The selection prefetch resolves URLs off the main actor; a drag after it reads nothing.
+            big.selection = Set(all)
+            bigGrid.update(selection: big.selection)
+            for _ in 0..<200 {
+                try? await Task.sleep(for: .milliseconds(25))
+                let probe = clock.now
+                _ = bigGrid.makeDragPlan([all[all.count - 1]])
+                if clock.now - probe < .milliseconds(2) { break }
+            }
+            let prefetched = clock.now
+            let fastPlan = bigGrid.makeDragPlan(all)
+            let fastTime = clock.now - prefetched
+            print("  20k drag after the selection prefetch: plan \(fastTime.formatted(.units(allowed: [.milliseconds])))")
+            check(fastPlan.itemURLs.count == 200 && fastPlan.lazy == nil && fastTime < .milliseconds(100),
+                  "20k drag after prefetch: all URLs known, no store read",
+                  "\(fastPlan.itemURLs.count) urls, \(fastTime)")
+
+            // Drop side: the list is decoded once, from the one provider carrying it.
+            let providers: [NSItemProvider] = carrying.map { item in
+                let provider = NSItemProvider()
+                let data = Data(item.string(forType: FaceDrag.pasteboardType)!.utf8)
+                provider.registerDataRepresentation(for: .fontoryFaceIDs, visibility: .ownProcess) { done in
+                    done(data, nil); return nil
+                }
+                return provider
+            } + bigURLs.prefix(5).map { NSItemProvider(contentsOf: URL(string: $0)!) ?? NSItemProvider() }
+            let decodes = FaceDrag.decodeCount
+            let received: [Int64] = await withCheckedContinuation { continuation in
+                let accepted = FaceDrag.load(providers) { continuation.resume(returning: $0) }
+                if !accepted { continuation.resume(returning: []) }
+            }
+            check(received == all && FaceDrag.decodeCount == decodes + 1, "20k drop: ids decoded once",
+                  "\(received.count) ids, \(FaceDrag.decodeCount - decodes) decodes")
+        } catch {
+            check(false, "20k drag setup", "\(error)")
+        }
     }
 }
 #endif

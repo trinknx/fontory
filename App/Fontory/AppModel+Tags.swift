@@ -366,15 +366,25 @@ extension AppModel {
         await setTag(tagID, onFaces: faceIDs, included: state != .on)
     }
 
-    /// "New Tag…" and the panel's Return on an unknown name: a top-level tag named `name` (an existing top-level
-    /// tag with that name, ignoring case and diacritics, is reused) assigned to `faceIDs`. Returns its id.
+    /// Whether the ⌘T panel's typed text names an existing plain tag: a top-level name or a full path, by identity
+    /// (`TagSearch.identity`, not fuzzy matching), so "Mới" can be created next to "Môi".
+    func plainTagExists(named text: String) -> Bool {
+        let key = TagSearch.identity(text)
+        return tags.contains {
+            $0.kind == .tag && (($0.parentID == nil && TagSearch.identity($0.name) == key) || TagSearch.identity(tagPath($0.id)) == key)
+        }
+    }
+
+    /// "New Tag…" and the panel's Create row: a top-level tag named `name` assigned to `faceIDs`. An existing
+    /// top-level tag with the same identity (`TagSearch.identity`: case only, so "Mới" and "Môi" stay apart) is
+    /// reused. Returns its id.
     @discardableResult
     func createTagAndAssign(name: String, faces faceIDs: [Int64]) async -> Int64? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let key = TagSearch.fold(trimmed)
+        let key = TagSearch.identity(trimmed)
         let id: Int64
-        if let existing = tags.first(where: { $0.parentID == nil && $0.kind == .tag && TagSearch.fold($0.name) == key }) {
+        if let existing = tags.first(where: { $0.parentID == nil && $0.kind == .tag && TagSearch.identity($0.name) == key }) {
             id = existing.id
         } else {
             guard let created = await createTag(name: trimmed, parentID: nil) else { return nil }
@@ -427,8 +437,14 @@ struct TagPanelRequest: Identifiable {
     let faceIDs: [Int64]
 }
 
-/// Tag name matching for the ⌘T panel: case- and diacritic-insensitive subsequence matching.
+/// Tag names. Matching (filtering the ⌘T list) ignores case and diacritics; identity (is this the same tag?)
+/// ignores case only, like the store's sibling uniqueness, since diacritics tell Vietnamese words apart.
 enum TagSearch {
+    /// Identity key: trimmed, case folded (the store's `TagName.fold`), diacritics kept.
+    static func identity(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines).folding(options: [.caseInsensitive], locale: nil)
+    }
+
     /// Folded for comparison: case and diacritics removed, and đ read as d (a letter of its own, not an accent).
     static func fold(_ s: String) -> String {
         s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
