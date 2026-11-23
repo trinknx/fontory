@@ -193,6 +193,83 @@ import Testing
         #expect(try faceCount(e.store) == before)
     }
 
+    private func chmod(_ url: URL, _ mode: Int) throws {
+        try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
+    }
+
+    @Test func unreadableSubfolderDoesNotBlockAddsButSkipsRemovals() async throws {
+        let e = try makeEnv({
+            try $0.copy(TempFonts.arialBold, as: "locked/Arial Bold.ttf")
+            try $0.copy(TempFonts.sfns, as: "gone/SFNS.ttf")
+        }); defer { e.t.cleanup() }
+        let root = e.t.root
+        let locked = root.appendingPathComponent("locked")
+        let scanner = LibraryScanner(store: e.store, rootURL: { _ in root })
+        _ = await run(scanner, e.loc.id)
+        let before = try faceCount(e.store)
+        try e.t.copy(TempFonts.avenirNext, as: "new/Avenir Next.ttc")
+        try FileManager.default.removeItem(at: root.appendingPathComponent("gone/SFNS.ttf"))
+        try chmod(locked, 0o000)
+        defer { try? chmod(locked, 0o755) }
+
+        let events = await run(scanner, e.loc.id)
+        let last = try #require(events.last)
+        #expect(last.phase == .done)
+        #expect(last.unreadableCount == 1)
+        #expect(last.unreadablePaths == ["locked"])
+        #expect(last.skippedRemovals == 2)  // the deleted file and the unseen locked file
+        let paths = Set(try e.store.files(in: e.loc.id).map(\.relativePath))
+        #expect(paths == ["locked/Arial Bold.ttf", "gone/SFNS.ttf", "new/Avenir Next.ttc"])
+        #expect(try faceCount(e.store) > before)
+    }
+
+    @Test func unreadableMovedFileKeepsOldRecord() async throws {
+        let e = try makeEnv({ try $0.copy(TempFonts.arialBold, as: "a.ttf") }); defer { e.t.cleanup() }
+        let root = e.t.root
+        let scanner = LibraryScanner(store: e.store, rootURL: { _ in root })
+        _ = await run(scanner, e.loc.id)
+        let before = try faceCount(e.store)
+        let moved = root.appendingPathComponent("b.ttf")
+        try FileManager.default.moveItem(at: root.appendingPathComponent("a.ttf"), to: moved)
+        try chmod(moved, 0o000)
+        defer { try? chmod(moved, 0o644) }
+        let events = await run(scanner, e.loc.id)
+        let last = try #require(events.last)
+        #expect(last.phase == .done)
+        #expect(last.skippedRemovals == 1)
+        #expect(last.unreadableCount >= 1)
+        #expect(try faceCount(e.store) == before)
+        #expect(try e.store.files(in: e.loc.id).map(\.relativePath) == ["a.ttf"])
+    }
+
+    @Test func restartedScanDoesNotOverlapCancelledRun() async throws {
+        let e = try makeEnv(fixtures); defer { e.t.cleanup() }
+        let root = e.t.root
+        let scanner = LibraryScanner(store: e.store, rootURL: { _ in root })
+        let first = await scanner.scan(locationID: e.loc.id)
+        let second = await scanner.scan(locationID: e.loc.id)
+        var firstEvents: [ScanProgress] = []
+        for await p in first { firstEvents.append(p) }
+        var secondEvents: [ScanProgress] = []
+        for await p in second { secondEvents.append(p) }
+        #expect(secondEvents.last?.phase == .done)
+        #expect(secondEvents.last?.failed == 2)
+        let expected = try [TempFonts.arialBold, TempFonts.avenirNext, TempFonts.sfns]
+            .reduce(0) { $0 + (try FontParser.parse(url: URL(fileURLWithPath: $1))).count }
+        #expect(try faceCount(e.store) == expected)
+        #expect(firstEvents.last != nil)
+    }
+
+    @Test func droppingTheStreamCancelsTheScan() async throws {
+        let e = try makeEnv(fixtures); defer { e.t.cleanup() }
+        let root = e.t.root
+        let scanner = LibraryScanner(store: e.store, rootURL: { _ in root })
+        do { _ = await scanner.scan(locationID: e.loc.id) }  // stream dropped without iterating
+        // A following scan waits for the cancelled one, so it must still complete normally.
+        let events = await run(scanner, e.loc.id)
+        #expect(events.last?.phase == .done)
+    }
+
     final class Holder: @unchecked Sendable {
         var scanner: LibraryScanner?
         var id: Int64 = 0

@@ -57,4 +57,19 @@ import Testing
         let t = try TempFonts(); defer { t.cleanup() }
         #expect(try await collect(t.root).isEmpty)
     }
+
+    @Test func unreadableSubfolderIsReportedNotFatal() async throws {
+        let t = try TempFonts(); defer { t.cleanup() }
+        try t.copy(TempFonts.arialBold, as: "ok/Arial Bold.ttf")
+        try t.copy(TempFonts.arialBold, as: "locked/Arial Bold.ttf")
+        let locked = t.root.appendingPathComponent("locked")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path) }
+        let report = EnumerationReport()
+        var out: [ScannedFile] = []
+        for try await f in FontFileEnumerator.enumerate(root: t.root, report: report) { out.append(f) }
+        #expect(out.map(\.relativePath) == ["ok/Arial Bold.ttf"])
+        #expect(report.paths == ["locked"])
+        #expect(report.count == 1)
+    }
 }

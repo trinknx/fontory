@@ -12,8 +12,17 @@ public struct ScanProgress: Sendable, Equatable {
     public var processed: Int
     public var failed: Int
     public var removedWithUserData: Int
+    /// Relative paths the scan could not read (capped at 50; see `unreadableCount` for the total).
+    public var unreadablePaths: [String]
+    public var unreadableCount: Int
+    /// Records that were not removed this run because part of the tree was unreadable.
+    public var skippedRemovals: Int
 
-    public init(locationID: Int64, phase: Phase, total: Int = 0, processed: Int = 0, failed: Int = 0, removedWithUserData: Int = 0) {
+    public init(locationID: Int64, phase: Phase, total: Int = 0, processed: Int = 0, failed: Int = 0, removedWithUserData: Int = 0,
+                unreadablePaths: [String] = [], unreadableCount: Int = 0, skippedRemovals: Int = 0) {
+        self.unreadablePaths = unreadablePaths
+        self.unreadableCount = unreadableCount
+        self.skippedRemovals = skippedRemovals
         self.locationID = locationID
         self.phase = phase
         self.total = total
@@ -51,16 +60,20 @@ public actor LibraryScanner {
 
     /// Starts a scan (cancelling any scan already running for the location). The stream always ends with `.done` or `.aborted`.
     public func scan(locationID: Int64) -> AsyncStream<ScanProgress> {
-        runs[locationID]?.task.cancel()
+        let previous = runs[locationID]?.task
+        previous?.cancel()
         let (stream, continuation) = AsyncStream.makeStream(of: ScanProgress.self)
         nextToken += 1
         let token = nextToken
         let task = Task {
+            // A restarted scan must not overlap the run it cancelled: that run may still be applying a batch.
+            await previous?.value
             await self.run(locationID: locationID, continuation: continuation)
             continuation.finish()
             self.finishRun(locationID, token: token)
         }
         runs[locationID] = (token, task)
+        continuation.onTermination = { _ in task.cancel() }
         return stream
     }
 
@@ -119,8 +132,9 @@ public actor LibraryScanner {
             // Enumerate. Any error means the listing is unreliable: apply nothing.
             emit(.enumerating, force: true)
             var found: [ScannedFile] = []
+            let report = EnumerationReport()
             do {
-                for try await file in FontFileEnumerator.enumerate(root: root) {
+                for try await file in FontFileEnumerator.enumerate(root: root, report: report) {
                     found.append(file)
                     progress.total = found.count
                     emit(.enumerating)
@@ -135,11 +149,13 @@ public actor LibraryScanner {
             if found.isEmpty && !indexed.isEmpty { throw Abort(reason: "root is empty but the index is not") }
 
             var fingerprints: [String: String] = [:]
+            var unfingerprintable: [String] = []
             let diff = ScanDiff.compute(indexed: indexed, found: found) { file in
                 if let fp = try? Fingerprint.compute(url: file.url, size: file.size) {
                     fingerprints[file.relativePath] = fp
                     return fp
                 }
+                unfingerprintable.append(file.relativePath)
                 return "unreadable:\(file.relativePath)"  // never equals a real fingerprint
             }
 
@@ -156,10 +172,21 @@ public actor LibraryScanner {
                 emit(.parsing)
             }
 
+            // Any unreadable subtree or file means the listing is incomplete: report it, and keep every indexed record.
+            let unreadableCount = report.count + unfingerprintable.count
+            progress.unreadableCount = unreadableCount
+            progress.unreadablePaths = Array((report.paths + unfingerprintable).prefix(50))
+
             // Removals last, only if everything above went cleanly and the root is still there.
             emit(.applying, force: true)
             try Self.checkNotCancelled()
             guard Self.directoryExists(root) else { throw Abort(reason: "location root disappeared during scan") }
+            if unreadableCount > 0 {
+                progress.skippedRemovals = diff.removed.count
+                try store.markScanned(locationID, at: Date())
+                emit(.done, force: true)
+                return
+            }
             let removedIDs = diff.removed.map(\.id)
             progress.removedWithUserData = try store.userDataFaceCount(fileIDs: removedIDs)
             try store.deleteFiles(removedIDs)
