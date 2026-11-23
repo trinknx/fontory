@@ -200,10 +200,14 @@ extension FontStore {
         return (s.isNull(0) ? nil : s.int64(0), s.text(1))
     }
 
+    /// SQLite's NOCASE is ASCII-only, so siblings are compared after Unicode case folding in Swift.
     private func checkSiblingName(_ name: String, parentID: Int64?, excluding: Int64?) throws {
-        let s = try database.prepare("SELECT 1 FROM tags WHERE parent_id IS ? AND name = ? COLLATE NOCASE AND id != ? LIMIT 1")
+        let s = try database.prepare("SELECT name FROM tags WHERE parent_id IS ? AND id != ?")
         defer { s.reset() }
-        try s.bind([parentID.map { .int($0) } ?? .null, .text(name), .int(excluding ?? -1)])
-        if try s.step() { throw TagError.duplicateName }
+        try s.bind([parentID.map { .int($0) } ?? .null, .int(excluding ?? -1)])
+        let folded = name.folding(options: [.caseInsensitive], locale: nil)
+        while try s.step() {
+            if s.text(0).folding(options: [.caseInsensitive], locale: nil) == folded { throw TagError.duplicateName }
+        }
     }
 }

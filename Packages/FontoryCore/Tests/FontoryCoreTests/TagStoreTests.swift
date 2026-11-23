@@ -72,6 +72,19 @@ import Testing
         #expect(throws: TagError.duplicateName) { try s.moveTag(fun.id, toParent: a) }
     }
 
+    @Test func duplicateDetectionIsUnicodeCaseInsensitive() throws {
+        let s = try Fixture.make().store
+        let a = try s.createTag(name: "A", parentID: nil)
+        let b = try s.createTag(name: "B", parentID: nil)
+        _ = try s.createTag(name: "Élan", parentID: a)
+        _ = try s.createTag(name: "Ärger", parentID: a)
+        #expect(throws: TagError.duplicateName) { try s.createTag(name: "élan", parentID: a) }
+        #expect(throws: TagError.duplicateName) { try s.createTag(name: "ÄRGER", parentID: a) }
+        _ = try s.createTag(name: "élan", parentID: b)
+        _ = try s.createTag(name: "Ärger", parentID: nil)
+        #expect(throws: TagError.duplicateName) { try s.createTag(name: "ärger", parentID: nil) }
+    }
+
     @Test func cannotNestUnderDescendant() throws {
         let s = try Fixture.make().store
         let a = try s.createTag(name: "A", parentID: nil)
