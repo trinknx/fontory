@@ -74,6 +74,16 @@ public final class LRUCache<Key: Hashable & Sendable, Value>: @unchecked Sendabl
         }
     }
 
+    /// Removes every entry whose key matches.
+    public func removeAll(where shouldRemove: (Key) -> Bool) {
+        lock.lock(); defer { lock.unlock() }
+        for (key, node) in nodes where shouldRemove(key) {
+            nodes.removeValue(forKey: key)
+            unlink(node)
+            cost -= node.cost
+        }
+    }
+
     public func removeAll() {
         lock.lock(); defer { lock.unlock() }
         // Break the links so long chains don't deallocate recursively.

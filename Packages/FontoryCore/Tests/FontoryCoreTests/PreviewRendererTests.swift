@@ -79,6 +79,27 @@ import Testing
         #expect(r.fontLoadAttempts == 1)
     }
 
+    @Test func forgetFontsUnderDropsOnlyThatTree() throws {
+        let t = try TempFonts(); defer { t.cleanup() }
+        let inside = try t.copy(TempFonts.arialBold, as: "Vol/Arial Bold.ttf")
+        let sibling = try t.copy(TempFonts.arialBold, as: "Volume2/Arial Bold.ttf")  // shares the "Vol" prefix as text only
+        let junk = try t.junk("Vol/junk.ttf")
+        let r = PreviewRenderer()
+        _ = r.render(fileURL: inside, faceIndex: 0, request: request("A"))
+        _ = r.render(fileURL: sibling, faceIndex: 0, request: request("A"))
+        _ = r.render(fileURL: junk, faceIndex: 0, request: request("A"))
+        #expect(r.fontLoadAttempts == 3)
+        r.forgetFonts(under: t.root.appendingPathComponent("Vol"))
+        _ = r.render(fileURL: sibling, faceIndex: 0, request: request("B"))
+        #expect(r.fontLoadAttempts == 3)  // still cached
+        _ = r.render(fileURL: inside, faceIndex: 0, request: request("B"))
+        _ = r.render(fileURL: junk, faceIndex: 0, request: request("B"))
+        #expect(r.fontLoadAttempts == 5)  // loaded again, failure retried
+        r.forgetAllFonts()
+        _ = r.render(fileURL: sibling, faceIndex: 0, request: request("C"))
+        #expect(r.fontLoadAttempts == 6)
+    }
+
     @Test func requestHashesByColorComponents() {
         let a = request("x")
         var b = request("x")

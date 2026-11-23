@@ -466,6 +466,7 @@ final class AppModel {
                 let progress = await Task.detached(priority: .utility) { try? backend.refreshFileSet(loc) }.value
                 guard let self, !Task.isCancelled else { return }
                 self.scanProgress[id] = progress ?? ScanProgress(locationID: id, phase: .aborted(reason: "rescan failed"))
+                self.forgetPreviewFonts(of: id)
                 await self.scanFinished()
             }
             return
@@ -490,9 +491,18 @@ final class AppModel {
                 if last.phase == .done, last.removedWithUserData > 0 { self?.removalNotices[id, default: 0] += last.removedWithUserData }
                 await self?.updateRegistrations(after: last)
             }
-            guard let self, !Task.isCancelled else { return }
+            guard let self else { return }
+            // Changed, moved or removed files must not be previewed from fonts parsed before the scan.
+            self.forgetPreviewFonts(of: id)
+            guard !Task.isCancelled else { return }
             await self.scanFinished()
         }
+    }
+
+    /// Drops the preview renderer's parsed fonts for a location's files (they may hold the files open).
+    private func forgetPreviewFonts(of id: Int64) {
+        guard let loc = location(id) else { return }
+        previewRenderer.forgetFonts(under: URL(fileURLWithPath: loc.lastKnownPath))
     }
 
     /// Moves the CoreText registration of moved active files to their new URL and drops removed ones, so app font
@@ -530,6 +540,7 @@ final class AppModel {
         watchers.removeValue(forKey: id)?.stop()
         scanProgress[id] = nil
         removalNotices[id] = nil
+        forgetPreviewFonts(of: id)
         Task {
             await backend.scanner.cancel(locationID: id)
             await backend.activation.volumeUnmounted(locationIDs: [id])
@@ -622,6 +633,11 @@ final class AppModel {
             let root = volumeURL.standardizedFileURL.path
             let ids = locations.filter { $0.online && ($0.lastKnownPath == root || $0.lastKnownPath.hasPrefix(root + "/")) }.map(\.id)
             guard !ids.isEmpty else { return }
+            // First, before any await: nothing of ours may keep a file on the volume open, or the eject fails
+            // with "disk in use". Pending renders are dropped and parsed fonts released.
+            previewPipeline.cancelAll()
+            previewRenderer.forgetFonts(under: volumeURL)
+            for id in ids { forgetPreviewFonts(of: id) }
             for i in locations.indices where ids.contains(locations[i].id) { locations[i].online = false }
             for id in ids {
                 scanTasks.removeValue(forKey: id)?.cancel()

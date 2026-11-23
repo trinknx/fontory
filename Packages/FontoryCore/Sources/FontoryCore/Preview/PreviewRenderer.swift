@@ -27,6 +27,25 @@ public final class PreviewRenderer: Sendable {
         failed.removeAll()
     }
 
+    /// Drops the cached fonts (and load failures) of files at or below `root`, so the renderer holds nothing open
+    /// on a volume that is being unmounted, and moved or replaced files are loaded afresh.
+    public func forgetFonts(under root: URL) {
+        let base = root.standardizedFileURL.path
+        let prefix = base.hasSuffix("/") ? base : base + "/"
+        let matches: (FontKey) -> Bool = { key in
+            let path = key.url.standardizedFileURL.path
+            return path == base || path.hasPrefix(prefix)
+        }
+        fonts.removeAll(where: matches)
+        failed.removeAll(where: matches)
+    }
+
+    /// Drops every cached font and load failure.
+    public func forgetAllFonts() {
+        fonts.removeAll()
+        failed.removeAll()
+    }
+
     /// Base font (size 1) for a face, created from the file's descriptors without registering it.
     private func baseFont(_ url: URL, _ faceIndex: Int) -> CTFont? {
         let key = FontKey(url: url, faceIndex: faceIndex)
