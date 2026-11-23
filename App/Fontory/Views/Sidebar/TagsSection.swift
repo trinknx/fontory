@@ -34,7 +34,7 @@ private struct TagsHeader: View {
             .padding(.vertical, 1)
             .background(RoundedRectangle(cornerRadius: 4).fill(isTargeted ? Color.accentColor.opacity(0.25) : .clear))
             .onDrop(of: [.fontoryTag], isTargeted: $isTargeted) { providers in
-                TagDrag.loadTagID(providers) { id in Task { await model.moveTag(id, toParent: nil) } }
+                TagDrag.loadTagID(providers) { id in Task { await model.dropTag(id, onto: nil) } }
             }
             .help("Drop a tag here to move it to the top level")
     }
@@ -83,15 +83,18 @@ private struct TagRow: View {
                 Label(tag.name, systemImage: symbol)
             }
         }
+        // The whole row width takes clicks, so the ⌥-click handler below sees clicks right of the name too.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
         .badge(model.tagCount(tag))
         .tag(SidebarItem.tag(tag.id))
         .help(pick?.inverted == true ? "Showing fonts without “\(tag.name)”" : "")
         .background(RoundedRectangle(cornerRadius: 4).fill(isTargeted ? Color.accentColor.opacity(0.25) : .clear))
-        // ⌥-click inverts. The list does not report modifiers, so the click itself is watched; the list's own
-        // selection change ignores ⌥ (see `AppModel.applySidebarSelection`).
+        // ⌥-click inverts. The list may not report a click on a row that is already selected, so the click is
+        // watched here too; `optionClickTag` applies each click once, whichever path reports it first.
         .simultaneousGesture(TapGesture().onEnded {
-            let flags = NSApp.currentEvent?.modifierFlags ?? []
-            if flags.contains(.option) { model.selectTag(tag.id, modifiers: EventModifiers(flags)) }
+            guard let event = NSApp.currentEvent, event.modifierFlags.contains(.option) else { return }
+            model.optionClickTag(tag.id, modifiers: EventModifiers(event.modifierFlags), clickEvent: event.mouseClickNumber)
         })
         .onDrag { TagDrag.provider(for: tag.id) }
         .modifier(TagDropTarget(tag: tag, isTargeted: $isTargeted))
@@ -109,11 +112,7 @@ private struct TagDropTarget: ViewModifier {
         if tag.kind == .tag {
             content.onDrop(of: [.fontoryTag], isTargeted: $isTargeted) { providers in
                 let target = tag.id
-                return TagDrag.loadTagID(providers) { id in
-                    // Onto itself or a subtag of its own: nothing to do (the store would refuse the cycle).
-                    guard !model.descendantTagIDs(of: id).contains(target) else { return }
-                    Task { await model.moveTag(id, toParent: target) }
-                }
+                return TagDrag.loadTagID(providers) { id in Task { await model.dropTag(id, onto: target) } }
             }
         } else {
             content

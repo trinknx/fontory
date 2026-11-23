@@ -97,10 +97,19 @@ enum OrganizationSmoke {
         let underA = await shown(model)
         check(underA == [serif], "select A shows the face tagged B", "\(underA)")
 
-        model.selectTag(a, modifiers: .option)
+        // ⌥-click as the sidebar reports it: the list's selection change and the row's click handler both see the
+        // same click (event 101); it must invert exactly once.
+        model.applySidebarSelection([.tag(a)], modifiers: .option, clickEvent: 101)
+        model.optionClickTag(a, modifiers: .option, clickEvent: 101)
         let inverted = await shown(model)
         check(!inverted.contains(serif) && inverted == [sans, mono], "⌥-select A hides it", "\(inverted)")
         check(model.selectedTagPicks.first?.inverted == true && model.sidebarSelection == [.tag(a)], "⌥-select A is an inverted pick")
+        // A second ⌥-click reported only by the row handler (list silent on the selected row) flips it back.
+        model.optionClickTag(a, modifiers: .option, clickEvent: 102)
+        check(model.selectedTagPicks.first?.inverted == false, "⌥-click on the selected inverted tag un-inverts it")
+        // Reported only by the list (click beside the row's content): applied too.
+        model.applySidebarSelection([.tag(a)], modifiers: .option, clickEvent: 103)
+        check(model.selectedTagPicks.first?.inverted == true, "⌥-click reported only by the list inverts")
 
         // ⌘-click union with a second tag.
         guard let c = await model.createTag(name: "c", parentID: nil) else { check(false, "create c"); return }
@@ -120,14 +129,16 @@ enum OrganizationSmoke {
         _ = await model.createTag(name: "a", parentID: nil)
         check(model.alert != nil, "duplicate name (case-insensitive) shows an alert")
         model.alert = nil
-        await model.moveTag(a, toParent: b)
-        check(model.alert != nil && model.tag(a)?.parentID == nil, "moving A into its subtag is refused")
+        await model.dropTag(a, onto: b)
+        check(model.alert != nil && model.tag(a)?.parentID == nil, "dropping A on its subtag B shows an alert")
         model.alert = nil
+        await model.dropTag(a, onto: a)
+        check(model.alert == nil && model.tag(a)?.parentID == nil, "dropping A on itself does nothing")
 
         // Nest and un-nest (the drag-and-drop actions).
-        await model.moveTag(c, toParent: a)
+        await model.dropTag(c, onto: a)
         check(model.tag(c)?.parentID == a && model.organizationCounts.perTag[a] == 2, "drop c on A nests it")
-        await model.moveTag(c, toParent: nil)
+        await model.dropTag(c, onto: nil)
         check(model.tag(c)?.parentID == nil && model.organizationCounts.perTag[a] == 1, "drop c on the header un-nests it")
 
         await model.renameTag(c, to: "C2")

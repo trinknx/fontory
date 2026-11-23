@@ -71,8 +71,9 @@ extension AppModel {
     }
 
     /// Applies a selection change made by the sidebar list. The list handles ⌘-click by itself; the clicked row is
-    /// recovered from the difference, and `modifiers` decide the meaning (see `selectTag`).
-    func applySidebarSelection(_ new: Set<SidebarItem>, modifiers: EventModifiers) {
+    /// recovered from the difference, and `modifiers` decide the meaning (see `selectTag`). `clickEvent` is the
+    /// mouse-down event number of the click, when it is one (see `optionClickTag`).
+    func applySidebarSelection(_ new: Set<SidebarItem>, modifiers: EventModifiers, clickEvent: Int? = nil) {
         let old = sidebarSelection
         let added = new.subtracting(old)
         let removed = old.subtracting(new)
@@ -88,10 +89,11 @@ extension AppModel {
         }
         switch clicked {
         case .tag(let id)?:
-            // ⌥-clicks are applied by the row's own click handler (the list may not report a click on a row that
-            // is already selected).
-            guard !modifiers.contains(.option) else { return }
-            selectTag(id, modifiers: modifiers)
+            if modifiers.contains(.option) {
+                optionClickTag(id, modifiers: modifiers, clickEvent: clickEvent)
+            } else {
+                selectTag(id, modifiers: modifiers)
+            }
         case .scope(let scope)?:
             query.scope = scope
         case nil:
@@ -129,6 +131,17 @@ extension AppModel {
             if let index { picks[index].inverted.toggle() } else { picks.append(tagPick(id, inverted: true)) }
         }
         query.scope = .tags(picks)
+    }
+
+    /// An ⌥-click on a tag row. Both the list's selection change and the row's click handler report it (the list
+    /// alone may stay silent on an already-selected row, the handler alone may miss the row's edges), so it is
+    /// applied once per mouse-down event number. Mouse-up carries its mouse-down's number.
+    func optionClickTag(_ id: Int64, modifiers: EventModifiers, clickEvent: Int?) {
+        if let clickEvent {
+            guard clickEvent != lastOptionClickEvent else { return }
+            lastOptionClickEvent = clickEvent
+        }
+        selectTag(id, modifiers: modifiers)
     }
 
     // MARK: Loading
@@ -228,6 +241,13 @@ extension AppModel {
         if await tagWrite("The tag could not be renamed", { try $0.renameTag(id, to: name) }) != nil {
             await afterTagChange()
         }
+    }
+
+    /// A tag dropped on a tag row (`target`) or on the Tags header (nil). Dropping a tag on itself does nothing;
+    /// onto its own subtag the store refuses the cycle and an alert says so.
+    func dropTag(_ id: Int64, onto target: Int64?) async {
+        guard id != target else { return }
+        await moveTag(id, toParent: target)
     }
 
     /// Nests `id` under `parentID` (nil: top level).
