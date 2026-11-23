@@ -82,13 +82,24 @@ extension FontStore {
         }
     }
 
-    /// Cascades to subtags and `face_tags` (foreign keys are on for the write connection).
+    /// Cascades to subtags and `face_tags` (foreign keys are on for the write connection). Tag ids can be reused
+    /// (no AUTOINCREMENT), so every smart rule naming a deleted tag (the whole subtree) is pointed at
+    /// `SmartRule.deletedID` in the same transaction: it keeps matching nothing after a new tag takes the id.
     public func deleteTag(_ id: Int64) throws {
         try database.withLock {
-            let s = try database.prepare("DELETE FROM tags WHERE id = ?")
-            defer { s.reset() }
-            try s.bind([.int(id)])
-            _ = try s.step()
+            try database.transaction {
+                let d = try database.prepare(LibraryQuery.descendantsByID)
+                defer { d.reset() }
+                try d.bind([.int(id)])
+                var removed = Set<Int64>()
+                while try d.step() { removed.insert(d.int64(0)) }
+                d.reset()
+                let s = try database.prepare("DELETE FROM tags WHERE id = ?")
+                defer { s.reset() }
+                try s.bind([.int(id)])
+                _ = try s.step()
+                try tombstoneRuleConditions(field: .tag, ids: removed)
+            }
         }
     }
 
@@ -229,6 +240,34 @@ extension FontStore {
     }
 
     // MARK: Helpers (call inside `database.withLock`)
+
+    /// Rewrites every smart rule condition on `field` whose value names one of `ids` to `SmartRule.deletedID`.
+    /// Rules that do not decode (from a newer version) are left as they are. Call inside a write transaction.
+    func tombstoneRuleConditions(field: SmartRule.Field, ids: Set<Int64>) throws {
+        guard !ids.isEmpty else { return }
+        let sel = try database.prepare("SELECT id, rule_json FROM tags WHERE kind = 1 AND rule_json IS NOT NULL")
+        defer { sel.reset() }
+        var updates: [(Int64, String)] = []
+        while try sel.step() {
+            guard var rule = SmartRule.decode(sel.text(1)) else { continue }
+            var changed = false
+            for i in rule.conditions.indices where rule.conditions[i].field == field {
+                if case .int(let v) = rule.conditions[i].value, ids.contains(v) {
+                    rule.conditions[i].value = .int(SmartRule.deletedID)
+                    changed = true
+                }
+            }
+            if changed { updates.append((sel.int64(0), rule.encoded())) }
+        }
+        sel.reset()
+        let up = try database.prepare("UPDATE tags SET rule_json = ? WHERE id = ?")
+        defer { up.reset() }
+        for (id, json) in updates {
+            try up.bind([.text(json), .int(id)])
+            _ = try up.step()
+            up.reset()
+        }
+    }
 
     private static func cleanTagName(_ name: String) throws -> String {
         let t = name.trimmingCharacters(in: .whitespacesAndNewlines)

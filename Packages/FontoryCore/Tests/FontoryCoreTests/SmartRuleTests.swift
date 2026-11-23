@@ -245,4 +245,90 @@ import Testing
         #expect(n > 0)
         #expect(ms < 100, "took \(ms) ms")
     }
+
+    // MARK: Deleted ids (ids are reused without AUTOINCREMENT)
+
+    private func storedRule(_ f: Fixture, _ id: Int64) throws -> SmartRule {
+        let t = try #require(try f.store.tags().first { $0.id == id })
+        let json = try #require(t.ruleJSON)
+        return try #require(SmartRule.decode(json))
+    }
+
+    @Test func deletedTagIsTombstonedInRules() throws {
+        let f = try Fixture.make()
+        let smart = try f.store.createTag(name: "Smart", parentID: nil, kind: .smart, ruleJSON: "{}")
+        let keep = try f.store.createTag(name: "Keep", parentID: nil)
+        let parent = try f.store.createTag(name: "Parent", parentID: nil)
+        let child = try f.store.createTag(name: "Child", parentID: parent)   // newest id
+        try f.store.addTag(keep, toFaces: [id(f, "Alpha-Bold")])
+        try f.store.addTag(child, toFaces: [id(f, "Beta-Light")])
+        let r = rule([c(.tag, .has, .int(child)), c(.tag, .hasNot, .int(parent)), c(.tag, .has, .int(keep))], match: .any)
+        try f.store.setTagRule(smart, ruleJSON: r.encoded())
+        #expect(try names(f, r).contains("Beta-Light"))
+
+        try f.store.deleteTag(parent)
+        let stored = try storedRule(f, smart)
+        #expect(stored.conditions.map(\.value) == [.int(SmartRule.deletedID), .int(SmartRule.deletedID), .int(keep)])
+
+        // New tags take the freed ids; the rewritten conditions still match nothing.
+        let reuse1 = try f.store.createTag(name: "New1", parentID: nil)
+        let reuse2 = try f.store.createTag(name: "New2", parentID: reuse1)
+        #expect(Set([reuse1, reuse2]) == [parent, child])   // the freed ids are reused
+        try f.store.addTag(reuse1, toFaces: [id(f, "Beta-Black")])
+        try f.store.addTag(reuse2, toFaces: [id(f, "Beta-Black")])
+        #expect(try names(f, stored) == ["Alpha-Bold"])
+        var onlyDeleted = SmartRule(); onlyDeleted.conditions = [stored.conditions[0]]
+        #expect(try names(f, onlyDeleted).isEmpty)
+        onlyDeleted.conditions = [stored.conditions[1]]
+        #expect(try names(f, onlyDeleted).isEmpty)
+    }
+
+    @Test func removedLocationIsTombstonedInRules() throws {
+        var f = try Fixture.make()
+        let r = rule([c(.location, .is, .int(f.locB.id)), c(.location, .isNot, .int(f.locB.id)), c(.location, .is, .int(f.locA.id))], match: .any)
+        let smart = try f.store.createTag(name: "Where", parentID: nil, kind: .smart, ruleJSON: r.encoded())
+        try f.store.deleteLocation(f.locB.id)
+        for ps in ["Beta-Light", "Beta-Regular", "Beta-Black"] { f.faceIDs[ps] = nil }   // cascaded away; ids may be reused
+        let stored = try storedRule(f, smart)
+        #expect(stored.conditions.map(\.value) == [.int(SmartRule.deletedID), .int(SmartRule.deletedID), .int(f.locA.id)])
+
+        let again = try f.store.upsertLocation(kind: .folder, volumeUUID: "VOL-C", relativePath: "New", displayName: "C", lastKnownPath: "/Volumes/C/New")
+        #expect(again.id == f.locB.id)   // the freed id is reused
+        try f.add(again.id, "Gamma.otf", [Fixture.face("Gamma-Regular", family: "Gamma", style: "Regular", weight: 400)], try f.store.nextImportBatch())
+        #expect(try names(f, stored) == ["Alpha-Regular", "Alpha-Italic", "Alpha-Bold"])
+        var onlyDeleted = SmartRule(); onlyDeleted.conditions = [stored.conditions[1]]   // "is not" a removed location
+        #expect(try names(f, onlyDeleted).isEmpty)
+    }
+
+    @Test func removedAutoLocationIsTombstonedInRules() throws {
+        let f = try Fixture.make()
+        let auto = try f.store.upsertLocation(kind: .userInstalled, volumeUUID: "VOL-D", relativePath: "Auto", displayName: "Auto",
+                                              lastKnownPath: "/Volumes/D/Auto", autoIndexed: true)
+        let r = rule([c(.location, .is, .int(auto.id))])
+        let smart = try f.store.createTag(name: "Auto", parentID: nil, kind: .smart, ruleJSON: r.encoded())
+        #expect(try f.store.deleteEmptyAutoLocations() == 1)
+        #expect(try storedRule(f, smart).conditions.map(\.value) == [.int(SmartRule.deletedID)])
+        #expect(try f.store.deleteEmptyAutoLocations() == 0)
+    }
+
+    @Test func countMatchesFaceIDs() throws {
+        let f = try Fixture.make()
+        let t = try f.store.createTag(name: "T", parentID: nil)
+        try f.store.addTag(t, toFaces: [id(f, "Alpha-Bold"), id(f, "Beta-Black")])
+        try sql(f, "UPDATE faces SET style_class = \(StyleClass.serif.rawValue) WHERE id = \(id(f, "Beta-Light"))")
+        let scopes: [LibraryQuery.Scope] = [
+            .all, .untagged, .styleClass(.serif), .location(id: f.locA.id, subfolder: nil),
+            .tags([TagPick(tagID: t, inverted: false)]), .tags([TagPick(tagID: t, inverted: true)]),
+            .tags([TagPick(tagID: 0, rule: rule([c(.name, .contains, .text("beta"))]))]),
+            .tags([TagPick(tagID: 0, rule: rule([c(.weight, .between, .range(0, 0.1))]))]),
+        ]
+        for scope in scopes {
+            for sort in [LibraryQuery.Sort.family, .random(seed: 42)] {
+                var q = LibraryQuery(scope: scope, sort: sort)
+                #expect(try f.store.count(for: q) == (try f.store.faceIDs(for: q)).count, "\(scope)")
+                q.search = SearchText("alpha")
+                #expect(try f.store.count(for: q) == (try f.store.faceIDs(for: q)).count, "\(scope) + search")
+            }
+        }
+    }
 }

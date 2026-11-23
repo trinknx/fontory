@@ -54,7 +54,42 @@ extension LibraryQuery {
 
     private static let randomModulus: UInt64 = 1_000_003
 
+    static let fromJoin = "FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id"
+
+    /// `SELECT COUNT(*)` over the same filter as `sql(columns:)`, without ordering.
+    func countSQL() -> (sql: String, bindings: [SQLValue]) {
+        let f = filter()
+        return ("SELECT COUNT(*) \(Self.fromJoin) WHERE " + f.clauses.joined(separator: " AND "), f.bindings)
+    }
+
     func sql(columns: String) -> (sql: String, bindings: [SQLValue]) {
+        let (clauses, filterBindings) = filter()
+        var bindings = filterBindings
+
+        let dir = ascending ? "ASC" : "DESC"
+        let order: String
+        switch sort {
+        case .family:
+            order = "\(Self.effectiveFamily) COLLATE NOCASE \(dir), faces.weight \(dir), faces.width \(dir), faces.slant \(dir), faces.id \(dir)"
+        case .name: order = "faces.full_name COLLATE NOCASE \(dir), faces.id \(dir)"
+        case .weight: order = "faces.weight \(dir), \(Self.effectiveFamily) COLLATE NOCASE \(dir), faces.id \(dir)"
+        case .dateAdded: order = "files.added_at \(dir), faces.id \(dir)"
+        case .lastActivated: order = "faces.last_activated IS NULL, faces.last_activated \(dir), faces.id \(dir)"
+        case .random(let seed):
+            // Reduce the seed first so id * seed stays well inside Int64.
+            // Bound, not interpolated, so every reshuffle reuses one cached statement.
+            order = "(faces.id * ?) % \(Self.randomModulus) \(dir), faces.id \(dir)"
+            bindings.append(.int(Int64(seed % Self.randomModulus)))
+        }
+
+        var sql = "SELECT \(columns) \(Self.fromJoin)"
+        if !clauses.isEmpty { sql += " WHERE " + clauses.joined(separator: " AND ") }
+        sql += " ORDER BY " + order
+        return (sql, bindings)
+    }
+
+    /// WHERE clauses (never empty) and their bindings, shared by `sql(columns:)` and `countSQL()`.
+    private func filter() -> (clauses: [String], bindings: [SQLValue]) {
         var clauses: [String] = [Self.publicFaceClause]
         var bindings: [SQLValue] = []
 
@@ -111,26 +146,6 @@ extension LibraryQuery {
             clauses += w.clauses
             bindings += w.bindings
         }
-
-        let dir = ascending ? "ASC" : "DESC"
-        let order: String
-        switch sort {
-        case .family:
-            order = "\(Self.effectiveFamily) COLLATE NOCASE \(dir), faces.weight \(dir), faces.width \(dir), faces.slant \(dir), faces.id \(dir)"
-        case .name: order = "faces.full_name COLLATE NOCASE \(dir), faces.id \(dir)"
-        case .weight: order = "faces.weight \(dir), \(Self.effectiveFamily) COLLATE NOCASE \(dir), faces.id \(dir)"
-        case .dateAdded: order = "files.added_at \(dir), faces.id \(dir)"
-        case .lastActivated: order = "faces.last_activated IS NULL, faces.last_activated \(dir), faces.id \(dir)"
-        case .random(let seed):
-            // Reduce the seed first so id * seed stays well inside Int64.
-            // Bound, not interpolated, so every reshuffle reuses one cached statement.
-            order = "(faces.id * ?) % \(Self.randomModulus) \(dir), faces.id \(dir)"
-            bindings.append(.int(Int64(seed % Self.randomModulus)))
-        }
-
-        var sql = "SELECT \(columns) FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id"
-        if !clauses.isEmpty { sql += " WHERE " + clauses.joined(separator: " AND ") }
-        sql += " ORDER BY " + order
-        return (sql, bindings)
+        return (clauses, bindings)
     }
 }

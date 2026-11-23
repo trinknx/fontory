@@ -10,6 +10,10 @@ public struct SmartRule: Sendable, Hashable, Codable {
 
     public init() {}
 
+    /// Stands in for a deleted tag or location in a condition's value; such a condition matches nothing.
+    /// Tag and location ids can be reused, so deletions rewrite conditions to this (see `FontStore.deleteTag`).
+    public static let deletedID: Int64 = -1
+
     public struct Condition: Sendable, Hashable, Codable {
         public var field: Field
         public var op: Op
@@ -140,7 +144,7 @@ public struct SmartRule: Sendable, Hashable, Codable {
             guard case .int(let v) = c.value else { return never }
             return equality("faces.style_class", .int(v))
         case .tag:
-            guard case .int(let id) = c.value, c.op == .has || c.op == .hasNot else { return never }
+            guard case .int(let id) = c.value, id != deletedID, c.op == .has || c.op == .hasNot else { return never }
             // A deleted tag, or a smart tag (which tags nothing), matches nothing either way.
             let exists = "EXISTS (SELECT 1 FROM tags WHERE id = ? AND kind = 0)"
             let member = "faces.id \(c.op == .has ? "IN" : "NOT IN") (SELECT face_id FROM face_tags WHERE tag_id IN (\(LibraryQuery.descendantsByID)))"
@@ -159,7 +163,8 @@ public struct SmartRule: Sendable, Hashable, Codable {
                   i >= 0, i < Int64(ScriptCoverage.scripts.count), i < 63 else { return never }
             return ("((faces.scripts_bitmask >> ?) & 1) = ?", [.int(i), .int(c.op == .has ? 1 : 0)])
         case .location:
-            guard case .int(let id) = c.value else { return never }
+            // A removed location matches nothing, "is not" included (like a deleted tag).
+            guard case .int(let id) = c.value, id != deletedID else { return never }
             return equality("files.location_id", .int(id))
         case .dateAdded:
             guard c.op == .withinDays, case .int(let days) = c.value, days >= 0, days < 365 * 1000 else { return never }

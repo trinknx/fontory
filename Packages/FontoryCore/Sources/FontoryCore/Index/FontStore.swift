@@ -97,12 +97,16 @@ public final class FontStore: Sendable {
         }
     }
 
+    /// Smart rules naming the location are pointed at `SmartRule.deletedID` (location ids can be reused).
     public func deleteLocation(_ id: Int64) throws {
         try database.withLock {
-            let s = try database.prepare("DELETE FROM locations WHERE id = ?")
-            defer { s.reset() }
-            try s.bind([.int(id)])
-            _ = try s.step()
+            try database.transaction {
+                let s = try database.prepare("DELETE FROM locations WHERE id = ?")
+                defer { s.reset() }
+                try s.bind([.int(id)])
+                _ = try s.step()
+                try tombstoneRuleConditions(field: .location, ids: [id])
+            }
         }
     }
 
@@ -280,6 +284,17 @@ public final class FontStore: Sendable {
             out.reserveCapacity(1024)
             while try s.step() { out.append(s.int64(0)) }
             return out
+        }
+    }
+
+    /// `faceIDs(for:).count` without building the list: one `COUNT(*)` with no ORDER BY (sort is ignored).
+    public func count(for query: LibraryQuery) throws -> Int {
+        try reader.withLock {
+            let (sql, bindings) = query.countSQL()
+            let s = try reader.prepare(sql)
+            defer { s.reset() }
+            try s.bind(bindings)
+            return try s.step() ? Int(s.int64(0)) : 0
         }
     }
 
@@ -624,12 +639,18 @@ public final class FontStore: Sendable {
     @discardableResult
     public func deleteEmptyAutoLocations() throws -> Int {
         try database.withLock {
-            let s = try database.prepare("""
-            DELETE FROM locations WHERE auto_indexed != 0 AND NOT EXISTS (SELECT 1 FROM files WHERE files.location_id = locations.id)
-            """)
-            defer { s.reset() }
-            _ = try s.step()
-            return Int(database.changes)
+            try database.transaction {
+                let s = try database.prepare("""
+                DELETE FROM locations WHERE auto_indexed != 0 AND NOT EXISTS (SELECT 1 FROM files WHERE files.location_id = locations.id)
+                RETURNING id
+                """)
+                defer { s.reset() }
+                var removed = Set<Int64>()
+                while try s.step() { removed.insert(s.int64(0)) }
+                s.reset()
+                try tombstoneRuleConditions(field: .location, ids: removed)
+                return removed.count
+            }
         }
     }
 
