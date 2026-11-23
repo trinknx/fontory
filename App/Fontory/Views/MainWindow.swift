@@ -17,7 +17,7 @@ struct MainWindow: View {
             case .grid:
                 FontGridView(model: model, faceIDs: model.faceIDs, rowsVersion: model.rowsVersion,
                              zoom: model.zoom[.grid] ?? AppModel.defaultZoom, preview: model.preview,
-                             selection: model.selection)
+                             selection: model.selection, query: model.query)
             case .list:
                 BrowserPlaceholder()
             }

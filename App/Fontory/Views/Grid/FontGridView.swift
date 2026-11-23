@@ -12,6 +12,8 @@ struct FontGridView: NSViewRepresentable {
     let zoom: Double
     let preview: PreviewSettings
     let selection: Set<Int64>
+    /// Scope, search and sort: when they change, the next list reload starts at the top.
+    let query: LibraryQuery
 
     func makeCoordinator() -> FontGridController {
         FontGridController(model: model)
@@ -23,6 +25,7 @@ struct FontGridView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let c = context.coordinator
+        c.update(query: query)
         c.update(faceIDs: faceIDs)
         c.update(rowsVersion: rowsVersion)
         c.update(preview: preview)
@@ -50,6 +53,9 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
     private let layout = NSCollectionViewFlowLayout()
 
     private var faceIDs: [Int64] = []
+    private var query: LibraryQuery?
+    /// The user changed scope, search or sort since the list was last applied.
+    private var queryChanged = false
     private var indexByID: [Int64: Int] = [:]
     private var rowsVersion = 0
     private var preview = PreviewSettings()
@@ -151,12 +157,24 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
                 if !inserted.isEmpty { collectionView.insertItems(at: inserted) }
             }, completionHandler: nil)
         } else {
+            // A new query starts at the top; otherwise (a rescan growing the list, say) keep the same face in place.
+            let keep = queryChanged ? nil : captureAnchor(at: nil).map { (faceID: old[$0.indexPath.item], offset: $0.offset) }
             pipeline.cancelAll()
             faceIDs = new
             indexByID = index
             collectionView.reloadData()
-            collectionView.scroll(.zero)
+            if let keep, let i = index[keep.faceID] {
+                restore(Anchor(indexPath: IndexPath(item: i, section: 0), fraction: 0, offset: keep.offset))
+            } else {
+                collectionView.scroll(.zero)
+            }
         }
+        queryChanged = false
+    }
+
+    func update(query new: LibraryQuery) {
+        if let query, query != new { queryChanged = true }
+        query = new
     }
 
     /// The removed (old indexes) and inserted (new indexes) items when the change is a small set of insertions
@@ -196,7 +214,10 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
     func update(zoom new: Double) {
         guard abs(new - zoom) > 1e-9 else { return }
         zoom = new
-        applyLayout(anchorPoint: mouseLocation())
+        // Keyboard zoom anchors on the pointer; the slider and menu clicks on the selection or first visible item.
+        let usePointer = model.zoomAnchorsOnPointer
+        model.zoomAnchorsOnPointer = false
+        applyLayout(anchorPoint: usePointer ? mouseLocation() : nil)
     }
 
     func update(selection new: Set<Int64>) {
@@ -430,7 +451,8 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
 
     func collectionView(_ collectionView: NSCollectionView, willDisplay item: NSCollectionViewItem,
                         forRepresentedObjectAt indexPath: IndexPath) {
-        requestRender(at: indexPath.item)
+        // Items prepared in the overdraw area may have missed renders and row loads delivered to visible items only.
+        if let item = item as? FontGridItem { configure(item, at: indexPath.item) }
     }
 
     func collectionView(_ collectionView: NSCollectionView, didEndDisplaying item: NSCollectionViewItem,
@@ -526,7 +548,7 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
     }
 }
 
-/// The grid's collection view: pinch zoom, Space, type-to-scroll, context menu and ⌘= zoom.
+/// The grid's collection view: pinch zoom, Space, type-to-scroll and the context menu.
 final class FontCollectionView: NSCollectionView {
     weak var controller: FontGridController?
 
@@ -546,16 +568,6 @@ final class FontCollectionView: NSCollectionView {
         }
     }
 
-    /// ⌘= zooms in like ⌘+ (on many layouts "+" needs Shift).
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if mods == .command, event.charactersIgnoringModifiers == "=", window?.firstResponder === self {
-            controller?.zoomIn()
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-
     override func menu(for event: NSEvent) -> NSMenu? {
         controller?.contextMenu(at: convert(event.locationInWindow, from: nil))
     }
@@ -566,8 +578,3 @@ final class FontCollectionView: NSCollectionView {
     }
 }
 
-extension FontGridController {
-    func zoomIn() {
-        model.adjustZoom(by: 0.1)
-    }
-}

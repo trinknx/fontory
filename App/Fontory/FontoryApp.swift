@@ -63,6 +63,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
             }
         }
+        // ⌘= zooms in like ⌘+ (which needs Shift on many layouts). A local monitor sees the key before the
+        // menu and regardless of the first responder; it leaves Settings and other windows alone.
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let isZoomIn = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
+                && event.charactersIgnoringModifiers == "="
+            guard isZoomIn else { return event }
+            let handled = MainActor.assumeIsolated { () -> Bool in
+                guard let key = NSApp.keyWindow, key.identifier?.rawValue.contains("Settings") != true,
+                      key.styleMask.contains(.titled) else { return false }
+                self.model.adjustZoom(by: 0.1)
+                return true
+            }
+            return handled ? nil : event
+        }
         Task { await model.start() }
     }
 

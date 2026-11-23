@@ -4,8 +4,8 @@ import FontoryCore
 /// Renders grid previews off the main thread and caches them.
 ///
 /// Requests run on a concurrent queue (at most 6 at once) keyed by face and request; finished images go into an
-/// LRU cache, and the newest image of every face is also kept so a cell can show it scaled while the exact size
-/// renders (or while rendering is suspended during a zoom gesture).
+/// LRU cache bounded by pixel memory (384 MB), and the key of the newest image of every face is remembered so a cell
+/// can show that image scaled while the exact size renders (or while rendering is suspended during a zoom gesture).
 @MainActor
 final class PreviewPipeline {
     struct Key: Hashable, Sendable {
@@ -20,8 +20,11 @@ final class PreviewPipeline {
 
     private let renderer: PreviewRenderer
     private let queue: OperationQueue
-    private let images = LRUCache<Key, CGImage>(limit: 600)
-    private let latestByFace = LRUCache<Int64, CGImage>(limit: 600)
+    /// Bitmap memory budget for all cached previews; the count cap is only a secondary bound.
+    static let imageCostLimit = 384 * 1024 * 1024
+    private let images = LRUCache<Key, CGImage>(limit: 600, costLimit: PreviewPipeline.imageCostLimit)
+    /// Newest key per face. Keys are small; the images themselves live (and are evicted) only in `images`.
+    private let latestKeyByFace = LRUCache<Int64, Key>(limit: 4000)
     /// Ink height per point of size, per face and text. Linear in the point size, so measured once.
     private let inkPerPoint = LRUCache<InkKey, CGFloat>(limit: 4000)
     private var operations: [Int64: RenderOperation] = [:]
@@ -43,7 +46,7 @@ final class PreviewPipeline {
 
     /// The most recently rendered image of a face, at whatever size or settings.
     func anyImage(forFace faceID: Int64) -> CGImage? {
-        latestByFace[faceID]
+        latestKeyByFace[faceID].flatMap { images[$0] }
     }
 
     /// Renders `key` unless it is cached or already rendering. A pending render of another key for the same face
@@ -59,8 +62,8 @@ final class PreviewPipeline {
             guard let self, let op else { return }
             if self.operations[key.faceID] === op { self.operations[key.faceID] = nil }
             guard let image else { return }
-            self.images[key] = image
-            self.latestByFace[key.faceID] = image
+            self.images.setValue(image, forKey: key, cost: image.bytesPerRow * image.height)
+            self.latestKeyByFace[key.faceID] = key
             self.onRendered?(key, image)
         }
         operations[key.faceID] = op

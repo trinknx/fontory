@@ -309,8 +309,10 @@ final class AppModel {
         Task { [weak self] in
             let rows = await Task.detached(priority: .userInitiated) { try? backend.store.rows(ids: missing) }.value
             guard let self else { return }
+            // After an invalidation the pending set was reset; ids pending now belong to newer fetches.
+            guard version == self.rowsVersion else { return }
             self.pendingRowIDs.subtract(missing)
-            guard version == self.rowsVersion, let rows, !rows.isEmpty else { return }
+            guard let rows, !rows.isEmpty else { return }
             for (key, value) in rows { self.rowCache[key] = value }
             NotificationCenter.default.post(name: Self.rowsLoadedNotification, object: self,
                                             userInfo: [Self.rowIDsKey: Array(rows.keys)])
@@ -352,6 +354,8 @@ final class AppModel {
 
     private func invalidateRows() {
         rowCache.removeAll()
+        // Fetches in flight return rows of the old version and are dropped, so their ids must be requestable again.
+        pendingRowIDs.removeAll()
         rowsVersion &+= 1
         // Files may have been replaced by a rescan: let faces that failed to load try again.
         previewRenderer.forgetFailures()
@@ -654,19 +658,37 @@ final class AppModel {
 
     // MARK: Actions on faces
 
+    /// Rows for a user action on `ids`, in order: cached ones directly, the rest fetched off the main actor.
+    private func rowsForAction(_ ids: [Int64]) async -> [FaceRow] {
+        var rows: [Int64: FaceRow] = [:]
+        var missing: [Int64] = []
+        for id in ids {
+            if let row = rowCache[id] { rows[id] = row } else { missing.append(id) }
+        }
+        let toFetch = missing
+        if !toFetch.isEmpty, let backend, let fetched = await runBackground({ try backend.store.rows(ids: toFetch) }) {
+            rows.merge(fetched) { cached, _ in cached }
+        }
+        return ids.compactMap { rows[$0] }
+    }
+
     func revealInFinder(_ ids: [Int64]) {
-        let urls = ids.compactMap { row($0)?.fileURL }
-        guard !urls.isEmpty else { return }
-        NSWorkspace.shared.activateFileViewerSelecting(Array(Set(urls)))
+        Task {
+            let urls = await rowsForAction(ids).compactMap(\.fileURL)
+            guard !urls.isEmpty else { return }
+            NSWorkspace.shared.activateFileViewerSelecting(Array(Set(urls)))
+        }
     }
 
     func copyDetails(_ ids: [Int64]) {
-        let text = ids.compactMap(row).map { r in
-            [r.postScriptName, r.family, r.style, r.version ?? "", r.fileURL?.path ?? "(offline)"].joined(separator: "\t")
-        }.joined(separator: "\n")
-        guard !text.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        Task {
+            let text = await rowsForAction(ids).map { r in
+                [r.postScriptName, r.family, r.style, r.version ?? "", r.fileURL?.path ?? "(offline)"].joined(separator: "\t")
+            }.joined(separator: "\n")
+            guard !text.isEmpty else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
     }
 
     /// Makes the face the one shown for its family in the list view.
@@ -684,13 +706,22 @@ final class AppModel {
 
     static let defaultZoom = 0.25
 
+    /// True when the latest zoom change came from the keyboard, so the grid anchors it on the pointer
+    /// (slider and menu clicks anchor on the selection or the first visible item). The grid resets it.
+    @ObservationIgnored var zoomAnchorsOnPointer = false
+
     func adjustZoom(by delta: Double) {
         let current = zoom[viewMode] ?? Self.defaultZoom
-        zoom[viewMode] = min(1, max(0, ((current + delta) * 100).rounded() / 100))
+        setZoomFromCommand(min(1, max(0, ((current + delta) * 100).rounded() / 100)))
     }
 
     func resetZoom() {
-        zoom[viewMode] = Self.defaultZoom
+        setZoomFromCommand(Self.defaultZoom)
+    }
+
+    private func setZoomFromCommand(_ value: Double) {
+        zoomAnchorsOnPointer = NSApp.currentEvent?.type == .keyDown
+        zoom[viewMode] = value
     }
 
     // MARK: Presets
