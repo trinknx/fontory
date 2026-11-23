@@ -157,9 +157,28 @@ struct PreviewSettings: Equatable {
     static let defaultForeground = CGColor(gray: 0, alpha: 1)
     static let defaultBackground = CGColor(gray: 1, alpha: 1)
 
+    /// Dark mode's defaults: light text on dark cards, as in Typeface.
+    static let darkForeground = CGColor(gray: 0.94, alpha: 1)
+    static let darkBackground = CGColor(gray: 0.14, alpha: 1)
+
+    static func defaultColors(dark: Bool) -> (foreground: CGColor, background: CGColor) {
+        dark ? (darkForeground, darkBackground) : (defaultForeground, defaultBackground)
+    }
+
+    private func hasColors(_ colors: (foreground: CGColor, background: CGColor)) -> Bool {
+        PreviewRequest.components(foreground) == PreviewRequest.components(colors.foreground)
+            && PreviewRequest.components(background) == PreviewRequest.components(colors.background)
+    }
+
+    /// The colors are the default pair of either appearance (not ones the user picked).
     var hasDefaultColors: Bool {
-        PreviewRequest.components(foreground) == PreviewRequest.components(Self.defaultForeground)
-            && PreviewRequest.components(background) == PreviewRequest.components(Self.defaultBackground)
+        hasColors(Self.defaultColors(dark: false)) || hasColors(Self.defaultColors(dark: true))
+    }
+
+    /// Default colors follow the appearance; colors the user picked are kept.
+    mutating func adaptDefaultColors(dark: Bool) {
+        guard hasDefaultColors, !hasColors(Self.defaultColors(dark: dark)) else { return }
+        (foreground, background) = Self.defaultColors(dark: dark)
     }
 
     var isDynamic: Bool { !showsFontNames && text.isEmpty }
@@ -359,7 +378,16 @@ final class AppModel {
     var zoom: [ViewMode: Double] {
         didSet { for mode in ViewMode.allCases { UserDefaults.standard.set(zoom[mode], forKey: "zoom.\(mode.rawValue)") } }
     }
-    var preview = PreviewSettings() { didSet { if preview != oldValue { schedulePreviewSave() } } }
+    var preview = PreviewSettings() {
+        didSet {
+            preview.adaptDefaultColors(dark: isDarkAppearance)  // e.g. a preset saved in the other appearance
+            if preview != oldValue { schedulePreviewSave() }
+        }
+    }
+    /// Set by the main window from its color scheme; default preview colors follow it.
+    var isDarkAppearance = false {
+        didSet { if isDarkAppearance != oldValue { preview.adaptDefaultColors(dark: isDarkAppearance) } }
+    }
     /// Pending debounced write of `preview` (slider drags and typing change it many times a second).
     @ObservationIgnored private var previewSaveTask: Task<Void, Never>?
     /// Drives the preview popover (toolbar button and View ▸ Preview Options).

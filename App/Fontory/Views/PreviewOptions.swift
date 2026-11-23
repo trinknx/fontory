@@ -262,8 +262,7 @@ struct PreviewOptionsView: View {
             ColorPicker("Background", selection: $model.preview.background, supportsOpacity: false)
             Spacer()
             Button("Reset") {
-                model.preview.foreground = PreviewSettings.defaultForeground
-                model.preview.background = PreviewSettings.defaultBackground
+                (model.preview.foreground, model.preview.background) = PreviewSettings.defaultColors(dark: model.isDarkAppearance)
             }
             .controlSize(.small)
             .disabled(model.preview.hasDefaultColors)

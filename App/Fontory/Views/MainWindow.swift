@@ -6,6 +6,7 @@ struct MainWindow: View {
     static let id = "main"
 
     @Environment(AppModel.self) private var model
+    @Environment(\.colorScheme) private var colorScheme
     @State private var presetName = ""
 
     var body: some View {
@@ -29,6 +30,7 @@ struct MainWindow: View {
             }
         }
         .navigationTitle(model.detail?.family ?? "Fontory")
+        .onChange(of: colorScheme, initial: true) { _, scheme in model.isDarkAppearance = scheme == .dark }
         .background(BrowserWindowReader(model: model))
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search fonts")
         .toolbar { BrowserToolbar(model: model) }
