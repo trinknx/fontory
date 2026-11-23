@@ -115,6 +115,9 @@ final class AppModel {
 
     private(set) var locations: [LocationRecord] = []
     private(set) var scanProgress: [Int64: ScanProgress] = [:]
+    /// Per location: faces with activation or notes that scans removed because their files are gone, accumulated
+    /// until the user dismisses the notice (so a later clean rescan does not hide it).
+    private(set) var removalNotices: [Int64: Int] = [:]
     var alert: AlertItem?
     private(set) var isReady = false
 
@@ -471,7 +474,10 @@ final class AppModel {
                 }
             }
             // Registrations follow the files even when the scan was cancelled or aborted after applying moves.
-            if let last { await self?.updateRegistrations(after: last) }
+            if let last {
+                if last.phase == .done, last.removedWithUserData > 0 { self?.removalNotices[id, default: 0] += last.removedWithUserData }
+                await self?.updateRegistrations(after: last)
+            }
             guard let self, !Task.isCancelled else { return }
             await self.scanFinished()
         }
@@ -511,6 +517,7 @@ final class AppModel {
         scanTasks[id] = nil
         watchers.removeValue(forKey: id)?.stop()
         scanProgress[id] = nil
+        removalNotices[id] = nil
         Task {
             await backend.scanner.cancel(locationID: id)
             await backend.activation.volumeUnmounted(locationIDs: [id])
@@ -518,6 +525,10 @@ final class AppModel {
             if case .location(let loc, _) = query.scope, loc == id { query.scope = .all }
             await scanFinished()
         }
+    }
+
+    func dismissRemovalNotice(_ id: Int64) {
+        removalNotices[id] = nil
     }
 
     func confirmRemoveLocation(_ id: Int64) {

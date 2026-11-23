@@ -196,14 +196,18 @@ private struct LocationRow: View {
                     .foregroundStyle(.red)
                     .help(reason)
             case .done:
-                if progress.unreadableCount > 0 || progress.failed > 0 {
+                let removed = model.removalNotices[location.id] ?? 0
+                if progress.unreadableCount > 0 || progress.failed > 0 || removed > 0 {
                     Button { showingWarnings = true } label: {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
                     }
                     .buttonStyle(.borderless)
-                    .help("Some files could not be read")
+                    .help(removed > 0 ? "Fonts with activation or notes were removed" : "Some files could not be read")
                     .popover(isPresented: $showingWarnings, arrowEdge: .trailing) {
-                        ScanWarnings(progress: progress)
+                        ScanWarnings(progress: progress, removedWithUserData: removed) {
+                            showingWarnings = false
+                            model.dismissRemovalNotice(location.id)
+                        }
                     }
                 }
             }
@@ -213,9 +217,19 @@ private struct LocationRow: View {
 
 private struct ScanWarnings: View {
     let progress: ScanProgress
+    /// Faces with activation or notes removed by scans since the user last dismissed the notice.
+    let removedWithUserData: Int
+    let dismissRemovals: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if removedWithUserData > 0 {
+                Text("\(removedWithUserData.formatted()) font\(removedWithUserData == 1 ? "" : "s") with activation or notes \(removedWithUserData == 1 ? "was" : "were") removed because \(removedWithUserData == 1 ? "its file is" : "their files are") gone.")
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("OK", action: dismissRemovals)
+                    .controlSize(.small)
+                if progress.failed > 0 || progress.unreadableCount > 0 || progress.skippedRemovals > 0 { Divider() }
+            }
             if progress.failed > 0 {
                 Text("\(progress.failed) file\(progress.failed == 1 ? "" : "s") could not be read as fonts.")
             }
