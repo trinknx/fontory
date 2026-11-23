@@ -1,17 +1,6 @@
 import Foundation
 import FontoryCore
 
-/// Face counts shown in the sidebar and the menu bar.
-struct LibraryCounts: Sendable, Equatable {
-    var all = 0
-    var activated = 0
-    var temporary = 0
-    var deactivated = 0
-    var offline = 0
-    var lastImport = 0
-    var perLocation: [Int64: Int] = [:]
-}
-
 enum LibraryError: LocalizedError {
     case alreadySystemLocation(String)
     case notReachable(String)
@@ -24,7 +13,7 @@ enum LibraryError: LocalizedError {
             inside ? "“\(new)” is inside “\(existing)”, which is already in the library."
                    : "“\(new)” contains “\(existing)”, which is already in the library. Remove “\(existing)” first."
         case .locationOffline(let name): "“\(name)” is offline. Connect its drive first."
-        case .alreadySystemLocation(let name): "“\(name)” is a system font folder and is already in the library."
+        case .alreadySystemLocation(let name): "“\(name)” is an installed-fonts folder and is already in the library."
         case .notReachable(let name): "“\(name)” is not reachable."
         }
     }
@@ -36,7 +25,10 @@ final class LibraryBackend: Sendable {
     let store: FontStore
     let scanner: LibraryScanner
     let activation: ActivationService
+    /// Matches the index against the fonts registered on the Mac (System / User / Activated views).
+    let inventory: SystemFontInventory
 
+    /// `/System/Library/Fonts` is indexed as `.system`; the other two hold fonts installed outside Fontory.
     static let systemFontFolders: [URL] = [
         URL(fileURLWithPath: "/System/Library/Fonts", isDirectory: true),
         URL(fileURLWithPath: "/Library/Fonts", isDirectory: true),
@@ -57,6 +49,7 @@ final class LibraryBackend: Sendable {
         self.scanner = LibraryScanner(store: store, rootURL: { LibraryBackend.resolve($0) })
         // Scope stays `.session` (CoreTextRegistrar's default): the DB, not the system, remembers what is on.
         self.activation = ActivationService(store: store, registrar: CoreTextRegistrar())
+        self.inventory = SystemFontInventory(store: store)
     }
 
     static func resolve(_ location: LocationRecord) -> URL? {
@@ -102,16 +95,17 @@ final class LibraryBackend: Sendable {
 
     // MARK: Locations
 
-    /// Adds the system font folders that are not in the index yet. Returns the ids of the new locations.
+    /// Adds the system and user font folders that are not in the index yet. Returns the ids of the new locations.
     func ensureSystemLocations() throws -> [Int64] {
         let existing = try store.locations()
         var added: [Int64] = []
         for url in Self.systemFontFolders where Self.directoryExists(url) {
             guard let ref = try? VolumeIdentity.ref(for: url) else { continue }
             if existing.contains(where: { $0.volumeUUID == ref.volumeUUID && $0.relativePath == ref.relativePath }) { continue }
-            let name = url.path.hasPrefix("/System") ? "System Fonts" : url.path == "/Library/Fonts" ? "Computer Fonts" : "User Fonts"
-            let loc = try store.upsertLocation(kind: .system, volumeUUID: ref.volumeUUID, relativePath: ref.relativePath,
-                                               displayName: name, lastKnownPath: url.path)
+            let isSystem = url.path.hasPrefix(SystemFontInventory.systemPrefix)
+            let name = isSystem ? "System Fonts" : url.path == "/Library/Fonts" ? "Computer Fonts" : "User Fonts"
+            let loc = try store.upsertLocation(kind: isSystem ? .system : .userInstalled, volumeUUID: ref.volumeUUID,
+                                               relativePath: ref.relativePath, displayName: name, lastKnownPath: url.path)
             added.append(loc.id)
         }
         return added
@@ -128,13 +122,17 @@ final class LibraryBackend: Sendable {
         return outer.relativePath.isEmpty || inner.relativePath.hasPrefix(outer.relativePath + "/")
     }
 
-    /// Adds a folder location. Refuses a system folder and any folder inside or containing another location
+    /// Adds a folder location. Refuses an installed-fonts folder and any folder inside or containing another location
     /// (its fonts would be indexed twice). Re-adding the same folder, or a file set's folder, reuses that location.
+    /// Auto-indexed locations never block it: one at the same place becomes the folder, those inside it are dropped
+    /// (the folder's scan indexes their files and the inventory flags the active ones again).
     func addFolder(_ url: URL) throws -> LocationRecord {
         let ref = try VolumeIdentity.ref(for: url)
-        let all = try store.locations()
+        var all = try store.locations()
+        for auto in all where auto.autoIndexed && Self.contains(ref, auto) { try store.deleteLocation(auto.id) }
+        all = all.filter { !$0.autoIndexed }
         if let existing = all.first(where: { $0.volumeUUID == ref.volumeUUID && $0.relativePath == ref.relativePath }),
-           existing.kind == .system {
+           existing.kind.isReadOnly {
             throw LibraryError.alreadySystemLocation(existing.displayName)
         }
         if let outer = all.first(where: { Self.contains($0, ref) }) {
@@ -154,10 +152,11 @@ final class LibraryBackend: Sendable {
     }
 
     /// Where individual files from `folder` go: the folder/system location that already contains them, else the
-    /// `.fileSet` location for exactly that folder (created if needed). Never changes an existing location's kind.
+    /// `.fileSet` location for exactly that folder (created if needed). Never changes the kind of a user's location;
+    /// an auto-indexed one at that folder becomes the file set.
     func fileTarget(for folder: URL) throws -> FileTarget {
         let ref = try VolumeIdentity.ref(for: folder)
-        let all = try store.locations()
+        let all = try store.locations().filter { !$0.autoIndexed }
         let covering = all.first { loc in
             loc.kind != .fileSet && loc.volumeUUID == ref.volumeUUID
                 && (loc.relativePath == ref.relativePath || Self.contains(loc, ref))
@@ -259,20 +258,6 @@ final class LibraryBackend: Sendable {
     // MARK: Counts
 
     func counts(includeSystem: Bool) throws -> LibraryCounts {
-        var c = LibraryCounts()
-        for g in try store.faceCountGroups() {
-            c.perLocation[g.locationID, default: 0] += g.count
-            if !includeSystem && g.kind == .system { continue }
-            c.all += g.count
-            switch g.activation {
-            case .on: c.activated += g.count
-            case .temporary: c.temporary += g.count
-            // System fonts are always active and read-only: never "deactivated" (matches the .deactivated scope).
-            case .off: if g.kind != .system { c.deactivated += g.count }
-            }
-            if !g.online { c.offline += g.count }
-            if g.inLatestImport { c.lastImport += g.count }
-        }
-        return c
+        LibraryCounts(groups: try store.faceCountGroups(), includeSystem: includeSystem)
     }
 }

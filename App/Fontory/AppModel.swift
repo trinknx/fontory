@@ -81,6 +81,8 @@ final class AppModel {
     private static let log = Logger(subsystem: "local.fontory.app", category: "model")
     private static let refreshDelay: Duration = .milliseconds(80)
     private static let folderEventDelay: Duration = .seconds(5)
+    /// Registered-fonts notifications come in bursts (one per registration batch, from any process).
+    private static let inventoryDelay: Duration = .seconds(1)
 
     // MARK: Browsing state
 
@@ -154,6 +156,11 @@ final class AppModel {
     @ObservationIgnored private var watchers: [Int64: FolderWatcher] = [:]
     @ObservationIgnored private var folderEventTasks: [Int64: Task<Void, Never>] = [:]
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
+    @ObservationIgnored private var inventoryTask: Task<Void, Never>?
+    @ObservationIgnored private var inventoryObservers: [NSObjectProtocol] = []
+    /// Registered files inside scanned locations for which a rescan was already started (rescanned once, so a file
+    /// the scan cannot read does not loop).
+    @ObservationIgnored private var requestedPendingPaths: Set<String> = []
     @ObservationIgnored private var started = false
 
     init() {
@@ -201,18 +208,22 @@ final class AppModel {
         // 2. System folders are indexed once.
         let newSystem = await runBackground { try backend.ensureSystemLocations() } ?? []
         await reloadLocations()
-        // 3. Restore activated fonts.
+        // 3. Restore activated fonts. Activation is always persistent: faces left temporary by an older version are
+        // reset to off and never registered.
         if UserDefaults.standard.bool(forKey: SettingsKey.restoreOnLaunch) {
             let report = await backend.activation.restoreOnLaunch()
             present(report, state: .on, context: "Restoring activated fonts")
         } else {
-            // Nothing from the previous run is registered; temporary activations do not outlive it.
             let report = await backend.activation.forgetTemporary()
             present(report, state: .off, context: "Resetting temporary fonts")
         }
         invalidateRows()
-        // 5. Incremental background rescan of the online user locations (and the system folders added just now).
-        for loc in locations where loc.online && (loc.kind != .system || newSystem.contains(loc.id)) {
+        // 3b. What is active on the Mac, then whenever the registered fonts change.
+        await reconcileInventory()
+        observeRegisteredFonts()
+        // 5. Incremental background rescan of the online user locations, the user-installed font folders (small) and
+        // the system folder when it was added just now.
+        for loc in locations where loc.online && !loc.autoIndexed && (loc.kind != .system || newSystem.contains(loc.id)) {
             rescan(loc.id)
         }
         // 7. Watch online folders.
@@ -223,6 +234,53 @@ final class AppModel {
 
     func prepareForQuit() async {
         await backend?.activation.prepareForQuit()
+    }
+
+    // MARK: Registered fonts
+
+    private func observeRegisteredFonts() {
+        let center = NotificationCenter.default
+        let names = [Notification.Name(kCTFontManagerRegisteredFontsChangedNotification as String),
+                     NSApplication.didBecomeActiveNotification]
+        for name in names {
+            inventoryObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scheduleInventory() }
+            })
+        }
+    }
+
+    /// Re-reads the registered fonts after the next quiet second.
+    func scheduleInventory() {
+        inventoryTask?.cancel()
+        inventoryTask = Task { [weak self] in
+            try? await Task.sleep(for: AppModel.inventoryDelay)
+            guard !Task.isCancelled else { return }
+            await self?.reconcileInventory()
+        }
+    }
+
+    /// Reads `CTFontManagerCopyAvailableFontURLs` and reconciles the index with it, off the main actor (the inventory
+    /// actor serializes passes). Refreshes the views when something changed.
+    private func reconcileInventory() async {
+        guard let backend else { return }
+        let result: InventoryResult
+        do {
+            result = try await backend.inventory.refresh()
+        } catch {
+            Self.log.error("registered fonts could not be matched: \(String(describing: error), privacy: .public)")
+            return
+        }
+        // Registered files a scanned location has not indexed yet: rescan it, once per file.
+        let fresh = result.pendingPaths.subtracting(requestedPendingPaths)
+        if !fresh.isEmpty {
+            requestedPendingPaths.formUnion(fresh)
+            for id in result.pendingLocationIDs where scanTasks[id] == nil { rescan(id) }
+        }
+        guard result.changed else { return }
+        if result.locationsChanged { await reloadLocations() }
+        invalidateRows()
+        refreshCounts()
+        scheduleRefresh()
     }
 
     // MARK: Query
@@ -386,14 +444,19 @@ final class AppModel {
 
     // MARK: Locations
 
-    var userLocations: [LocationRecord] { locations.filter { $0.kind != .system } }
-    var systemLocations: [LocationRecord] { locations.filter { $0.kind == .system } }
+    /// The user's folders and file sets.
+    var userLocations: [LocationRecord] { locations.filter { !$0.kind.isReadOnly && !$0.autoIndexed } }
+    /// The standard font folders (System, Computer, User). Auto-indexed folders are not listed: their fonts are in
+    /// the System and User views.
+    var installedLocations: [LocationRecord] { locations.filter { $0.kind.isReadOnly && !$0.autoIndexed } }
+    /// Every location but the auto-indexed ones (Settings).
+    var listedLocations: [LocationRecord] { locations.filter { !$0.autoIndexed } }
 
     func location(_ id: Int64) -> LocationRecord? { locations.first { $0.id == id } }
 
-    /// System fonts are read-only: their activation cannot be changed.
+    /// System fonts and fonts active outside Fontory are read-only: their activation cannot be changed here.
     func isActivationLocked(_ row: FaceRow) -> Bool {
-        location(row.locationID)?.kind == .system
+        row.isActivationReadOnly
     }
 
     func reloadLocations() async {
@@ -460,7 +523,8 @@ final class AppModel {
             return
         }
         scanTasks[id]?.cancel()
-        if loc.kind == .fileSet {
+        // Auto-indexed locations hold only the files the inventory added: refresh those like a file set.
+        if loc.kind == .fileSet || loc.autoIndexed {
             scanProgress[id] = ScanProgress(locationID: id, phase: .parsing)
             scanTasks[id] = Task { [weak self] in
                 let progress = await Task.detached(priority: .utility) { try? backend.refreshFileSet(loc) }.value
@@ -519,6 +583,8 @@ final class AppModel {
         await reloadLocations()
         refreshCounts()
         scheduleRefresh()
+        // Newly indexed files may be active outside Fontory.
+        scheduleInventory()
     }
 
     func relink(_ id: Int64, to url: URL) async {
@@ -575,7 +641,8 @@ final class AppModel {
     // MARK: Folder watching
 
     private func updateWatchers() {
-        let wanted = Dictionary(locations.filter { $0.kind == .folder && $0.online }.map { ($0.id, $0.lastKnownPath) },
+        let watched = locations.filter { $0.online && !$0.autoIndexed && ($0.kind == .folder || $0.kind == .userInstalled) }
+        let wanted = Dictionary(watched.map { ($0.id, $0.lastKnownPath) },
                                 uniquingKeysWith: { a, _ in a })
         for (id, watcher) in watchers where wanted[id] != watcher.path {
             watcher.stop()
@@ -674,18 +741,11 @@ final class AppModel {
         await setActivation(rows.map(\.id), state)
     }
 
-    func clearTemporary() async {
-        guard let backend else { return }
-        let report = await backend.activation.clearTemporary()
-        afterActivationChange()
-        present(report, state: .off, context: "Clearing temporary fonts")
-    }
-
     private func afterActivationChange() {
         invalidateRows()
         refreshCounts()
         switch query.scope {
-        case .activated, .temporary, .deactivated: scheduleRefresh()
+        case .activated, .user, .deactivated: scheduleRefresh()
         default: if query.sort == .lastActivated { scheduleRefresh() }
         }
     }
