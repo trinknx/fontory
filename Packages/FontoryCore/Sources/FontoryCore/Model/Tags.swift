@@ -17,3 +17,22 @@ public struct TagRecord: Sendable, Hashable, Identifiable {
 }
 
 public enum TagError: Error, Equatable { case duplicateName, cycle, notFound, emptyName }
+
+/// One sidebar tag pick. `rule` is set for smart tags (resolved by the app from `TagRecord.ruleJSON`).
+public struct TagPick: Sendable, Hashable {
+    public var tagID: Int64
+    public var inverted: Bool
+    public var rule: SmartRule?
+    public init(tagID: Int64, inverted: Bool = false, rule: SmartRule? = nil) {
+        self.tagID = tagID; self.inverted = inverted; self.rule = rule
+    }
+}
+
+public struct OrganizationCounts: Sendable, Equatable {
+    public var untagged = 0
+    public var quickCollection = 0
+    /// Plain tags only, including descendants' faces, distinct faces. Smart-tag counts are the app's job.
+    public var perTag: [Int64: Int] = [:]
+    public var perStyle: [StyleClass: Int] = [:]
+    public init() {}
+}

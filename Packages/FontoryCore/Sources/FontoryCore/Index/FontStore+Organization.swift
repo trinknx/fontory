@@ -171,6 +171,50 @@ extension FontStore {
         try database.withLock { try database.execute("DELETE FROM quick_collection") }
     }
 
+    // MARK: Counts
+
+    /// Sidebar counts for tags, styles, untagged and the Quick Collection. Each equals the matching
+    /// `LibraryQuery.Scope` result size for the same `includeSystem`.
+    public func organizationCounts(includeSystem: Bool) throws -> OrganizationCounts {
+        let join = "FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id"
+        let visible = LibraryQuery.publicFaceClause + (includeSystem ? "" : " AND locations.kind != 2")
+        return try reader.withLock {
+            var out = OrganizationCounts()
+            func scalar(_ extra: String) throws -> Int {
+                let s = try reader.prepare("SELECT COUNT(*) \(join) WHERE \(visible) AND \(extra)")
+                defer { s.reset() }
+                _ = try s.step()
+                return Int(s.int64(0))
+            }
+            out.untagged = try scalar("NOT EXISTS (SELECT 1 FROM face_tags JOIN tags ON tags.id = face_tags.tag_id WHERE face_tags.face_id = faces.id AND tags.kind = 0)")
+            out.quickCollection = try scalar("faces.id IN (SELECT face_id FROM quick_collection)")
+
+            let styles = try reader.prepare("SELECT faces.style_class, COUNT(*) \(join) WHERE \(visible) GROUP BY 1")
+            defer { styles.reset() }
+            while try styles.step() {
+                if let c = StyleClass(rawValue: Int(styles.int64(0))) { out.perStyle[c] = Int(styles.int64(1)) }
+            }
+
+            // One pass over the visible assignments: each face counts once for every tag it carries or inherits.
+            var parent: [Int64: Int64?] = [:]
+            for t in try tags() { parent[t.id] = t.parentID; if t.kind == .tag { out.perTag[t.id] = 0 } }
+            let pairs = try reader.prepare("SELECT face_tags.face_id, face_tags.tag_id \(join.replacingOccurrences(of: "FROM faces", with: "FROM face_tags JOIN faces ON faces.id = face_tags.face_id")) WHERE \(visible) ORDER BY face_tags.face_id")
+            defer { pairs.reset() }
+            var currentFace: Int64? = nil
+            var seen = Set<Int64>()
+            while try pairs.step() {
+                let face = pairs.int64(0)
+                if face != currentFace { currentFace = face; seen.removeAll(keepingCapacity: true) }
+                var cursor: Int64? = pairs.int64(1)
+                while let c = cursor, seen.insert(c).inserted {
+                    if out.perTag[c] != nil { out.perTag[c]! += 1 }
+                    cursor = parent[c] ?? nil
+                }
+            }
+            return out
+        }
+    }
+
     // MARK: Notes
 
     /// nil or blank clears the note. The `faces_au` trigger keeps the FTS index in sync.

@@ -3,12 +3,12 @@ import Foundation
 /// Parsed library search box text.
 ///
 /// Syntax: `"Helvetica Neue"` exact, `helv*` prefix, `*neue` suffix, bare word contains,
-/// `#tag` tag (ignored in wave 1). Terms are ANDed.
+/// `#tag` tag (name or `Parent/Child` path, also matches style names like `#serif`), `#!tag` not tagged. Terms are ANDed.
 public struct SearchText: Sendable, Hashable {
     public enum Field: String, Sendable, CaseIterable { case name, family, foundry, designer, notes }
 
     public struct Term: Sendable, Hashable {
-        public enum Mode: Sendable, Hashable { case contains, exact, prefix, suffix, tag }
+        public enum Mode: Sendable, Hashable { case contains, exact, prefix, suffix, tag, notTag }
         public var text: String
         public var mode: Mode
         public init(text: String, mode: Mode) {
@@ -43,7 +43,9 @@ public struct SearchText: Sendable, Hashable {
             chars = chars[end...]
             if word.hasPrefix("#") {
                 word.removeFirst()
-                if !word.isEmpty { terms.append(Term(text: word, mode: .tag)) }
+                var mode = Term.Mode.tag
+                if word.hasPrefix("!") { word.removeFirst(); mode = .notTag }
+                if !word.isEmpty { terms.append(Term(text: word, mode: mode)) }
                 continue
             }
             let lead = word.hasPrefix("*"), trail = word.hasSuffix("*")
@@ -101,7 +103,26 @@ public struct SearchText: Sendable, Hashable {
                     .replacingOccurrences(of: "_", with: "\\_")
                 clauses.append("lower(faces.full_name) LIKE '%' || ? ESCAPE '\\'")
                 bindings.append(.text(escaped))
-            case .contains, .prefix, .tag: break
+            case .tag, .notTag:
+                // Matches the tag's name or full `Parent/Child` path (and its descendants' faces), or a style title.
+                var matches = """
+                    faces.id IN (SELECT face_id FROM face_tags WHERE tag_id IN (
+                      WITH RECURSIVE p(id, name, path) AS (
+                        SELECT id, name, name FROM tags WHERE parent_id IS NULL
+                        UNION ALL SELECT tags.id, tags.name, p.path || '/' || tags.name FROM tags JOIN p ON tags.parent_id = p.id),
+                      d(id) AS (
+                        SELECT id FROM p WHERE lower(name) = ? OR lower(path) = ?
+                        UNION SELECT tags.id FROM tags JOIN d ON tags.parent_id = d.id)
+                      SELECT id FROM d))
+                    """
+                bindings.append(.text(lowered))
+                bindings.append(.text(lowered))
+                if let style = StyleClass.browsable.first(where: { $0.title.lowercased() == lowered }) {
+                    matches += " OR faces.style_class = ?"
+                    bindings.append(.int(Int64(style.rawValue)))
+                }
+                clauses.append(t.mode == .tag ? "(\(matches))" : "NOT (\(matches))")
+            case .contains, .prefix: break
             }
         }
         return (clauses, bindings)

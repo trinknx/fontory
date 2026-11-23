@@ -7,6 +7,10 @@ public struct LibraryQuery: Sendable, Hashable {
         /// library fonts that are active nowhere.
         case all, system, user, activated, deactivated, offline, recentImport
         case location(id: Int64, subfolder: String?)
+        case untagged, quickCollection
+        case styleClass(StyleClass)
+        /// Union of picks; a plain pick includes descendants' faces, an inverted one means faces without it.
+        case tags([TagPick])
     }
 
     public enum Sort: Sendable, Hashable {
@@ -35,6 +39,15 @@ extension LibraryQuery {
     /// macOS's private faces (PostScript name starting with ".", e.g. ".SFNS-Regular") in system locations are never
     /// shown or counted. Shared with `FontStore.faceCountGroups`.
     static let publicFaceClause = "NOT (locations.kind = 2 AND substr(faces.postscript_name, 1, 1) = '.')"
+    /// Ids of the tag bound as `?` and all its descendants.
+    static let descendantsByID = "WITH RECURSIVE d(id) AS (SELECT ? UNION SELECT tags.id FROM tags JOIN d ON tags.parent_id = d.id) SELECT id FROM d"
+
+    /// The single place a smart-tag pick is compiled. Task 4 replaces this with the real rule compiler;
+    /// until then a smart rule matches nothing.
+    static func compileSmartRule(_ rule: SmartRule) -> (clause: String, bindings: [SQLValue]) {
+        ("0", [])
+    }
+
     private static let randomModulus: UInt64 = 1_000_003
 
     func sql(columns: String) -> (sql: String, bindings: [SQLValue]) {
@@ -60,6 +73,28 @@ extension LibraryQuery {
                 bindings.append(.text(subfolder))
                 bindings.append(.text(subfolder))
             }
+        case .untagged:
+            // Smart tags don't tag anything: only plain tags count.
+            clauses.append("NOT EXISTS (SELECT 1 FROM face_tags JOIN tags ON tags.id = face_tags.tag_id WHERE face_tags.face_id = faces.id AND tags.kind = 0)")
+        case .quickCollection: clauses.append("faces.id IN (SELECT face_id FROM quick_collection)")
+        case .styleClass(let c):
+            clauses.append("faces.style_class = ?")
+            bindings.append(.int(Int64(c.rawValue)))
+        case .tags(let picks):
+            var ors: [String] = []
+            for pick in picks {
+                var clause: String
+                if let rule = pick.rule {
+                    let compiled = Self.compileSmartRule(rule)
+                    clause = compiled.clause
+                    bindings += compiled.bindings
+                } else {
+                    clause = "faces.id IN (SELECT face_id FROM face_tags WHERE tag_id IN (\(Self.descendantsByID)))"
+                    bindings.append(.int(pick.tagID))
+                }
+                ors.append(pick.inverted ? "NOT (\(clause))" : "(\(clause))")
+            }
+            clauses.append(ors.isEmpty ? "0" : "(" + ors.joined(separator: " OR ") + ")")
         }
         // The System view itself ignores "show system fonts".
         if !includeSystem && scope != .system { clauses.append("locations.kind != 2") }

@@ -196,7 +196,7 @@ import Testing
         #expect(try names(store, "helv ital") == ["Helvetica Neue Italic"])
         #expect(try names(store, "zed") == ["Foo Italic"])
         #expect(try names(store, "zed", scope: [.family]).isEmpty)
-        #expect(try names(store, "#tag").count == 5)
+        #expect(try names(store, "#tag").isEmpty)  // no such tag: matches nothing (wave 2)
     }
 
     @Test func searchExactAndSuffix() throws {
