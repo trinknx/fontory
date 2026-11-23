@@ -212,8 +212,21 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
 
     func update(preview new: PreviewSettings) {
         guard new != preview else { return }
+        let sizeChanged = new.pointSizeOverride != preview.pointSizeOverride
         preview = new
         settingsChanged()
+        if sizeChanged, scrollView != nil { applyLayout(anchorPoint: nil) }
+    }
+
+    /// Tallest cell a fixed preview size may ask for.
+    static let maxOverrideItemHeight: CGFloat = 520
+
+    /// The zoom's item size, grown in height so a fixed preview size (the toolbar's size slider) fits.
+    private func fittedItemSize(_ size: CGSize) -> CGSize {
+        guard let points = preview.pointSizeOverride else { return size }
+        let previewHeight = (CGFloat(points) * 1.35).rounded(.up)
+        let needed = previewHeight + (size.height - FontGridItem.previewSize(itemSize: size).height)
+        return CGSize(width: size.width, height: min(Self.maxOverrideItemHeight, max(size.height, needed)))
     }
 
     func update(zoom new: Double) {
@@ -266,14 +279,15 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         let width = scrollView.contentView.bounds.width
         guard width > 0 else { return }
         let new = GridMetrics.compute(zoom: zoom, availableWidth: width, spacing: Self.spacing)
-        guard new != metrics else { return }
+        let itemSize = Self.flooredSize(fittedItemSize(new.itemSize))
+        guard new != metrics || itemSize != layout.itemSize else { return }
         let anchor = captureAnchor(at: anchorPoint)
         // Resizes and zoom bursts render once they settle (nothing visible yet, e.g. the first layout: no wait).
         if anchor != nil || gestureActive { suspendRendering() }
         metrics = new
         baseRequest = nil
         pipeline.cancelAll(lane: .browser)
-        layout.itemSize = Self.flooredSize(new.itemSize)
+        layout.itemSize = itemSize
         layout.invalidateLayout()
         if let anchor { restore(anchor) }
         reconfigureVisible()

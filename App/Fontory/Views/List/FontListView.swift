@@ -88,6 +88,16 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         (minRowHeight + (maxRowHeight - minRowHeight) * CGFloat(min(1, max(0, zoom)))).rounded()
     }
 
+    /// Tallest row a fixed preview size may ask for.
+    static let maxOverrideRowHeight: CGFloat = 480
+
+    /// The row height for the zoom, grown so a fixed preview size (the toolbar's size slider) fits.
+    static func rowHeight(zoom: Double, pointSizeOverride: Double?) -> CGFloat {
+        let base = rowHeight(zoom: zoom)
+        guard let size = pointSizeOverride else { return base }
+        return min(maxOverrideRowHeight, max(base, (CGFloat(size) / previewSizeRatio).rounded()))
+    }
+
     private let model: AppModel
     private let pipeline: PreviewPipeline
     private(set) var outlineView: FontOutlineView!
@@ -161,7 +171,7 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         ov.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         ov.indentationPerLevel = 14
         ov.autoresizesOutlineColumn = false
-        ov.rowHeight = Self.rowHeight(zoom: zoom)
+        ov.rowHeight = Self.rowHeight(zoom: zoom, pointSizeOverride: preview.pointSizeOverride)
 
         for column in ListColumn.allCases {
             let tc = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.rawValue))
@@ -249,8 +259,10 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
 
     func update(preview new: PreviewSettings) {
         guard new != preview else { return }
+        let sizeChanged = new.pointSizeOverride != preview.pointSizeOverride
         preview = new
         settingsChanged()
+        if sizeChanged, outlineView != nil { applyRowHeight(anchorPoint: nil) }
     }
 
     func update(zoom new: Double) {
@@ -434,7 +446,7 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
     // MARK: Zoom
 
     private func applyRowHeight(anchorPoint: CGPoint?) {
-        let height = Self.rowHeight(zoom: zoom)
+        let height = Self.rowHeight(zoom: zoom, pointSizeOverride: preview.pointSizeOverride)
         guard height != outlineView.rowHeight else { return }
         let anchor = captureAnchor(at: anchorPoint)
         if anchor != nil || gestureActive { suspendRendering() }
