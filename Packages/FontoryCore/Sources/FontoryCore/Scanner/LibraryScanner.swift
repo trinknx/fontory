@@ -35,6 +35,9 @@ public struct ScanProgress: Sendable, Equatable {
     public var movedActiveFiles: [MovedFile] = []
     /// URLs of removed files that had a face on or temporary; the caller unregisters them (`ActivationService.filesRemoved`).
     public var removedActiveFileURLs: [URL] = []
+    /// New files not indexed because an indexed file in another location has the same fingerprint
+    /// (`LibraryScanner.skipFingerprintDuplicates`).
+    public var skippedDuplicates = 0
 
     public init(locationID: Int64, phase: Phase, total: Int = 0, processed: Int = 0, failed: Int = 0, removedWithUserData: Int = 0,
                 unreadablePaths: [String] = [], unreadableCount: Int = 0, skippedRemovals: Int = 0) {
@@ -55,6 +58,11 @@ public struct ScanProgress: Sendable, Equatable {
 /// Data safety: index rows (and the activation and notes attached to them) are deleted only after the
 /// whole tree was enumerated without error, the listing is plausible, and the root still exists immediately
 /// before the removals run. Any doubt aborts the scan and removes nothing.
+///
+/// Exclusions (`FontStore.removeFromLibrary`): a file at an excluded relative path of the location is ignored as if it
+/// were not there (so an indexed file moved onto that path drops out of the index), and a new file whose fingerprint
+/// equals an excluded fingerprint of the location (an excluded file renamed or moved within it) is not indexed.
+/// Indexed files are still matched as moves first: an exact copy that was kept keeps its record when it is renamed.
 public actor LibraryScanner {
     private static let batchSize = 500
     private static let progressInterval: Duration = .milliseconds(100)
@@ -63,14 +71,19 @@ public actor LibraryScanner {
     private let rootURL: @Sendable (LocationRecord) -> URL?
     private let parallelism: Int
     private let onPhase: (@Sendable (ScanProgress.Phase) -> Void)?
+    /// When true, a new file whose fingerprint equals an indexed file in another location is not indexed (counted in
+    /// `ScanProgress.skippedDuplicates`). Such a file is fingerprinted again on every scan. Moves are not affected.
+    private let skipFingerprintDuplicates: Bool
     private var runs: [Int64: (token: UInt64, task: Task<Void, Never>)] = [:]
     private var nextToken: UInt64 = 0
 
     /// `onPhase` is a test hook, called synchronously on every phase transition (never throttled).
     public init(store: FontStore, rootURL: @escaping @Sendable (LocationRecord) -> URL?,
                 parallelism: Int = ProcessInfo.processInfo.activeProcessorCount,
+                skipFingerprintDuplicates: Bool = false,
                 onPhase: (@Sendable (ScanProgress.Phase) -> Void)? = nil) {
         self.store = store
+        self.skipFingerprintDuplicates = skipFingerprintDuplicates
         self.rootURL = rootURL
         self.parallelism = max(1, parallelism)
         self.onPhase = onPhase
@@ -166,9 +179,13 @@ public actor LibraryScanner {
             // A mounted-but-empty directory (e.g. a volume's mount point) must not wipe a populated index.
             if found.isEmpty && !indexed.isEmpty { throw Abort(reason: "root is empty but the index is not") }
 
+            // Excluded paths are not part of the listing (checked above on the full listing, so they still count as present).
+            let exclusions = try store.exclusions(locationID: locationID)
+            if !exclusions.paths.isEmpty { found.removeAll { exclusions.paths.contains($0.relativePath) } }
+
             var fingerprints: [String: String] = [:]
             var unfingerprintable: [String] = []
-            let diff = ScanDiff.compute(indexed: indexed, found: found) { file in
+            var diff = ScanDiff.compute(indexed: indexed, found: found) { file in
                 if let fp = try? Fingerprint.compute(url: file.url, size: file.size) {
                     fingerprints[file.relativePath] = fp
                     return fp
@@ -176,6 +193,24 @@ public actor LibraryScanner {
                 unfingerprintable.append(file.relativePath)
                 return "unreadable:\(file.relativePath)"  // never equals a real fingerprint
             }
+
+            // New files: skip excluded fingerprints and, when asked, fingerprints indexed in another location.
+            if !diff.added.isEmpty && (!exclusions.fingerprints.isEmpty || skipFingerprintDuplicates) {
+                for file in diff.added where fingerprints[file.relativePath] == nil {
+                    // An unreadable file is left to the parser, which fails it.
+                    if let fp = try? Fingerprint.compute(url: file.url, size: file.size) { fingerprints[file.relativePath] = fp }
+                }
+                diff.added.removeAll { fingerprints[$0.relativePath].map(exclusions.fingerprints.contains) == true }
+                if skipFingerprintDuplicates {
+                    let elsewhere = try store.fingerprintsIndexed(diff.added.compactMap { fingerprints[$0.relativePath] }, outside: locationID)
+                    let before = diff.added.count
+                    diff.added.removeAll { fingerprints[$0.relativePath].map(elsewhere.contains) == true }
+                    progress.skippedDuplicates = before - diff.added.count
+                }
+            }
+            try Self.checkNotCancelled()
+            // Changed content invalidates the full-file hash, even if the file then fails to parse.
+            try store.clearContentHashes(fileIDs: diff.changed.map(\.0.id))
 
             let jobs = diff.changed.map { Job(file: $0.1, record: $0.0, fingerprint: fingerprints[$0.1.relativePath]) }
                 + diff.added.map { Job(file: $0, record: nil, fingerprint: fingerprints[$0.relativePath]) }

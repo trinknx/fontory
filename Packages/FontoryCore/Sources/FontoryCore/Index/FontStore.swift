@@ -114,16 +114,22 @@ public final class FontStore: Sendable {
 
     public func files(in locationID: Int64) throws -> [FileRecord] {
         try database.withLock {
-            let s = try database.prepare("SELECT id, location_id, relative_path, size, mtime, format, fingerprint FROM files WHERE location_id = ? ORDER BY relative_path")
+            let s = try database.prepare("SELECT \(Self.fileColumns) FROM files WHERE location_id = ? ORDER BY relative_path")
             defer { s.reset() }
             try s.bind([.int(locationID)])
             var out: [FileRecord] = []
-            while try s.step() {
-                out.append(FileRecord(id: s.int64(0), locationID: s.int64(1), relativePath: s.text(2), size: s.int64(3),
-                                      mtime: Date(timeIntervalSince1970: s.double(4)), format: s.text(5), fingerprint: s.text(6)))
-            }
+            while try s.step() { out.append(Self.fileRecord(s)) }
             return out
         }
+    }
+
+    static let fileColumns = "id, location_id, relative_path, size, mtime, format, fingerprint, added_at"
+
+    static func fileRecord(_ s: Statement) -> FileRecord {
+        var record = FileRecord(id: s.int64(0), locationID: s.int64(1), relativePath: s.text(2), size: s.int64(3),
+                                mtime: Date(timeIntervalSince1970: s.double(4)), format: s.text(5), fingerprint: s.text(6))
+        record.addedAt = Date(timeIntervalSince1970: s.double(7))
+        return record
     }
 
     public func nextImportBatch() throws -> Int64 {
@@ -211,7 +217,8 @@ public final class FontStore: Sendable {
     public func replaceFaces(fileID: Int64, size: Int64, mtime: Date, fingerprint: String, faces: [ParsedFace]) throws {
         try database.withLock {
             try database.transaction {
-                let f = try database.prepare("UPDATE files SET size = ?, mtime = ?, fingerprint = ? WHERE id = ?")
+                // New content: its full-file hash (duplicates) is stale.
+                let f = try database.prepare("UPDATE files SET size = ?, mtime = ?, fingerprint = ?, content_hash = NULL WHERE id = ?")
                 defer { f.reset() }
                 try f.bind([.int(size), .double(mtime.timeIntervalSince1970), .text(fingerprint), .int(fileID)])
                 _ = try f.step()
@@ -259,9 +266,10 @@ public final class FontStore: Sendable {
         }
     }
 
+    /// A move is matched by fingerprint (head and tail only), so the content may differ: the full-file hash is dropped.
     public func moveFile(fileID: Int64, toRelativePath: String, mtime: Date) throws {
         try database.withLock {
-            let s = try database.prepare("UPDATE files SET relative_path = ?, mtime = ? WHERE id = ?")
+            let s = try database.prepare("UPDATE files SET relative_path = ?, mtime = ?, content_hash = NULL WHERE id = ?")
             defer { s.reset() }
             try s.bind([.text(toRelativePath), .double(mtime.timeIntervalSince1970), .int(fileID)])
             _ = try s.step()

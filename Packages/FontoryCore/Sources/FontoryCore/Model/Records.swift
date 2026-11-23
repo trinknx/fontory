@@ -46,6 +46,8 @@ public struct FileRecord: Sendable, Hashable {
     public var mtime: Date
     public var format: String
     public var fingerprint: String
+    /// When the file was first indexed. Filled by `FontStore.files(in:)` and `fileRecords(ids:)`; ignored on insert.
+    public var addedAt: Date?
 
     public init(id: Int64 = 0, locationID: Int64, relativePath: String, size: Int64, mtime: Date, format: String, fingerprint: String) {
         self.id = id
