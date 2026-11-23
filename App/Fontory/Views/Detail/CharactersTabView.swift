@@ -41,9 +41,8 @@ struct CharactersTabView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             GlyphInspector(model: model, face: face, entry: selected)
-            Divider()
-            bottomBar
         }
+        .glassBottomBar { bottomBar }
         .task(id: LoadKey(faceID: faceID, glyphsVersion: model.glyphsVersion)) { await load() }
         .task(id: filterKey(faceID: loadedID)) { await applyFilter() }
         .onAppear { updateStyleNames() }

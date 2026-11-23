@@ -40,12 +40,9 @@ struct FeaturesTabView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
-            bottomBar
-        }
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .glassBottomBar { bottomBar }
         .task(id: LoadKey(faceID: faceID, rowsVersion: model.rowsVersion)) { await load() }
         .onChange(of: selection) { updateFeatures() }
         .onAppear { updateStyleNames() }

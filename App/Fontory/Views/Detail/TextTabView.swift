@@ -22,12 +22,9 @@ struct TextTabView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            specimen
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
-            bottomBar
-        }
+        specimen
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .glassBottomBar { bottomBar }
         .task(id: LoadKey(faceID: faceID, rowsVersion: model.rowsVersion)) { await load() }
         .onAppear { updateStyleNames() }
         .onReceive(NotificationCenter.default.publisher(for: AppModel.rowsLoadedNotification, object: model)) { _ in

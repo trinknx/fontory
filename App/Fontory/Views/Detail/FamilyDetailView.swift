@@ -17,11 +17,13 @@ struct FamilyDetailView: View {
             Divider()
             controlBar
             Divider()
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             if model.detailTab == .styles {
-                Divider()
-                bottomBar
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .glassBottomBar { bottomBar }
+            } else {
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -93,7 +95,7 @@ struct FamilyDetailView: View {
                 .monospacedDigit()
                 .padding(.horizontal, 9)
                 .padding(.vertical, 3)
-                .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                .glassBackground(in: Capsule(), fallback: Color.secondary.opacity(0.15))
                 .accessibilityLabel("\(detail.faceIDs.count) styles in this family")
             Spacer(minLength: 0)
             DetailTabBar(selection: $model.detailTab, disabled: disabledTabs)
@@ -198,7 +200,7 @@ private struct DetailTabBar: View {
             }
         }
         .padding(2)
-        .background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.1)))
+        .glassBackground(in: Capsule(), fallback: Color.secondary.opacity(0.1))
     }
 
     private func label(_ tab: DetailTab) -> some View {
@@ -208,7 +210,7 @@ private struct DetailTabBar: View {
             .padding(.vertical, 3)
             .background {
                 if selection == tab {
-                    RoundedRectangle(cornerRadius: 5).fill(Color(nsColor: .controlBackgroundColor)).shadow(radius: 0.5, y: 0.5)
+                    Capsule().fill(Color(nsColor: .controlBackgroundColor)).shadow(radius: 0.5, y: 0.5)
                 }
             }
             .contentShape(Rectangle())
