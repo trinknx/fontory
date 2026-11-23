@@ -13,6 +13,8 @@ struct FontListView: NSViewRepresentable {
     let selection: Set<Int64>
     /// Scope, search and sort: when they change, the next reload starts at the top.
     let query: LibraryQuery
+    /// The family page covers the list: it keeps its state but renders nothing and gives up the keyboard.
+    var isHidden = false
 
     func makeCoordinator() -> FontListController {
         FontListController(model: model)
@@ -30,6 +32,7 @@ struct FontListView: NSViewRepresentable {
         c.update(preview: preview)
         c.update(zoom: zoom)
         c.update(selection: selection)
+        c.update(hidden: isHidden)
     }
 }
 
@@ -120,6 +123,8 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
 
     private var baseRequest: PreviewRequest?
     private var renderSuspended = false
+    /// Covered by the family page: no renders are requested.
+    private var isHidden = false
     private var gestureActive = false
     private var resumeTask: Task<Void, Never>?
     private var prefetchScheduled = false
@@ -182,6 +187,8 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
 
         ov.dataSource = self
         ov.delegate = self
+        ov.target = self
+        ov.doubleAction = #selector(doubleClicked(_:))
         outlineView = ov
 
         let scroll = NSScrollView()
@@ -261,9 +268,34 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         applySelectionToOutline()
     }
 
+    func update(hidden new: Bool) {
+        guard new != isHidden else { return }
+        isHidden = new
+        scrollView.isHidden = new
+        if new {
+            pipeline.cancelAll(lane: .browser)
+        } else {
+            reconfigureVisible()
+            outlineView.window?.makeFirstResponder(outlineView)
+        }
+    }
+
+    /// A double-click on a row: the family page of its face (a family row: its representative).
+    @objc private func doubleClicked(_ sender: Any?) {
+        let row = outlineView.clickedRow
+        guard row >= 0, let id = faceID(for: outlineView.item(atRow: row)) else { return }
+        model.openFamilyDetail(faceID: id)
+    }
+
+    /// Return or ⌘↓: the family page of the first selected row.
+    func openFamilyOfSelection() {
+        guard let row = outlineView.selectedRowIndexes.first, let id = faceID(for: outlineView.item(atRow: row)) else { return }
+        model.openFamilyDetail(faceID: id)
+    }
+
     /// Preview settings or the backing scale changed: drop pending renders and re-render what is visible.
     func settingsChanged() {
-        pipeline.cancelAll()
+        pipeline.cancelAll(lane: .browser)
         baseRequest = nil
         reconfigureVisible()
     }
@@ -314,7 +346,7 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         for node in newNodes { for id in node.faceIDs { familyOfFace[id] = node } }
         lowercasedNames = newNodes.map { $0.name.lowercased() }
 
-        pipeline.cancelAll()
+        pipeline.cancelAll(lane: .browser)
         applyingSelection = true
         outlineView.reloadData()
         for key in expandedKeys { if let node = nodeByKey[key] { outlineView.expandItem(node) } }
@@ -406,7 +438,7 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         guard height != outlineView.rowHeight else { return }
         let anchor = captureAnchor(at: anchorPoint)
         if anchor != nil || gestureActive { suspendRendering() }
-        pipeline.cancelAll()
+        pipeline.cancelAll(lane: .browser)
         baseRequest = nil
         outlineView.rowHeight = height
         if let anchor { restore(anchor, row: anchor.row) }
@@ -430,7 +462,7 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
 
     private func previewColumnResized() {
         guard hasLoaded else { return }
-        pipeline.cancelAll()
+        pipeline.cancelAll(lane: .browser)
         baseRequest = nil
         suspendRendering()
         reconfigureVisible()
@@ -570,7 +602,7 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
             return
         }
         if !cell.hasImage { cell.show(image: pipeline.anyImage(forFace: id)) }
-        if !renderSuspended, let url = row.fileURL {
+        if !renderSuspended, !isHidden, let url = row.fileURL {
             pipeline.request(key, fileURL: url, faceIndex: row.faceIndex)
         }
     }

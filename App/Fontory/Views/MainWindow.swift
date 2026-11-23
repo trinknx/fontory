@@ -14,17 +14,25 @@ struct MainWindow: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 190, ideal: 240, max: 380)
         } detail: {
-            switch model.viewMode {
-            case .grid:
-                FontGridView(model: model, faceIDs: model.faceIDs, rowsVersion: model.rowsVersion,
-                             zoom: model.zoom[.grid] ?? AppModel.defaultZoom, preview: model.preview,
-                             selection: model.selection, query: model.query)
-            case .list:
-                FontListView(model: model, families: model.families, rowsVersion: model.rowsVersion,
-                             zoom: model.zoom[.list] ?? AppModel.defaultZoom, preview: model.preview,
-                             selection: model.selection, query: model.query)
+            // The browser stays alive (hidden) under the family page, so Back finds its scroll position and selection.
+            let browserHidden = model.detail != nil
+            ZStack {
+                switch model.viewMode {
+                case .grid:
+                    FontGridView(model: model, faceIDs: model.faceIDs, rowsVersion: model.rowsVersion,
+                                 zoom: model.zoom[.grid] ?? AppModel.defaultZoom, preview: model.preview,
+                                 selection: model.selection, query: model.query, isHidden: browserHidden)
+                case .list:
+                    FontListView(model: model, families: model.families, rowsVersion: model.rowsVersion,
+                                 zoom: model.zoom[.list] ?? AppModel.defaultZoom, preview: model.preview,
+                                 selection: model.selection, query: model.query, isHidden: browserHidden)
+                }
+                if let detail = model.detail {
+                    FamilyDetailView(model: model, detail: detail)
+                }
             }
         }
+        .navigationTitle(model.detail?.family ?? "Fontory")
         .background(BrowserWindowReader(model: model))
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search fonts")
         .toolbar { BrowserToolbar(model: model) }

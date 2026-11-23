@@ -16,6 +16,17 @@ final class PreviewPipeline {
         let autoSize: Bool
     }
 
+    /// Who asked for a render. Each lane keeps at most one pending render per face, so the family page's header,
+    /// its style rows and the (hidden) browser never cancel each other's renders of the same face.
+    enum Lane: Hashable, Sendable {
+        case browser, detailHeader, detailStyles
+    }
+
+    private struct OperationKey: Hashable {
+        let faceID: Int64
+        let lane: Lane
+    }
+
     /// Auto size: the ink height of the preview text as a fraction of the base point size.
     nonisolated static let autoSizeInkRatio: CGFloat = 0.72
 
@@ -28,7 +39,7 @@ final class PreviewPipeline {
     private let latestKeyByFace = LRUCache<Int64, Key>(limit: 4000)
     /// Ink height per point of size, per face and text. Linear in the point size, so measured once.
     private let inkPerPoint = LRUCache<InkKey, CGFloat>(limit: 4000)
-    private var operations: [Int64: RenderOperation] = [:]
+    private var operations: [OperationKey: RenderOperation] = [:]
     private var observers: [RenderObserver] = []
 
     private struct RenderObserver {
@@ -60,31 +71,39 @@ final class PreviewPipeline {
     }
 
     /// Renders `key` unless it is cached or already rendering. A pending render of another key for the same face
-    /// (an older size or text) is cancelled.
-    func request(_ key: Key, fileURL: URL, faceIndex: Int) {
+    /// in the same lane (an older size or text) is cancelled.
+    func request(_ key: Key, fileURL: URL, faceIndex: Int, lane: Lane = .browser) {
         if images[key] != nil { return }
-        if let existing = operations[key.faceID] {
+        let opKey = OperationKey(faceID: key.faceID, lane: lane)
+        if let existing = operations[opKey] {
             if existing.key == key, !existing.isCancelled { return }
             existing.cancel()
         }
         let op = RenderOperation(key: key, fileURL: fileURL, faceIndex: faceIndex, renderer: renderer, inkPerPoint: inkPerPoint)
         op.completion = { [weak self, weak op] image in
             guard let self, let op else { return }
-            if self.operations[key.faceID] === op { self.operations[key.faceID] = nil }
+            if self.operations[opKey] === op { self.operations[opKey] = nil }
             guard let image else { return }
             self.images.setValue(image, forKey: key, cost: image.bytesPerRow * image.height)
             self.latestKeyByFace[key.faceID] = key
             self.observers.removeAll { $0.owner == nil }
             for observer in self.observers { observer.handler(key, image) }
         }
-        operations[key.faceID] = op
+        operations[opKey] = op
         queue.addOperation(op)
     }
 
-    func cancel(faceID: Int64) {
-        operations.removeValue(forKey: faceID)?.cancel()
+    func cancel(faceID: Int64, lane: Lane = .browser) {
+        operations.removeValue(forKey: OperationKey(faceID: faceID, lane: lane))?.cancel()
     }
 
+    /// Cancels the pending renders of one lane.
+    func cancelAll(lane: Lane) {
+        for (key, op) in operations where key.lane == lane { op.cancel() }
+        operations = operations.filter { $0.key.lane != lane }
+    }
+
+    /// Cancels every pending render (a volume is about to be unmounted).
     func cancelAll() {
         for op in operations.values { op.cancel() }
         operations.removeAll()

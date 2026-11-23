@@ -243,6 +243,7 @@ final class FontOutlineView: NSOutlineView {
 
     override func keyDown(with event: NSEvent) {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.shift, .capsLock, .numericPad, .function])
+        if FamilyDetailKeys.opensFamily(event) { return controller?.openFamilyOfSelection() ?? () }
         guard mods.isEmpty, let chars = event.characters, !chars.isEmpty else { return super.keyDown(with: event) }
         if chars == " ", controller?.isTypeSelecting != true {
             controller?.toggleSelectionActivation()

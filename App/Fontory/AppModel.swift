@@ -8,6 +8,39 @@ enum ViewMode: String, CaseIterable, Sendable {
     case grid, list
 }
 
+/// The family page's tabs. Only Styles and Info exist yet; the others are shown disabled ("Coming soon").
+enum DetailTab: String, CaseIterable, Sendable {
+    case styles, characters, text, features, variables, info
+
+    var title: String {
+        switch self {
+        case .styles: "Styles"
+        case .characters: "Characters"
+        case .text: "Text"
+        case .features: "Features"
+        case .variables: "Variables"
+        case .info: "Info"
+        }
+    }
+
+    var isAvailable: Bool { self == .styles || self == .info }
+}
+
+/// How the family page lists styles: one big preview per style, or one compact line each.
+enum DetailLayout: String, CaseIterable, Sendable {
+    case rows, compact
+}
+
+/// The family page being shown in place of the browser.
+struct FamilyDetail: Equatable, Sendable {
+    /// The family as displayed (effective family name).
+    var family: String
+    /// Its faces in family order.
+    var faceIDs: [Int64]
+    /// The face the header previews and Info shows while no style is selected.
+    var representativeID: Int64
+}
+
 enum PreviewAlignment: String, CaseIterable, Sendable {
     case left, center, right
 
@@ -206,11 +239,14 @@ struct AlertItem: Identifiable {
 enum SettingsKey {
     static let keepRunningInMenuBar = "keepRunningInMenuBar"
     static let showSystemFonts = "showSystemFonts"
+    static let detailPointSize = "detail.pointSize"
+    static let detailLayout = "detail.layout"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
             keepRunningInMenuBar: true, showSystemFonts: true,
             "zoom.grid": 0.25, "zoom.list": 0.25,
+            detailPointSize: AppModel.defaultDetailPointSize, detailLayout: DetailLayout.rows.rawValue,
         ])
         // Activation is always restored at launch now; drop the old "restore on launch" switch.
         UserDefaults.standard.removeObject(forKey: "restoreOnLaunch")
@@ -235,6 +271,8 @@ final class AppModel {
     var query: LibraryQuery {
         didSet {
             guard query != oldValue else { return }
+            // Searching, choosing another view or sorting leaves the family page for the browser.
+            if detail != nil { closeFamilyDetail() }
             if query.includeSystem != oldValue.includeSystem {
                 UserDefaults.standard.set(query.includeSystem, forKey: SettingsKey.showSystemFonts)
                 refreshCounts()
@@ -247,6 +285,7 @@ final class AppModel {
     var viewMode: ViewMode = .grid {
         didSet {
             guard viewMode != oldValue else { return }
+            if detail != nil { closeFamilyDetail() }
             UserDefaults.standard.set(viewMode.rawValue, forKey: "viewMode")
             // Families are computed only for the list; drop them when it closes so a reopened list starts fresh.
             if viewMode == .list { scheduleRefresh(delay: .zero) } else { families = [] }
@@ -277,6 +316,25 @@ final class AppModel {
     private(set) var rowsVersion = 0
     var selection: Set<Int64> = []
 
+    // MARK: Family page
+
+    /// The family page shown in place of the browser; nil shows the browser (kept alive underneath, so its scroll
+    /// position and selection survive).
+    private(set) var detail: FamilyDetail?
+    var detailTab: DetailTab = .styles
+    /// Selected styles on the family page (independent of the browser's selection).
+    var detailSelection: Set<Int64> = []
+    var detailLayout: DetailLayout {
+        didSet { if detailLayout != oldValue { UserDefaults.standard.set(detailLayout.rawValue, forKey: SettingsKey.detailLayout) } }
+    }
+    /// Preview size of the family page's styles, in points (its own slider; persisted).
+    var detailPointSize: Double {
+        didSet { if detailPointSize != oldValue { UserDefaults.standard.set(detailPointSize, forKey: SettingsKey.detailPointSize) } }
+    }
+    nonisolated static let defaultDetailPointSize = 48.0
+    nonisolated static let detailPointSizeRange: ClosedRange<Double> = 8...200
+    @ObservationIgnored private var detailGeneration = 0
+
     // MARK: Locations
 
     private(set) var locations: [LocationRecord] = []
@@ -300,6 +358,8 @@ final class AppModel {
     @ObservationIgnored let previewPipeline: PreviewPipeline
     /// The main browser window, recorded by `MainWindow`; app-wide shortcuts act only while it is key.
     @ObservationIgnored weak var browserWindow: NSWindow?
+    /// The browser window is the key window (app-wide shortcuts act only then).
+    var browserIsKey: Bool { browserWindow != nil && NSApp.keyWindow === browserWindow }
     @ObservationIgnored private var indexByID: [Int64: Int] = [:]
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var refreshGeneration = 0
@@ -329,6 +389,9 @@ final class AppModel {
         zoom = [.grid: defaults.double(forKey: "zoom.grid"), .list: defaults.double(forKey: "zoom.list")]
         viewMode = defaults.string(forKey: "viewMode").flatMap(ViewMode.init(rawValue:)) ?? .grid
         preview = PreviewSettings.load(from: defaults)
+        detailLayout = defaults.string(forKey: SettingsKey.detailLayout).flatMap(DetailLayout.init(rawValue:)) ?? .rows
+        let size = defaults.double(forKey: SettingsKey.detailPointSize)
+        detailPointSize = Self.detailPointSizeRange.contains(size) ? size : Self.defaultDetailPointSize
     }
 
     // MARK: Startup
@@ -520,6 +583,8 @@ final class AppModel {
             if wantFamilies, families != self.families { self.families = families }
             let kept = selection.filter { index[$0] != nil }
             if kept.count != selection.count { selection = kept }
+            // Rescans and inventory changes may add or remove styles of the family shown.
+            if detail != nil { reloadDetail() }
         case .failure(let error):
             Self.log.error("query failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -1023,7 +1088,83 @@ final class AppModel {
             await runBackground({ try backend.store.setRepresentative(familyKey: key, faceID: id) },
                                 failureTitle: "The family representative could not be set")
             if viewMode == .list { scheduleRefresh(delay: .zero) }
+            // The family page's header previews the representative.
+            if detail != nil { reloadDetail() }
         }
+    }
+
+    // MARK: Family page
+
+    /// The face whose family "Show Family" opens: the first selected face in browser order.
+    var firstSelectedFace: Int64? {
+        selection.min { (indexByID[$0] ?? .max, $0) < (indexByID[$1] ?? .max, $1) }
+    }
+
+    /// Opens the family page of `faceID`'s family, with that face selected. The family's faces are read off the
+    /// main actor.
+    func openFamilyDetail(faceID: Int64) {
+        guard let backend else { return }
+        detailGeneration += 1
+        let generation = detailGeneration
+        let includeSystem = query.includeSystem
+        Task {
+            guard let row = await rowsForAction([faceID]).first else { return }
+            let name = row.family
+            let group = await runBackground { try backend.store.family(named: name, includeSystem: includeSystem) } ?? nil
+            guard generation == detailGeneration else { return }
+            let ids = group?.faceIDs ?? [faceID]
+            detail = FamilyDetail(family: group?.name ?? name, faceIDs: ids, representativeID: group?.representativeID ?? faceID)
+            detailTab = .styles
+            detailSelection = ids.contains(faceID) ? [faceID] : []
+            prefetchRows(ids)
+        }
+    }
+
+    /// ⌘I / ⌘↓ / Return: the family page of the selection; on the family page ⌘I shows Info.
+    func showFamilyDetailForSelection() {
+        if detail != nil {
+            detailTab = .info
+        } else if let id = firstSelectedFace {
+            openFamilyDetail(faceID: id)
+        }
+    }
+
+    /// Back to the browser, as it was.
+    func closeFamilyDetail() {
+        detailGeneration += 1
+        guard detail != nil else { return }
+        detail = nil
+        detailSelection = []
+        previewPipeline.cancelAll(lane: .detailHeader)
+        previewPipeline.cancelAll(lane: .detailStyles)
+    }
+
+    /// Re-reads the shown family's faces (after a refresh); leaves the page when none is left.
+    private func reloadDetail() {
+        guard let backend, let current = detail else { return }
+        let generation = detailGeneration
+        let includeSystem = query.includeSystem
+        Task {
+            let group = await runBackground { try backend.store.family(named: current.family, includeSystem: includeSystem) } ?? nil
+            guard generation == detailGeneration, detail == current else { return }
+            guard let group else { return closeFamilyDetail() }
+            let updated = FamilyDetail(family: group.name, faceIDs: group.faceIDs, representativeID: group.representativeID)
+            guard updated != current else { return }
+            detail = updated
+            let kept = detailSelection.filter(group.faceIDs.contains)
+            if kept != detailSelection { detailSelection = kept }
+            prefetchRows(group.faceIDs)
+        }
+    }
+
+    /// Everything the index knows about a face, read off the main actor.
+    func faceInfo(_ id: Int64) async -> FaceInfo? {
+        guard let backend else { return nil }
+        return await runBackground { try backend.store.faceInfo(id: id) } ?? nil
+    }
+
+    func revealFile(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     // MARK: Zoom
@@ -1035,11 +1176,21 @@ final class AppModel {
     @ObservationIgnored var zoomAnchorsOnPointer = false
 
     func adjustZoom(by delta: Double) {
+        if detail != nil {
+            // On the family page the zoom commands change its own preview size (8 pt per step).
+            let r = Self.detailPointSizeRange
+            detailPointSize = min(r.upperBound, max(r.lowerBound, (detailPointSize + delta * 80).rounded()))
+            return
+        }
         let current = zoom[viewMode] ?? Self.defaultZoom
         setZoomFromCommand(min(1, max(0, ((current + delta) * 100).rounded() / 100)))
     }
 
     func resetZoom() {
+        if detail != nil {
+            detailPointSize = Self.defaultDetailPointSize
+            return
+        }
         setZoomFromCommand(Self.defaultZoom)
     }
 

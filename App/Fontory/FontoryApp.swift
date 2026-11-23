@@ -29,6 +29,11 @@ struct FontoryApp: App {
                 Button("Actual Size") { model.resetZoom() }
                     .keyboardShortcut("0")
                 Divider()
+                Button("Show Family") { if model.browserIsKey { model.showFamilyDetailForSelection() } }
+                    .keyboardShortcut("i")
+                Button("Back") { if model.browserIsKey { model.closeFamilyDetail() } }
+                    .keyboardShortcut("[")
+                Divider()
                 Button("Preview Options…") { model.isShowingPreviewOptions.toggle() }
                     .keyboardShortcut("p", modifiers: [.option, .command])
                 Divider()
@@ -65,13 +70,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // ⌘= zooms in like ⌘+ (which needs Shift on many layouts). A local monitor sees the key before the
         // menu and regardless of the first responder; it acts only in the main browser window.
+        // Esc leaves the family page from anywhere in it, except while a text field is being edited (the search
+        // field clears itself on Esc).
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let isZoomIn = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
-                && event.charactersIgnoringModifiers == "="
-            guard isZoomIn else { return event }
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let isZoomIn = mods == .command && event.charactersIgnoringModifiers == "="
+            let isEscape = event.keyCode == 53 && mods.subtracting([.function, .numericPad]).isEmpty
+            guard isZoomIn || isEscape else { return event }
             let handled = MainActor.assumeIsolated { () -> Bool in
                 guard let key = NSApp.keyWindow, key === self.model.browserWindow else { return false }
-                self.model.adjustZoom(by: 0.1)
+                if isEscape {
+                    guard self.model.detail != nil, !self.model.isShowingPreviewOptions,
+                          !(key.firstResponder is NSText) else { return false }
+                    self.model.closeFamilyDetail()
+                } else {
+                    self.model.adjustZoom(by: 0.1)
+                }
                 return true
             }
             return handled ? nil : event

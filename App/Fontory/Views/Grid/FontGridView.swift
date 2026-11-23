@@ -14,6 +14,8 @@ struct FontGridView: NSViewRepresentable {
     let selection: Set<Int64>
     /// Scope, search and sort: when they change, the next list reload starts at the top.
     let query: LibraryQuery
+    /// The family page covers the grid: it keeps its state but renders nothing and gives up the keyboard.
+    var isHidden = false
 
     func makeCoordinator() -> FontGridController {
         FontGridController(model: model)
@@ -31,6 +33,7 @@ struct FontGridView: NSViewRepresentable {
         c.update(preview: preview)
         c.update(zoom: zoom)
         c.update(selection: selection)
+        c.update(hidden: isHidden)
     }
 }
 
@@ -65,6 +68,8 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
 
     /// While true (zoom gesture or a burst of zoom/size changes) cells show cached images only.
     private var renderSuspended = false
+    /// Covered by the family page: no renders are requested.
+    private var isHidden = false
     private var gestureActive = false
     private var resumeTask: Task<Void, Never>?
 
@@ -159,7 +164,7 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         } else {
             // A new query starts at the top; otherwise (a rescan growing the list, say) keep the same face in place.
             let keep = queryChanged ? nil : captureAnchor(at: nil).map { (faceID: old[$0.indexPath.item], offset: $0.offset) }
-            pipeline.cancelAll()
+            pipeline.cancelAll(lane: .browser)
             faceIDs = new
             indexByID = index
             collectionView.reloadData()
@@ -227,9 +232,28 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         collectionView.selectionIndexPaths = Set(new.compactMap { indexByID[$0].map { IndexPath(item: $0, section: 0) } })
     }
 
+    func update(hidden new: Bool) {
+        guard new != isHidden else { return }
+        isHidden = new
+        scrollView.isHidden = new
+        if new {
+            pipeline.cancelAll(lane: .browser)
+        } else {
+            reconfigureVisible()
+            collectionView.window?.makeFirstResponder(collectionView)
+        }
+    }
+
+    /// A double-click (`point`): the family page of the face under it. Return or ⌘↓: that of the selection.
+    func openFamily(at point: CGPoint? = nil) {
+        guard let point else { return model.showFamilyDetailForSelection() }
+        guard let ip = collectionView.indexPathForItem(at: point), faceIDs.indices.contains(ip.item) else { return }
+        model.openFamilyDetail(faceID: faceIDs[ip.item])
+    }
+
     /// Preview settings or the backing scale changed: drop pending renders and re-render what is visible.
     func settingsChanged() {
-        pipeline.cancelAll()
+        pipeline.cancelAll(lane: .browser)
         baseRequest = nil
         reconfigureVisible()
     }
@@ -248,7 +272,7 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         if anchor != nil || gestureActive { suspendRendering() }
         metrics = new
         baseRequest = nil
-        pipeline.cancelAll()
+        pipeline.cancelAll(lane: .browser)
         layout.itemSize = Self.flooredSize(new.itemSize)
         layout.invalidateLayout()
         if let anchor { restore(anchor) }
@@ -365,13 +389,13 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
             return
         }
         if !item.hasImage { item.show(image: pipeline.anyImage(forFace: id)) }
-        if !renderSuspended, let url = row.fileURL {
+        if !renderSuspended, !isHidden, let url = row.fileURL {
             pipeline.request(key, fileURL: url, faceIndex: row.faceIndex)
         }
     }
 
     private func requestRender(at index: Int) {
-        guard !renderSuspended, faceIDs.indices.contains(index), let row = model.cachedRow(faceIDs[index]),
+        guard !renderSuspended, !isHidden, faceIDs.indices.contains(index), let row = model.cachedRow(faceIDs[index]),
               let url = row.fileURL else { return }
         pipeline.request(key(for: row), fileURL: url, faceIndex: row.faceIndex)
     }
@@ -555,6 +579,7 @@ final class FontCollectionView: NSCollectionView {
 
     override func keyDown(with event: NSEvent) {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.shift, .capsLock, .numericPad, .function])
+        if FamilyDetailKeys.opensFamily(event) { return controller?.openFamily() ?? () }
         guard mods.isEmpty, let chars = event.characters, !chars.isEmpty else { return super.keyDown(with: event) }
         if chars == " ", controller?.isTypeSelecting != true {
             controller?.toggleSelectionActivation()
@@ -567,6 +592,14 @@ final class FontCollectionView: NSCollectionView {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         controller?.contextMenu(at: convert(event.locationInWindow, from: nil))
+    }
+
+    /// A double-click on a face opens its family page (after the click has selected it).
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        if event.clickCount == 2 {
+            controller?.openFamily(at: convert(event.locationInWindow, from: nil))
+        }
     }
 
     override func viewDidChangeBackingProperties() {
