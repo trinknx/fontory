@@ -130,17 +130,50 @@ extension FontStore {
         }
     }
 
-    /// Which of `fingerprints` an indexed file outside `locationID` has.
-    public func fingerprintsIndexed(_ fingerprints: [String], outside locationID: Int64) throws -> Set<String> {
+    /// Which of `fingerprints` an indexed file outside `locationID` has. A match whose file is no longer at its path in an
+    /// online location does not count: it was moved away (to the location being scanned, say) and its own location's
+    /// next scan drops it. A file in an offline location counts (it is not checked). `fileExists` is a test seam.
+    public func fingerprintsIndexed(_ fingerprints: [String], outside locationID: Int64,
+                                    fileExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) throws -> Set<String> {
         guard !fingerprints.isEmpty else { return [] }
-        return try reader.withLock {
-            let s = try reader.prepare("SELECT 1 FROM files WHERE fingerprint = ? AND location_id != ? LIMIT 1")
+        // Read under the lock, check the disk after it.
+        let matches: [String: [(online: Bool, url: URL)]] = try reader.withLock {
+            let s = try reader.prepare("""
+            SELECT locations.online, locations.last_known_path, files.relative_path
+            FROM files JOIN locations ON locations.id = files.location_id
+            WHERE files.fingerprint = ? AND files.location_id != ?
+            """)
             defer { s.reset() }
-            var out = Set<String>()
+            var out: [String: [(online: Bool, url: URL)]] = [:]
             for fp in Set(fingerprints) {
                 s.reset()
                 try s.bind([.text(fp), .int(locationID)])
-                if try s.step() { out.insert(fp) }
+                while try s.step() {
+                    let base = URL(fileURLWithPath: s.text(1))
+                    let rel = s.text(2)
+                    out[fp, default: []].append((s.int64(0) != 0, rel.isEmpty ? base : base.appendingPathComponent(rel)))
+                }
+            }
+            return out
+        }
+        return Set(matches.compactMap { fp, files in files.contains { !$0.online || fileExists($0.url) } ? fp : nil })
+    }
+
+    /// Per file, the number of its faces with tags, a note or Quick Collection membership (activation not counted);
+    /// files without any are left out. Keep rule 1b and the Remove from Library confirmation.
+    public func userDataFaceCounts(fileIDs: [Int64]) throws -> [Int64: Int] {
+        guard !fileIDs.isEmpty else { return [:] }
+        return try reader.withLock {
+            let s = try reader.prepare("""
+            SELECT COUNT(*) FROM faces WHERE file_id = ? AND (note IS NOT NULL
+              OR EXISTS(SELECT 1 FROM face_tags WHERE face_id = faces.id) OR EXISTS(SELECT 1 FROM quick_collection WHERE face_id = faces.id))
+            """)
+            defer { s.reset() }
+            var out: [Int64: Int] = [:]
+            for id in Set(fileIDs) {
+                s.reset()
+                try s.bind([.int(id)])
+                if try s.step(), s.int64(0) > 0 { out[id] = Int(s.int64(0)) }
             }
             return out
         }
@@ -189,7 +222,7 @@ extension FontStore {
     }
 
     /// The exclusions of one location: excluded relative path -> the fingerprint the file had.
-    func exclusions(locationID: Int64) throws -> [String: String] {
+    public func exclusions(locationID: Int64) throws -> [String: String] {
         try reader.withLock {
             let s = try reader.prepare("SELECT relative_path, fingerprint FROM excluded_files WHERE location_id = ?")
             defer { s.reset() }

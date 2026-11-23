@@ -135,10 +135,10 @@ import Testing
     }
 
     /// The file ids removed from an exact group of the given (row, file) pairs.
-    private func removed(_ items: [(FaceRow, FileRecord)], policy: KeepPolicy = KeepPolicy()) -> Set<Int64> {
+    private func removed(_ items: [(FaceRow, FileRecord)], policy: KeepPolicy = KeepPolicy(), userData: Set<Int64> = []) -> Set<Int64> {
         let group = DuplicateGroup(id: "h", kind: .exact, faceIDs: items.map(\.0.id), fileIDs: items.map(\.1.id))
         return policy.filesToRemove(in: group, rows: Dictionary(uniqueKeysWithValues: items.map { ($0.0.id, $0.0) }),
-                                    files: Dictionary(uniqueKeysWithValues: items.map { ($0.1.id, $0.1) }))
+                                    files: Dictionary(uniqueKeysWithValues: items.map { ($0.1.id, $0.1) }), userDataFiles: userData)
     }
 
     @Test func keepPolicyOrder() {
@@ -177,6 +177,45 @@ import Testing
         ])
         #expect(protected == [3, 4])
         #expect(removed([(row(11, file: 1, kind: .system), file(1)), (row(12, file: 2, kind: .system), file(2))]).isEmpty)
+    }
+
+    @Test func userDataCopyIsKept() throws {
+        // 1b. A tagged .ttf is kept over an untagged .otf (format is rule 2).
+        let items = [(row(11, file: 1, format: "ttf"), file(1, format: "ttf")), (row(12, file: 2, format: "otf"), file(2, format: "otf"))]
+        #expect(removed(items) == [1])
+        #expect(removed(items, userData: [1]) == [2])
+        // Rule 1 (active) still comes first; both with user data falls through to format.
+        let active = [(row(11, file: 1, format: "ttf"), file(1, format: "ttf")),
+                      (row(12, file: 2, format: "woff", activation: .on), file(2, format: "woff"))]
+        #expect(removed(active, userData: [1]) == [1])
+        #expect(removed(items, userData: [1, 2]) == [1])
+
+        // The store's input: tags, notes and Quick Collection membership count; activation alone does not.
+        let store = try memoryStore()
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "A", displayName: "A", lastKnownPath: "/nowhere")
+        let tagged = try insertFake(store, loc.id, "tagged.ttf", ps: ["T"], format: "ttf")
+        let plain = try insertFake(store, loc.id, "plain.otf", ps: ["T"], format: "otf")
+        let noted = try insertFake(store, loc.id, "noted.otf", ps: ["N1", "N2"])
+        let collected = try insertFake(store, loc.id, "qc.otf", ps: ["Q"])
+        let active2 = try insertFake(store, loc.id, "active.otf", ps: ["A"])
+        func faces(_ file: Int64) throws -> [Int64] {
+            try store.database.withLock {
+                let s = try store.database.prepare("SELECT id FROM faces WHERE file_id = ? ORDER BY face_index")
+                defer { s.reset() }
+                try s.bind([.int(file)])
+                var out: [Int64] = []
+                while try s.step() { out.append(s.int64(0)) }
+                return out
+            }
+        }
+        let tag = try store.createTag(name: "Keep", parentID: nil)
+        try store.addTag(tag, toFaces: try faces(tagged))
+        let notedFaces = try faces(noted)
+        try store.setNote("mine", faceID: notedFaces[0])
+        try store.setNote("also", faceID: notedFaces[1])
+        try store.setQuickCollection(try faces(collected), included: true, at: Date())
+        try store.setActivation(faceIDs: try faces(active2), state: .on, at: Date())
+        #expect(try store.userDataFaceCounts(fileIDs: [tagged, plain, noted, collected, active2]) == [tagged: 1, noted: 2, collected: 1])
     }
 
     @Test func protectedCopyIsKept() {
@@ -438,6 +477,46 @@ import Testing
         #expect(try store2.files(in: m2.id).count == 3)
     }
 
+    @Test func moveBetweenLocationsWithSkipKeepsTheFont() async throws {
+        let t1 = try TempFonts(), t2 = try TempFonts(); defer { t1.cleanup(); t2.cleanup() }
+        try t1.copy(TempFonts.arialBold, as: "a.ttf")
+        let store = try memoryStore()
+        let l1 = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "A", displayName: "A", lastKnownPath: t1.root.path)
+        let l2 = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "B", displayName: "B", lastKnownPath: t2.root.path)
+        let roots = [l1.id: t1.root, l2.id: t2.root]
+        let scanner = LibraryScanner(store: store, rootURL: { roots[$0.id] }, skipFingerprintDuplicates: true)
+        _ = await scan(scanner, l1.id)
+        #expect(try store.files(in: l1.id).map(\.relativePath) == ["a.ttf"])
+        // Moved from A to B; A keeps a second font so its rescan is not an empty-root abort.
+        try t1.copy(TempFonts.sfns, as: "other.ttf")
+        try FileManager.default.moveItem(at: t1.root.appendingPathComponent("a.ttf"), to: t2.root.appendingPathComponent("a.ttf"))
+        var last = await scan(scanner, l2.id)
+        #expect(last?.phase == .done && last?.skippedDuplicates == 0)
+        last = await scan(scanner, l1.id)
+        #expect(last?.phase == .done)
+        #expect(try store.files(in: l2.id).map(\.relativePath) == ["a.ttf"])
+        #expect(try store.files(in: l1.id).map(\.relativePath) == ["other.ttf"])
+
+        // A copy still in place elsewhere is skipped; one in an offline location counts as in place (not checked).
+        try t1.copy(TempFonts.arialBold, as: "copy.ttf")
+        last = await scan(scanner, l1.id)
+        #expect(last?.skippedDuplicates == 1)
+        let fp = try #require(try store.files(in: l2.id).first?.fingerprint)
+        #expect(try store.fingerprintsIndexed([fp], outside: l1.id) == [fp])
+        #expect(try store.fingerprintsIndexed([fp], outside: l1.id, fileExists: { _ in false }).isEmpty)
+        try store.setLocationOnline(l2.id, online: false, lastKnownPath: nil)
+        #expect(try store.fingerprintsIndexed([fp], outside: l1.id, fileExists: { _ in false }) == [fp])
+    }
+
+    @Test func deleteFilesReturnsWhatItDeleted() throws {
+        let store = try memoryStore()
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "A", displayName: "A", lastKnownPath: "/nowhere")
+        let a = try insertFake(store, loc.id, "a.otf", ps: ["A"])
+        let b = try insertFake(store, loc.id, "b.otf", ps: ["B"])
+        #expect(try store.deleteFiles([a]) == [a])
+        #expect(try store.deleteFiles([a, b]) == [b])  // a was already gone (a concurrent scan, say)
+    }
+
     // MARK: Performance
 
     @Test func groupsFastAt20k() throws {
@@ -462,7 +541,6 @@ import Testing
         let finder = DuplicateFinder(store: store)
         var groups: [DuplicateGroup] = []
         let elapsed = try ContinuousClock().measure { groups = try finder.groups(includeSystem: true) }
-        print("groupsFastAt20k: \(groups.count) groups in \(elapsed)")
         #expect(groups.filter { $0.kind == .exact }.count == 5_000)
         #expect(groups.contains { $0.kind == .sameFont })
         #expect(elapsed < .milliseconds(500), "took \(elapsed)")

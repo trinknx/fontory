@@ -353,9 +353,7 @@ import Testing
         }
         for path in typical {
             guard let cost = perFace(path) else { continue }
-            print("FaceMetadata.read: \(cost) per face, \(URL(fileURLWithPath: path).lastPathComponent)")
             #expect(cost < .milliseconds(5), "\(path): \(cost)")
         }
-        if let sfns = perFace(TempFonts.sfns) { print("FaceMetadata.read: \(sfns) per face, SFNS.ttf (large variable font, not asserted)") }
     }
 }

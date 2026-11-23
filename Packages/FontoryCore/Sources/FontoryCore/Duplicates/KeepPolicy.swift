@@ -4,6 +4,8 @@ import Foundation
 /// user-installed location, or active outside Fontory) can never be removed, so it is preferred as the keeper.
 /// Then, in order:
 /// 1. the active copy (a face on or temporary in Fontory, or the file active outside Fontory);
+/// 1b. the copy whose faces have tags, a note or Quick Collection membership (`userDataFiles`), so auto-select never
+///     discards the user's organization;
 /// 2. format OTF > TTF > TTC/OTC > WOFF2 > WOFF > others;
 /// 3. the location the user ranks higher (`locationRank`, first is highest; unranked locations last);
 /// 4. the newer version (numeric parts of the version string; an unparsable or missing version compares lowest);
@@ -16,12 +18,16 @@ public struct KeepPolicy: Sendable, Hashable, Codable {
 
     /// Files to remove from an exact group: every file but the kept one, minus protected files.
     /// Same-font groups are never auto-selected (empty). `rows` holds at least one face per file of the group.
-    public func filesToRemove(in group: DuplicateGroup, rows: [Int64: FaceRow], files: [Int64: FileRecord]) -> Set<Int64> {
+    /// `userDataFiles`: the file ids whose faces have tags, a note or Quick Collection membership
+    /// (`FontStore.userDataFaceCounts`), read by the caller off the main thread.
+    public func filesToRemove(in group: DuplicateGroup, rows: [Int64: FaceRow], files: [Int64: FileRecord],
+                              userDataFiles: Set<Int64> = []) -> Set<Int64> {
         guard group.kind == .exact, group.fileIDs.count > 1 else { return [] }
         var facesByFile: [Int64: [FaceRow]] = [:]
         for row in rows.values { facesByFile[row.fileID, default: []].append(row) }
 
-        let candidates = group.fileIDs.map { id in Candidate(fileID: id, faces: facesByFile[id] ?? [], file: files[id], policy: self) }
+        let candidates = group.fileIDs.map { id in Candidate(fileID: id, faces: facesByFile[id] ?? [], file: files[id],
+                                                         hasUserData: userDataFiles.contains(id), policy: self) }
         guard let kept = candidates.min(by: { $0.isBetter(than: $1) }) else { return [] }
         return Set(candidates.filter { $0.fileID != kept.fileID && !$0.isProtected }.map(\.fileID))
     }
@@ -61,14 +67,16 @@ public struct KeepPolicy: Sendable, Hashable, Codable {
     private struct Candidate {
         var fileID: Int64
         var active: Bool
+        var hasUserData: Bool
         var isProtected: Bool
         var format: Int
         var location: Int
         var version: [Int]?
         var addedAt: Date
 
-        init(fileID: Int64, faces: [FaceRow], file: FileRecord?, policy: KeepPolicy) {
+        init(fileID: Int64, faces: [FaceRow], file: FileRecord?, hasUserData: Bool, policy: KeepPolicy) {
             self.fileID = fileID
+            self.hasUserData = hasUserData
             active = faces.contains { $0.activation != .off || $0.externalActive }
             isProtected = faces.contains { $0.locationKind.isReadOnly || $0.externalActive }
             format = KeepPolicy.formatRank(file?.format ?? faces.first?.format ?? "")
@@ -82,6 +90,7 @@ public struct KeepPolicy: Sendable, Hashable, Codable {
         func isBetter(than other: Candidate) -> Bool {
             if isProtected != other.isProtected { return isProtected }
             if active != other.active { return active }
+            if hasUserData != other.hasUserData { return hasUserData }
             if format != other.format { return format < other.format }
             if location != other.location { return location < other.location }
             if KeepPolicy.isNewer(version, than: other.version) { return true }

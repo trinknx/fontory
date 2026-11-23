@@ -276,15 +276,21 @@ public final class FontStore: Sendable {
         }
     }
 
-    public func deleteFiles(_ ids: [Int64]) throws {
+    /// Deletes the files (and their faces). Returns the ids of the rows actually deleted: a file already gone (deleted
+    /// by a concurrent scan, say) is left out.
+    @discardableResult
+    public func deleteFiles(_ ids: [Int64]) throws -> Set<Int64> {
         try database.withLock {
             try database.transaction {
+                var deleted = Set<Int64>()
                 for id in ids {
                     let s = try database.prepare("DELETE FROM files WHERE id = ?")
                     defer { s.reset() }
                     try s.bind([.int(id)])
                     _ = try s.step()
+                    if database.changes > 0 { deleted.insert(id) }
                 }
+                return deleted
             }
         }
     }
