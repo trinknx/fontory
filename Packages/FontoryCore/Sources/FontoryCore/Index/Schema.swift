@@ -1,0 +1,63 @@
+import Foundation
+
+public enum Schema {
+    public static let currentVersion: Int32 = 1
+
+    private static let steps: [(version: Int32, sql: String)] = [(1, v1)]
+
+    /// Runs each step whose version is greater than the database's `user_version`.
+    public static func migrate(_ db: Database) throws {
+        let s = try db.prepare("PRAGMA user_version")
+        guard try s.step() else { return }
+        let current = Int32(s.int64(0))
+        s.reset()
+        for step in steps where step.version > current {
+            try db.transaction {
+                try db.execute(step.sql)
+                try db.execute("PRAGMA user_version = \(step.version)")
+            }
+        }
+    }
+
+    private static let v1 = """
+    CREATE TABLE locations(id INTEGER PRIMARY KEY, kind INTEGER NOT NULL, -- 0 user folder, 1 user file-set, 2 system
+      volume_uuid TEXT NOT NULL, relative_path TEXT NOT NULL, display_name TEXT NOT NULL,
+      last_known_path TEXT NOT NULL, online INTEGER NOT NULL DEFAULT 1, last_scan REAL,
+      UNIQUE(volume_uuid, relative_path));
+    CREATE TABLE files(id INTEGER PRIMARY KEY, location_id INTEGER NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+      relative_path TEXT NOT NULL, size INTEGER NOT NULL, mtime REAL NOT NULL, format TEXT NOT NULL,
+      fingerprint TEXT NOT NULL, content_hash TEXT, added_at REAL NOT NULL, import_batch INTEGER NOT NULL,
+      UNIQUE(location_id, relative_path));
+    CREATE INDEX files_fp ON files(fingerprint);
+    CREATE TABLE faces(id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+      face_index INTEGER NOT NULL, postscript_name TEXT NOT NULL, family TEXT NOT NULL, style TEXT NOT NULL,
+      full_name TEXT NOT NULL, custom_family TEXT, weight REAL NOT NULL, width REAL NOT NULL, slant REAL NOT NULL,
+      is_italic INTEGER NOT NULL, is_variable INTEGER NOT NULL, axes_json TEXT, vendor TEXT, designer TEXT,
+      version TEXT, glyph_count INTEGER NOT NULL, scripts_bitmask INTEGER NOT NULL DEFAULT 0,
+      units_per_em INTEGER NOT NULL, ascender REAL NOT NULL, descender REAL NOT NULL, cap_height REAL NOT NULL,
+      x_height REAL NOT NULL, fs_type INTEGER, outline_type TEXT NOT NULL, -- truetype|cff|cff2|bitmap|unknown
+      is_color INTEGER NOT NULL, is_bitmap INTEGER NOT NULL, has_gsub INTEGER NOT NULL, has_gpos INTEGER NOT NULL,
+      activation INTEGER NOT NULL DEFAULT 0, -- 0 off, 1 on, 2 temp
+      last_activated REAL, note TEXT, UNIQUE(file_id, face_index));
+    CREATE INDEX faces_family ON faces(family COLLATE NOCASE, weight, width, slant);
+    CREATE INDEX faces_ps ON faces(postscript_name);
+    CREATE INDEX faces_activation ON faces(activation);
+    CREATE TABLE family_prefs(family_key TEXT PRIMARY KEY, representative_face_id INTEGER REFERENCES faces(id) ON DELETE SET NULL);
+    CREATE VIRTUAL TABLE faces_fts USING fts5(family, style, full_name, postscript_name, vendor, designer, note,
+      content='faces', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
+    CREATE TRIGGER faces_ai AFTER INSERT ON faces BEGIN
+      INSERT INTO faces_fts(rowid, family, style, full_name, postscript_name, vendor, designer, note)
+      VALUES (new.id, new.family, new.style, new.full_name, new.postscript_name, new.vendor, new.designer, new.note);
+    END;
+    CREATE TRIGGER faces_ad AFTER DELETE ON faces BEGIN
+      INSERT INTO faces_fts(faces_fts, rowid, family, style, full_name, postscript_name, vendor, designer, note)
+      VALUES ('delete', old.id, old.family, old.style, old.full_name, old.postscript_name, old.vendor, old.designer, old.note);
+    END;
+    CREATE TRIGGER faces_au AFTER UPDATE ON faces BEGIN
+      INSERT INTO faces_fts(faces_fts, rowid, family, style, full_name, postscript_name, vendor, designer, note)
+      VALUES ('delete', old.id, old.family, old.style, old.full_name, old.postscript_name, old.vendor, old.designer, old.note);
+      INSERT INTO faces_fts(rowid, family, style, full_name, postscript_name, vendor, designer, note)
+      VALUES (new.id, new.family, new.style, new.full_name, new.postscript_name, new.vendor, new.designer, new.note);
+    END;
+    """
+}
