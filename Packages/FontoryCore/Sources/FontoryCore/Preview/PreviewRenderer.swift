@@ -125,11 +125,12 @@ public final class PreviewRenderer: Sendable {
     private static let placeholder = "\u{25CC}"   // ◌ DOTTED CIRCLE
 
     /// Characters that never need a glyph of their own: C0/C1 controls and DEL, zero-width and directional
-    /// formatting characters, joiners, variation selectors.
-    private static func isIgnorable(_ scalar: Unicode.Scalar) -> Bool {
+    /// formatting characters (embeddings, overrides, isolates U+2066–2069, the Arabic letter mark U+061C), joiners,
+    /// variation selectors.
+    static func isIgnorable(_ scalar: Unicode.Scalar) -> Bool {
         let v = scalar.value
         return v < 0x20 || (0x7F...0x9F).contains(v) || (0x200B...0x200F).contains(v) || (0x202A...0x202E).contains(v)
-            || (0x2060...0x2064).contains(v) || (0xFE00...0xFE0F).contains(v) || (0xE0100...0xE01EF).contains(v)
+            || (0x2060...0x2069).contains(v) || v == 0x061C || (0xFE00...0xFE0F).contains(v) || (0xE0100...0xE01EF).contains(v)
             || v == 0xFEFF
     }
 

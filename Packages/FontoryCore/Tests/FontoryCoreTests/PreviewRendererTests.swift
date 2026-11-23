@@ -23,6 +23,15 @@ import Testing
         return false
     }
 
+    @Test func bidiControlsAreIgnorable() {
+        for v: UInt32 in [0x061C, 0x200E, 0x202A, 0x2066, 0x2067, 0x2068, 0x2069, 0xFE0F] {
+            #expect(PreviewRenderer.isIgnorable(Unicode.Scalar(v)!), "U+\(String(v, radix: 16))")
+        }
+        for c: Unicode.Scalar in ["A", "\u{0627}", "\u{2070}", "\u{25CC}"] {
+            #expect(!PreviewRenderer.isIgnorable(c))
+        }
+    }
+
     @Test func rendersNonBlankImage() throws {
         let t = try TempFonts(); defer { t.cleanup() }
         let url = try t.copy(TempFonts.arialBold)

@@ -274,6 +274,16 @@ import Testing
         for c in ["Ă", "Â", "Đ", "Ê", "Ô", "Ơ", "Ư", "Ấ", "Ầ", "Ẩ", "Ẫ", "Ậ", "Ế", "Ổ", "Ữ", "Ự", "ý", "Ÿ"] {
             #expect(PreviewSamples.accented.text.contains(c), "missing \(c)")
         }
+        // Vietnamese: every accented lowercase letter has its capital, and the reverse.
+        for c in ["ĩ", "ũ", "Ẳ", "Ẵ", "Ặ", "Ờ", "Ở", "Ỡ", "Ĩ", "Ũ", "Ạ", "Ả", "Ẹ", "Ẻ", "Ẽ", "Ỉ", "Ọ", "Ỏ", "Ụ", "Ủ", "Ỳ", "Ỵ", "Ỷ", "Ỹ"] {
+            #expect(PreviewSamples.accented.text.contains(c), "missing \(c)")
+        }
+        let vietnamese = PreviewSamples.accented.text.split(separator: " ").filter { $0.count == 1 }.map(String.init)
+            .filter { $0.unicodeScalars.contains { (0x1EA0...0x1EF9).contains($0.value) || [0x128, 0x129, 0x168, 0x169].contains($0.value) } }
+        for c in vietnamese {
+            #expect(PreviewSamples.accented.text.contains(c.uppercased()), "no capital for \(c)")
+            #expect(PreviewSamples.accented.text.contains(c.lowercased()), "no lowercase for \(c)")
+        }
         #expect(PreviewSamples.numbers.text.contains("0123456789"))
         #expect(PreviewSamples.currencies.text.contains("₫"))
     }

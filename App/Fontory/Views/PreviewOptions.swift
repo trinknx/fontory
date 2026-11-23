@@ -35,6 +35,9 @@ final class PreviewPopoverController: NSObject, NSPopoverDelegate {
     private static let log = Logger(subsystem: "local.fontory.app", category: "preview")
     weak var anchorView: NSView?
     private var popover: NSPopover?
+    /// The popover between its will-close and did-close notifications; a did-close of any other popover is ignored,
+    /// so the after-close action cannot run against a popover opened meanwhile.
+    private var closingPopover: NSPopover?
     private weak var model: AppModel?
     /// Event number of the mouse click that closed the popover. Mouse-down and mouse-up of one click share it.
     private var closingClick: Int?
@@ -79,11 +82,14 @@ final class PreviewPopoverController: NSObject, NSPopoverDelegate {
     func popoverWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSPopover, closing === popover else { return }
         popover = nil
+        closingPopover = closing
         closingClick = NSApp.currentEvent.flatMap { Self.isMouseClick($0) ? $0.eventNumber : nil }
         if model?.isShowingPreviewOptions == true { model?.isShowingPreviewOptions = false }
     }
 
     func popoverDidClose(_ notification: Notification) {
+        guard let closed = notification.object as? NSPopover, closed === closingPopover else { return }
+        closingPopover = nil
         guard let model, let action = model.afterPreviewOptionsClose else { return }
         model.afterPreviewOptionsClose = nil
         // Next turn of the run loop: never inside the close animation's CA commit.
