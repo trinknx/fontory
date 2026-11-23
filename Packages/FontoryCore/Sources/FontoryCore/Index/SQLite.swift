@@ -66,6 +66,11 @@ public final class Database: @unchecked Sendable {
         lock.withLock { sqlite3_last_insert_rowid(handle) }
     }
 
+    /// Rows changed by the most recent INSERT, UPDATE or DELETE on this connection.
+    public var changes: Int64 {
+        lock.withLock { Int64(sqlite3_changes(handle)) }
+    }
+
     fileprivate func error(_ rc: Int32) -> SQLiteError {
         SQLiteError(code: rc, message: String(cString: sqlite3_errmsg(handle)))
     }

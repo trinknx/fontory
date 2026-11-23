@@ -82,6 +82,31 @@ final class FakeRegistrar: FontRegistrar, @unchecked Sendable {
         #expect(rows[temp]?.activation == .off)
     }
 
+    @Test func restoreOnLaunchNeverRegistersLeftoverTemporaryFiles() async throws {
+        let f = try Fixture.make()
+        let fake = FakeRegistrar()
+        let svc = service(f, fake)
+        let temp = [f.faceIDs["Beta-Light"]!, f.faceIDs["Alpha-Italic"]!]
+        try f.store.setActivation(faceIDs: temp, state: .temporary, at: fixed)
+        let report = await svc.restoreOnLaunch()
+        #expect(fake.registerCalls.flatMap { $0 }.isEmpty)
+        #expect(Set(report.changedFaceIDs) == Set(temp))
+        #expect(try f.store.faceIDs(state: .temporary).isEmpty)
+        #expect(try f.store.faceIDs(state: .on).isEmpty)
+    }
+
+    @Test func activatingAFontActiveOutsideFontoryIsAConflict() async throws {
+        let f = try Fixture.make()
+        let fake = FakeRegistrar()
+        fake.available = ["Beta-Light"]
+        try f.store.setExternalActive(fileIDs: [f.fileIDs["Beta-Light.otf"]!], true)
+        let svc = service(f, fake)
+        let id = f.faceIDs["Beta-Light"]!
+        let report = await svc.set([id], to: .on)
+        #expect(report.conflicts == [id: "Beta-Light"])
+        #expect(fake.registerCalls.isEmpty)
+    }
+
     @Test func conflictIsReportedNotRegistered() async throws {
         let f = try Fixture.make()
         let fake = FakeRegistrar()

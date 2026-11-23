@@ -31,27 +31,31 @@ public final class FontStore: Sendable {
 
     // MARK: Locations
 
-    private static let locationColumns = "id, kind, volume_uuid, relative_path, display_name, last_known_path, online, last_scan"
+    private static let locationColumns = "id, kind, volume_uuid, relative_path, display_name, last_known_path, online, last_scan, auto_indexed"
 
     private func location(_ s: Statement) -> LocationRecord {
         LocationRecord(
             id: s.int64(0), kind: LocationKind(rawValue: Int(s.int64(1))) ?? .folder,
             volumeUUID: s.text(2), relativePath: s.text(3), displayName: s.text(4), lastKnownPath: s.text(5),
-            online: s.int64(6) != 0, lastScan: s.isNull(7) ? nil : Date(timeIntervalSince1970: s.double(7)))
+            online: s.int64(6) != 0, lastScan: s.isNull(7) ? nil : Date(timeIntervalSince1970: s.double(7)),
+            autoIndexed: s.int64(8) != 0)
     }
 
-    public func upsertLocation(kind: LocationKind, volumeUUID: String, relativePath: String, displayName: String, lastKnownPath: String) throws -> LocationRecord {
+    /// Inserts a location, or updates the one with the same volume reference (its kind and auto-indexed flag too).
+    public func upsertLocation(kind: LocationKind, volumeUUID: String, relativePath: String, displayName: String, lastKnownPath: String,
+                               autoIndexed: Bool = false) throws -> LocationRecord {
         try database.withLock {
             try database.transaction {
                 let up = try database.prepare("""
-                INSERT INTO locations(kind, volume_uuid, relative_path, display_name, last_known_path, online)
-                VALUES(?,?,?,?,?,1)
+                INSERT INTO locations(kind, volume_uuid, relative_path, display_name, last_known_path, online, auto_indexed)
+                VALUES(?,?,?,?,?,1,?)
                 ON CONFLICT(volume_uuid, relative_path) DO UPDATE SET
                   kind = excluded.kind, display_name = excluded.display_name,
-                  last_known_path = excluded.last_known_path, online = 1
+                  last_known_path = excluded.last_known_path, online = 1, auto_indexed = excluded.auto_indexed
                 """)
                 defer { up.reset() }
-                try up.bind([.int(Int64(kind.rawValue)), .text(volumeUUID), .text(relativePath), .text(displayName), .text(lastKnownPath)])
+                try up.bind([.int(Int64(kind.rawValue)), .text(volumeUUID), .text(relativePath), .text(displayName), .text(lastKnownPath),
+                             .int(autoIndexed ? 1 : 0)])
                 _ = try up.step()
                 let sel = try database.prepare("SELECT \(Self.locationColumns) FROM locations WHERE volume_uuid = ? AND relative_path = ?")
                 defer { sel.reset() }
@@ -426,7 +430,7 @@ public final class FontStore: Sendable {
                 SELECT faces.id, faces.file_id, faces.face_index, faces.postscript_name, \(LibraryQuery.effectiveFamily), faces.style,
                   faces.full_name, faces.weight, faces.is_variable, files.format, faces.vendor, faces.version, faces.glyph_count,
                   faces.activation, faces.last_activated, locations.online, locations.last_known_path, files.relative_path, locations.id,
-                  faces.scripts_bitmask
+                  faces.scripts_bitmask, files.external_active, locations.kind
                 FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
                 WHERE faces.id IN (\(marks))
                 """)
@@ -447,7 +451,8 @@ public final class FontStore: Sendable {
                         vendor: s.isNull(10) ? nil : s.text(10), version: s.isNull(11) ? nil : s.text(11),
                         glyphCount: Int(s.int64(12)), activation: ActivationState(rawValue: Int(s.int64(13))) ?? .off,
                         lastActivated: s.isNull(14) ? nil : Date(timeIntervalSince1970: s.double(14)),
-                        online: online, fileURL: url, locationID: s.int64(18), scriptsBitmask: s.int64(19))
+                        online: online, fileURL: url, locationID: s.int64(18), scriptsBitmask: s.int64(19),
+                        externalActive: s.int64(20) != 0, locationKind: LocationKind(rawValue: Int(s.int64(21))) ?? .folder)
                     out[row.id] = row
                 }
             }
@@ -457,6 +462,7 @@ public final class FontStore: Sendable {
 
     // MARK: Mutations
 
+    /// Activating also clears the file's external flag: a file Fontory registered is Fontory's own.
     public func setActivation(faceIDs: [Int64], state: ActivationState, at date: Date) throws {
         try database.withLock {
             try database.transaction {
@@ -467,7 +473,63 @@ public final class FontStore: Sendable {
                     try s.bind([.int(Int64(state.rawValue)), .double(date.timeIntervalSince1970), .int(id)])
                     _ = try s.step()
                 }
+                guard state != .off else { return }
+                let x = try database.prepare("UPDATE files SET external_active = 0 WHERE external_active != 0 AND id = (SELECT file_id FROM faces WHERE id = ?)")
+                defer { x.reset() }
+                for id in faceIDs {
+                    x.reset()
+                    try x.bind([.int(id)])
+                    _ = try x.step()
+                }
             }
+        }
+    }
+
+    // MARK: External activity
+
+    /// Sets or clears the "registered by someone other than Fontory" flag of files.
+    public func setExternalActive(fileIDs: [Int64], _ active: Bool) throws {
+        try database.withLock {
+            try database.transaction {
+                let s = try database.prepare("UPDATE files SET external_active = ? WHERE id = ?")
+                defer { s.reset() }
+                for id in fileIDs {
+                    s.reset()
+                    try s.bind([.int(active ? 1 : 0), .int(id)])
+                    _ = try s.step()
+                }
+            }
+        }
+    }
+
+    /// Every indexed file with what the inventory needs to match it against the registered fonts.
+    public func inventoryFiles() throws -> [InventoryFile] {
+        try reader.withLock {
+            let s = try reader.prepare("""
+            SELECT files.id, files.location_id, files.relative_path, files.external_active,
+              EXISTS(SELECT 1 FROM faces WHERE faces.file_id = files.id AND faces.activation != 0)
+            FROM files ORDER BY files.id
+            """)
+            defer { s.reset() }
+            var out: [InventoryFile] = []
+            while try s.step() {
+                out.append(InventoryFile(fileID: s.int64(0), locationID: s.int64(1), relativePath: s.text(2),
+                                         externalActive: s.int64(3) != 0, fontoryActive: s.int64(4) != 0))
+            }
+            return out
+        }
+    }
+
+    /// Deletes auto-indexed locations that hold no file any more. Returns how many were deleted.
+    @discardableResult
+    public func deleteEmptyAutoLocations() throws -> Int {
+        try database.withLock {
+            let s = try database.prepare("""
+            DELETE FROM locations WHERE auto_indexed != 0 AND NOT EXISTS (SELECT 1 FROM files WHERE files.location_id = locations.id)
+            """)
+            defer { s.reset() }
+            _ = try s.step()
+            return Int(database.changes)
         }
     }
 
@@ -528,9 +590,9 @@ public final class FontStore: Sendable {
         try reader.withLock {
             let s = try reader.prepare("""
             SELECT faces.activation, locations.online, files.location_id, locations.kind,
-              files.import_batch = (SELECT MAX(import_batch) FROM files), COUNT(*)
+              files.import_batch = (SELECT MAX(import_batch) FROM files), COUNT(*), files.external_active != 0
             FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
-            GROUP BY 1, 2, 3, 4, 5
+            GROUP BY 1, 2, 3, 4, 5, 7
             """)
             defer { s.reset() }
             var out: [FaceCountGroup] = []
@@ -538,7 +600,7 @@ public final class FontStore: Sendable {
                 out.append(FaceCountGroup(
                     activation: ActivationState(rawValue: Int(s.int64(0))) ?? .off, online: s.int64(1) != 0,
                     locationID: s.int64(2), kind: LocationKind(rawValue: Int(s.int64(3))) ?? .folder,
-                    inLatestImport: s.int64(4) != 0, count: Int(s.int64(5))))
+                    inLatestImport: s.int64(4) != 0, count: Int(s.int64(5)), externalActive: s.int64(6) != 0))
             }
             return out
         }
@@ -552,4 +614,15 @@ public struct FaceCountGroup: Sendable, Hashable {
     public var kind: LocationKind
     public var inLatestImport: Bool
     public var count: Int
+    public var externalActive: Bool = false
+}
+
+/// An indexed file as `SystemFontInventory` sees it.
+public struct InventoryFile: Sendable, Hashable {
+    public var fileID: Int64
+    public var locationID: Int64
+    public var relativePath: String
+    public var externalActive: Bool
+    /// At least one face is on (or temporary) in Fontory: the file's registration is Fontory's own.
+    public var fontoryActive: Bool
 }

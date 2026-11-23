@@ -1,9 +1,9 @@
 import Foundation
 
 public enum Schema {
-    public static let currentVersion: Int32 = 1
+    public static let currentVersion: Int32 = 2
 
-    private static let steps: [(version: Int32, sql: String)] = [(1, v1)]
+    private static let steps: [(version: Int32, sql: String)] = [(1, v1), (2, v2)]
 
     /// Runs each step whose version is greater than the database's `user_version`.
     public static func migrate(_ db: Database) throws {
@@ -19,8 +19,19 @@ public enum Schema {
         }
     }
 
-    private static let v1 = """
-    CREATE TABLE locations(id INTEGER PRIMARY KEY, kind INTEGER NOT NULL, -- 0 user folder, 1 user file-set, 2 system
+    /// Activation views follow the Mac's real state. Locations: kind 3 (user-installed, read-only) for every
+    /// former system location outside /System, plus `auto_indexed` for folders the inventory indexes on its own.
+    /// Files: `external_active`, set while someone other than Fontory has the file registered.
+    static let v2 = """
+    ALTER TABLE locations ADD COLUMN auto_indexed INTEGER NOT NULL DEFAULT 0;
+    UPDATE locations SET kind = 3
+      WHERE kind = 2 AND last_known_path != '/System' AND substr(last_known_path, 1, 8) != '/System/';
+    ALTER TABLE files ADD COLUMN external_active INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX files_external ON files(external_active) WHERE external_active != 0;
+    """
+
+    static let v1 = """
+    CREATE TABLE locations(id INTEGER PRIMARY KEY, kind INTEGER NOT NULL, -- 0 user folder, 1 user file-set, 2 system (3 user-installed: v2)
       volume_uuid TEXT NOT NULL, relative_path TEXT NOT NULL, display_name TEXT NOT NULL,
       last_known_path TEXT NOT NULL, online INTEGER NOT NULL DEFAULT 1, last_scan REAL,
       UNIQUE(volume_uuid, relative_path));

@@ -47,4 +47,36 @@ import Testing
         try db.execute("DELETE FROM faces WHERE id=7")
         #expect(try match("helv*").isEmpty)
     }
+
+    @Test func v2MigrationReclassifiesUserFontFoldersAndAddsFlags() throws {
+        let db = try Database(path: ":memory:")
+        try db.execute(Schema.v1)
+        try db.execute("PRAGMA user_version = 1")
+        try db.execute("""
+        INSERT INTO locations(id,kind,volume_uuid,relative_path,display_name,last_known_path) VALUES
+          (1,2,'v','System/Library/Fonts','System Fonts','/System/Library/Fonts'),
+          (2,2,'v','Library/Fonts','Computer Fonts','/Library/Fonts'),
+          (3,2,'v','Users/me/Library/Fonts','User Fonts','/Users/me/Library/Fonts'),
+          (4,0,'w','Type','Type','/Volumes/W/Type')
+        """)
+        try db.execute("INSERT INTO files(id,location_id,relative_path,size,mtime,format,fingerprint,added_at,import_batch) VALUES(1,2,'a.otf',1,0,'otf','fp',0,1)")
+        try Schema.migrate(db)
+
+        let v = try db.prepare("PRAGMA user_version")
+        #expect(try v.step())
+        #expect(v.int64(0) == 2)
+        v.reset()
+        let s = try db.prepare("SELECT id, kind, auto_indexed FROM locations ORDER BY id")
+        var kinds: [Int64: Int64] = [:]
+        while try s.step() {
+            kinds[s.int64(0)] = s.int64(1)
+            #expect(s.int64(2) == 0)
+        }
+        s.reset()
+        #expect(kinds == [1: 2, 2: 3, 3: 3, 4: 0])
+        let fl = try db.prepare("SELECT external_active FROM files WHERE id = 1")
+        #expect(try fl.step())
+        #expect(fl.int64(0) == 0)
+        fl.reset()
+    }
 }

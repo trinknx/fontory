@@ -246,4 +246,76 @@ import Testing
         #expect(rows.count == 1 && rows[id]?.postScriptName == "Alpha-Bold")
         #expect(try f.store.rows(ids: []).isEmpty)
     }
+
+    /// Fixture plus: a system font, a font in ~/Library/Fonts (user-installed, active), a library file registered
+    /// by another app, a Fontory-activated face and an offline location.
+    func scopeFixture() throws -> Fixture {
+        var f = try Fixture.make()
+        let sys = try f.store.upsertLocation(kind: .system, volumeUUID: "SYS", relativePath: "System/Library/Fonts", displayName: "System Fonts", lastKnownPath: "/System/Library/Fonts")
+        let usr = try f.store.upsertLocation(kind: .userInstalled, volumeUUID: "SYS", relativePath: "Users/me/Library/Fonts", displayName: "User Fonts", lastKnownPath: "/Users/me/Library/Fonts")
+        let off = try f.store.upsertLocation(kind: .folder, volumeUUID: "VOL-D", relativePath: "Gone", displayName: "Gone", lastKnownPath: "/Volumes/D/Gone")
+        try f.add(sys.id, "Sys.ttf", [Fixture.face("Sys", family: "Sys", style: "Regular", weight: 400)], 0)
+        try f.add(usr.id, "Usr.ttf", [Fixture.face("Usr", family: "Usr", style: "Regular", weight: 400)], 0)
+        try f.add(usr.id, "UsrDisabled.ttf", [Fixture.face("UsrDisabled", family: "Usr", style: "Bold", weight: 700)], 0)
+        try f.add(off.id, "Off.ttf", [Fixture.face("Off", family: "Off", style: "Regular", weight: 400)], 0)
+        try f.store.setLocationOnline(off.id, online: false, lastKnownPath: nil)
+        try f.store.setExternalActive(fileIDs: [f.fileIDs["Usr.ttf"]!, f.fileIDs["Beta-Light.otf"]!], true)
+        try f.store.setActivation(faceIDs: [f.faceIDs["Alpha-Bold"]!], state: .on, at: Date())
+        return f
+    }
+
+    func names(_ f: Fixture, _ q: LibraryQuery) throws -> Set<String> {
+        Set(try f.store.rows(ids: try f.store.faceIDs(for: q)).values.map(\.postScriptName))
+    }
+
+    @Test func activationScopesFollowSystemUserAndFontoryState() throws {
+        let f = try scopeFixture()
+        #expect(try names(f, LibraryQuery(scope: .system)) == ["Sys"])
+        #expect(try names(f, LibraryQuery(scope: .user)) == ["Usr", "Beta-Light"])
+        #expect(try names(f, LibraryQuery(scope: .activated)) == ["Sys", "Usr", "Beta-Light", "Alpha-Bold"])
+        #expect(try names(f, LibraryQuery(scope: .deactivated)) == ["Alpha-Regular", "Alpha-Italic", "Beta-Regular", "Beta-Black", "Off"])
+        // Hiding system fonts hides them everywhere but in the System view itself.
+        #expect(try names(f, LibraryQuery(scope: .activated, includeSystem: false)) == ["Usr", "Beta-Light", "Alpha-Bold"])
+        #expect(try names(f, LibraryQuery(scope: .system, includeSystem: false)) == ["Sys"])
+
+        let rows = try f.store.rows(ids: try f.store.faceIDs(for: LibraryQuery()))
+        let status = Dictionary(uniqueKeysWithValues: rows.values.map { ($0.postScriptName, $0.activationStatus) })
+        #expect(status["Sys"] == .system)
+        #expect(status["Usr"] == .external)
+        #expect(status["UsrDisabled"] == .external)  // installed outside Fontory: read-only even when not active
+        #expect(status["Beta-Light"] == .external)
+        #expect(status["Alpha-Bold"] == .on)
+        #expect(status["Alpha-Regular"] == .off)
+        let readOnly = Set(rows.values.filter(\.isActivationReadOnly).map(\.postScriptName))
+        #expect(readOnly == ["Sys", "Usr", "UsrDisabled", "Beta-Light"])
+    }
+
+    @Test func countsMatchScopeQueries() throws {
+        let f = try scopeFixture()
+        for includeSystem in [true, false] {
+            let c = LibraryCounts(groups: try f.store.faceCountGroups(), includeSystem: includeSystem)
+            func n(_ scope: LibraryQuery.Scope) throws -> Int {
+                try f.store.faceIDs(for: LibraryQuery(scope: scope, includeSystem: includeSystem)).count
+            }
+            #expect(c.all == (try n(.all)))
+            #expect(c.system == (try n(.system)))
+            #expect(c.user == (try n(.user)))
+            #expect(c.activated == (try n(.activated)))
+            #expect(c.deactivated == (try n(.deactivated)))
+            #expect(c.offline == (try n(.offline)))
+            #expect(c.lastImport == (try n(.recentImport)))
+            #expect(c.fontoryActive == 1)
+        }
+        let c = LibraryCounts(groups: try f.store.faceCountGroups(), includeSystem: true)
+        #expect(c.all == 10 && c.system == 1 && c.user == 2 && c.activated == 4 && c.deactivated == 5)
+    }
+
+    @Test func activatingInFontoryClearsTheExternalFlag() throws {
+        let f = try Fixture.make()
+        let id = f.faceIDs["Beta-Light"]!
+        try f.store.setExternalActive(fileIDs: [f.fileIDs["Beta-Light.otf"]!], true)
+        #expect(try f.store.rows(ids: [id])[id]?.externalActive == true)
+        try f.store.setActivation(faceIDs: [id], state: .on, at: Date())
+        #expect(try f.store.rows(ids: [id])[id]?.externalActive == false)
+    }
 }

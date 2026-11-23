@@ -1,6 +1,13 @@
 import Foundation
 
-public enum LocationKind: Int, Sendable { case folder = 0, fileSet = 1, system = 2 }
+/// `system`: under /System (ships with macOS). `userInstalled`: active outside Fontory, e.g. /Library/Fonts,
+/// ~/Library/Fonts, or a folder indexed only because a font in it is active. Both are read-only in Fontory.
+public enum LocationKind: Int, Sendable {
+    case folder = 0, fileSet = 1, system = 2, userInstalled = 3
+
+    /// Fontory never changes the activation of fonts in read-only locations.
+    public var isReadOnly: Bool { self == .system || self == .userInstalled }
+}
 public enum ActivationState: Int, Sendable, Hashable { case off = 0, on = 1, temporary = 2 }
 public enum OutlineType: String, Sendable { case truetype, cff, cff2, bitmap, unknown }
 
@@ -13,9 +20,13 @@ public struct LocationRecord: Sendable, Identifiable, Hashable {
     public var lastKnownPath: String
     public var online: Bool
     public var lastScan: Date?
+    /// Created by `SystemFontInventory` for fonts active outside every location. It holds only the files that are
+    /// active; the inventory adds and removes them. Not listed among the user's locations.
+    public var autoIndexed: Bool
 
     public init(id: Int64, kind: LocationKind, volumeUUID: String, relativePath: String, displayName: String,
-                lastKnownPath: String, online: Bool, lastScan: Date? = nil) {
+                lastKnownPath: String, online: Bool, lastScan: Date? = nil, autoIndexed: Bool = false) {
+        self.autoIndexed = autoIndexed
         self.id = id
         self.kind = kind
         self.volumeUUID = volumeUUID
@@ -146,11 +157,16 @@ public struct FaceRow: Sendable, Identifiable, Hashable {
     public var locationID: Int64
     /// Bit i set when the face covers `ScriptCoverage.scripts[i]` (bit 0 is Latin).
     public var scriptsBitmask: Int64
+    /// The file is registered on the Mac by someone other than Fontory (see `SystemFontInventory`).
+    public var externalActive: Bool
+    public var locationKind: LocationKind
 
     public init(id: Int64, fileID: Int64, faceIndex: Int, postScriptName: String, family: String, style: String,
                 fullName: String, weight: Double, isVariable: Bool, format: String, vendor: String?, version: String?,
                 glyphCount: Int, activation: ActivationState, lastActivated: Date?, online: Bool, fileURL: URL?, locationID: Int64,
-                scriptsBitmask: Int64 = 0) {
+                scriptsBitmask: Int64 = 0, externalActive: Bool = false, locationKind: LocationKind = .folder) {
+        self.externalActive = externalActive
+        self.locationKind = locationKind
         self.id = id
         self.fileID = fileID
         self.faceIndex = faceIndex
@@ -170,6 +186,37 @@ public struct FaceRow: Sendable, Identifiable, Hashable {
         self.fileURL = fileURL
         self.locationID = locationID
         self.scriptsBitmask = scriptsBitmask
+    }
+}
+
+/// How a face's activation looks in the browser.
+public enum ActivationStatus: Sendable, Hashable {
+    /// Ships with macOS: always active, read-only.
+    case system
+    /// Installed or activated outside Fontory: read-only in Fontory.
+    case external
+    /// Activated by Fontory.
+    case on
+    case off
+}
+
+extension FaceRow {
+    public var activationStatus: ActivationStatus {
+        switch locationKind {
+        case .system: return .system
+        case .userInstalled: return .external
+        case .folder, .fileSet:
+            if activation != .off { return .on }
+            return externalActive ? .external : .off
+        }
+    }
+
+    /// Fontory does not toggle system fonts or fonts active outside it.
+    public var isActivationReadOnly: Bool {
+        switch activationStatus {
+        case .system, .external: return true
+        case .on, .off: return false
+        }
     }
 }
 
