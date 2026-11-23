@@ -368,7 +368,8 @@ private struct ConditionRow: View {
             menu(intBinding, StyleClass.browsable.map { (Int64($0.rawValue), $0.title) })
         case .tag:
             let tags = model.plainTagTree().map { ($0.tag.id, model.tagPath($0.tag.id)) }
-            menu(intBinding, tags, missing: "No tag")
+            menu(intBinding, tags, missing: "No tag",
+                 exactMissing: intBinding.wrappedValue == SmartRule.deletedID ? "Deleted Tag" : nil)
         case .format:
             menu(textBinding, SmartRuleSchema.formats.map { ($0, $0.uppercased()) })
         case .outline:
@@ -376,7 +377,8 @@ private struct ConditionRow: View {
         case .script:
             menu(intBinding, SmartRule.scriptNames.enumerated().map { (Int64($0.offset), $0.element) })
         case .location:
-            menu(intBinding, libraryLocations.map { ($0.id, $0.displayName) }, missing: "No location")
+            menu(intBinding, libraryLocations.map { ($0.id, $0.displayName) }, missing: "No location",
+                 exactMissing: intBinding.wrappedValue == SmartRule.deletedID ? "Removed Location" : nil)
         case .weight:
             StopRange(value: $condition.value, stops: SmartRuleSchema.weightStops)
         case .width:
@@ -402,12 +404,14 @@ private struct ConditionRow: View {
     }
 
     /// A popup over `items`; a value not among them (a deleted tag, an unknown format) shows as its own entry so
-    /// the row never silently changes.
-    private func menu<V: Hashable>(_ binding: Binding<V>, _ items: [(V, String)], missing: String = "Unknown") -> some View {
+    /// the row never silently changes. `exactMissing`, when set, is that entry's whole title (a deleted tag's
+    /// tombstone, `SmartRule.deletedID`).
+    private func menu<V: Hashable>(_ binding: Binding<V>, _ items: [(V, String)], missing: String = "Unknown",
+                                   exactMissing: String? = nil) -> some View {
         let known = items.contains { $0.0 == binding.wrappedValue }
         return Picker("Value", selection: binding) {
             if !known {
-                Text(items.isEmpty ? missing : "\(missing) (\(String(describing: binding.wrappedValue)))")
+                Text(exactMissing ?? (items.isEmpty ? missing : "\(missing) (\(String(describing: binding.wrappedValue)))"))
                     .tag(binding.wrappedValue)
             }
             ForEach(items.indices, id: \.self) { i in Text(items[i].1).tag(items[i].0) }

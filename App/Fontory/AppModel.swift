@@ -721,6 +721,7 @@ final class AppModel {
     func prepareForQuit() async {
         flushPreviewSave()
         await flushNotes()
+        await quickCollectionWriteChain?.value
         await stopStyleBackfill()
         await backend?.activation.prepareForQuit()
     }

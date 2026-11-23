@@ -427,6 +427,12 @@ extension AppModel {
     func moveTag(_ id: Int64, toParent parentID: Int64?) async {
         guard let current = tag(id), current.parentID != parentID, id != parentID else { return }
         if let parentID, tag(parentID)?.kind == .smart { return }  // smart tags take no subtags
+        // A smart tag nested under a plain one would be left out of the parent's view and count: smart tags stay
+        // at the top level.
+        if parentID != nil, current.kind == .smart {
+            alert = AlertItem(title: "The tag could not be moved", message: "Smart tags stay at the top level.")
+            return
+        }
         if await tagWrite("The tag could not be moved", { try $0.moveTag(id, toParent: parentID) }) != nil {
             if let parentID { expandedTagIDs.insert(parentID) }
             await afterTagChange()
