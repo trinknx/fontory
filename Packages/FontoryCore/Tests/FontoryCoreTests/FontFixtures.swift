@@ -6,6 +6,10 @@ struct TempFonts {
     static let avenirNext = "/System/Library/Fonts/Avenir Next.ttc"
     static let sfns = "/System/Library/Fonts/SFNS.ttf"
     static let emoji = "/System/Library/Fonts/Apple Color Emoji.ttc"
+    /// OpenType layout (GSUB/GPOS) with a named stylistic set (ss01 FeatureParams).
+    static let newYork = "/System/Library/Fonts/NewYork.ttf"
+    /// AAT (morx) only: no GSUB.
+    static let hoeflerText = "/System/Library/Fonts/Supplemental/Hoefler Text.ttc"
 
     let root: URL
 

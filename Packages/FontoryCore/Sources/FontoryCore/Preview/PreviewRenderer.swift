@@ -71,6 +71,8 @@ public final class PreviewRenderer: Sendable {
         let pointSize: CGFloat
         /// `PreviewFeatures.rawValue`, plus `allCapsBit` when small caps apply to capitals too.
         let features: Int
+        /// `PreviewRequest.featureSettings`.
+        let settings: [FontFeatureSetting]
     }
 
     private static let allCapsBit = 1 << 30
@@ -82,14 +84,15 @@ public final class PreviewRenderer: Sendable {
     /// How many sized font copies were created (cache misses). For tests.
     var sizedFontCreations: Int { sizedCreations.value }
 
-    private func sizedFont(_ url: URL, _ faceIndex: Int, pointSize: CGFloat, features: PreviewFeatures, allCaps: Bool) -> CTFont? {
+    private func sizedFont(_ url: URL, _ faceIndex: Int, pointSize: CGFloat, features: PreviewFeatures, allCaps: Bool,
+                           extra: [FontFeatureSetting] = []) -> CTFont? {
         let capsBit = features.contains(.smallCaps) && allCaps ? Self.allCapsBit : 0
         let key = SizedKey(face: FontKey(url: url, faceIndex: faceIndex), pointSize: pointSize,
-                           features: features.rawValue | capsBit)
+                           features: features.rawValue | capsBit, settings: extra)
         if let cached = sized[key] { return cached }
         guard let base = baseFont(url, faceIndex) else { return nil }
         sizedCreations.increment()
-        let settings = Self.featureSettings(features, allCaps: capsBit != 0)
+        let settings = Self.featureSettings(features, allCaps: capsBit != 0, extra: extra)
         let attributes = settings.isEmpty ? nil
             : CTFontDescriptorCreateWithAttributes([kCTFontFeatureSettingsAttribute: settings] as CFDictionary)
         let font = CTFontCreateCopyWithAttributes(base, pointSize, nil, attributes)
@@ -97,7 +100,16 @@ public final class PreviewRenderer: Sendable {
         return font
     }
 
-    /// `kCTFontFeatureSettingsAttribute` entries for the non-default features (empty for `.standard`).
+    /// `kCTFontFeatureSettingsAttribute` entries for the non-default features (empty for `.standard` without
+    /// `extra`); a tag in `extra` replaces the same tag from `features`.
+    static func featureSettings(_ features: PreviewFeatures, allCaps: Bool, extra: [FontFeatureSetting]) -> [[String: Any]] {
+        let base = featureSettings(features, allCaps: allCaps)
+        guard !extra.isEmpty else { return base }
+        let overridden = Set(extra.compactMap(\.openTypeTag))
+        return base.filter { !overridden.contains($0[kCTFontOpenTypeFeatureTag as String] as? String ?? "") }
+            + extra.map(\.attribute)
+    }
+
     static func featureSettings(_ features: PreviewFeatures, allCaps: Bool) -> [[String: Any]] {
         func tag(_ name: String, _ on: Bool) -> [String: Any] {
             [kCTFontOpenTypeFeatureTag as String: name, kCTFontOpenTypeFeatureValue as String: on ? 1 : 0]
@@ -214,7 +226,8 @@ public final class PreviewRenderer: Sendable {
 
     private func sizedFont(for request: PreviewRequest, _ url: URL, _ faceIndex: Int) -> CTFont? {
         sizedFont(url, faceIndex, pointSize: request.pointSize, features: request.features,
-                  allCaps: request.features.contains(.smallCaps) && Self.isAllCaps(request.text))
+                  allCaps: request.features.contains(.smallCaps) && Self.isAllCaps(request.text),
+                  extra: request.featureSettings)
     }
 
     /// The face at `pointSize` with the default features, from the shared font cache (nil when it cannot be loaded).
@@ -227,6 +240,11 @@ public final class PreviewRenderer: Sendable {
     /// Text tab's body text sets with it.
     public func font(fileURL: URL, faceIndex: Int, pointSize: CGFloat, features: PreviewFeatures) -> CTFont? {
         sizedFont(fileURL, faceIndex, pointSize: pointSize, features: features, allCaps: false)
+    }
+
+    /// The face at `pointSize` with exactly `settings` applied (the Features tab), from the shared font cache.
+    public func font(fileURL: URL, faceIndex: Int, pointSize: CGFloat, settings: [FontFeatureSetting]) -> CTFont? {
+        sizedFont(fileURL, faceIndex, pointSize: pointSize, features: .standard, allCaps: false, extra: settings)
     }
 
     /// The styled text of a request, as drawn. For tests.

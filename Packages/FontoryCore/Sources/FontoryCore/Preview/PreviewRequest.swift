@@ -37,6 +37,9 @@ public struct PreviewRequest: Sendable, Hashable {
     public var outline = false
     public var underline = false
     public var features: PreviewFeatures = .standard
+    /// Further feature settings (Features tab), applied after `features`; a tag set here overrides the same tag
+    /// from `features`.
+    public var featureSettings: [FontFeatureSetting] = []
     public var size: CGSize          // in points; pixel size = size * scale
     public var scale: CGFloat
     /// sRGB components, computed once when a color is set so == and hash never convert colors.
@@ -71,6 +74,7 @@ public struct PreviewRequest: Sendable, Hashable {
             && a.size == b.size && a.scale == b.scale
             && a.showGuides == b.showGuides && a.showMissingGlyphs == b.showMissingGlyphs
             && a.outline == b.outline && a.underline == b.underline && a.features == b.features
+            && a.featureSettings == b.featureSettings
     }
 
     public func hash(into h: inout Hasher) {
@@ -80,5 +84,6 @@ public struct PreviewRequest: Sendable, Hashable {
         h.combine(size.width); h.combine(size.height); h.combine(scale)
         h.combine(showGuides); h.combine(showMissingGlyphs); h.combine(outline); h.combine(underline)
         h.combine(features.rawValue)
+        h.combine(featureSettings)
     }
 }
