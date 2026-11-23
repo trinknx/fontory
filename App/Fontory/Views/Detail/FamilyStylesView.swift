@@ -410,7 +410,10 @@ final class StyleCellView: NSTableCellView {
         case .rows:
             let midY = Self.labelStrip / 2 + 1
             dot.frame = CGRect(x: inset - 2, y: midY - 9, width: 18, height: 18)
-            let nameWidth = min(nameLabel.intrinsicContentSize.width, max(40, b.width * 0.5))
+            // Measure the text itself: a truncating label's intrinsic size can reflect its old frame,
+            // which clipped names like "Regular" to "Regu…".
+            let measured = ceil(nameLabel.attributedStringValue.size().width) + 6
+            let nameWidth = min(measured, max(40, b.width * 0.5))
             nameLabel.frame = CGRect(x: inset + 20, y: midY - 9, width: nameWidth, height: 18)
             offlineBadge.frame = CGRect(x: nameLabel.frame.maxX + 4, y: midY - 8, width: offlineBadge.isHidden ? 0 : 16, height: 16)
             let detailX = offlineBadge.frame.maxX + 8
