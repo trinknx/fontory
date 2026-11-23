@@ -210,7 +210,7 @@ private struct StyleGroup: View {
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             ForEach(StyleClass.browsable, id: \.self) { style in
-                Label(style.title, systemImage: "textformat")
+                Label { Text(style.title) } icon: { StyleSampleIcon(style: style) }
                     .badge(model.organizationCounts.perStyle[style] ?? 0)
                     .tag(SidebarItem.scope(.styleClass(style)))
             }
@@ -218,6 +218,36 @@ private struct StyleGroup: View {
             Label("Style", systemImage: "textformat.alt")
         }
         .help("Classified automatically from each font’s design")
+    }
+}
+
+/// "Ag" drawn in a typical face of the class, so each Style row shows what the class looks like.
+/// Fonts that ship with macOS; a missing one falls back to the system font.
+private struct StyleSampleIcon: View {
+    let style: StyleClass
+
+    var body: some View {
+        if style == .symbol {
+            Image(systemName: "staroflife")
+        } else {
+            Text("Ag")
+                .font(font)
+                .lineLimit(1)
+                .fixedSize()
+                .accessibilityHidden(true)
+        }
+    }
+
+    private var font: Font {
+        switch style {
+        case .serif: .custom("Baskerville", size: 15, relativeTo: .body)
+        case .sans: .custom("Avenir Next", size: 13, relativeTo: .body).weight(.medium)
+        case .slab: .custom("Rockwell", size: 13, relativeTo: .body)
+        case .script: .custom("Snell Roundhand", size: 16, relativeTo: .body).weight(.semibold)
+        case .mono: .system(size: 12, weight: .medium, design: .monospaced)
+        case .display: .custom("Copperplate", size: 13, relativeTo: .body).weight(.bold)
+        case .symbol, .unknown: .body
+        }
     }
 }
 
