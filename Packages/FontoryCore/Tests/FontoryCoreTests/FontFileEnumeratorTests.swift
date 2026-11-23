@@ -42,9 +42,19 @@ import Testing
         #expect(files.first?.format == "ttf")
     }
 
-    @Test func nonexistentRootFinishesEmptyOrThrows() async throws {
+    @Test func nonexistentRootThrows() async throws {
         let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let files = (try? await collect(missing)) ?? []
-        #expect(files.isEmpty)
+        await #expect(throws: (any Error).self) { _ = try await collect(missing) }
+    }
+
+    @Test func rootThatIsAFileThrows() async throws {
+        let t = try TempFonts(); defer { t.cleanup() }
+        let file = try t.copy(TempFonts.arialBold)
+        await #expect(throws: (any Error).self) { _ = try await collect(file) }
+    }
+
+    @Test func emptyRootFinishesWithoutError() async throws {
+        let t = try TempFonts(); defer { t.cleanup() }
+        #expect(try await collect(t.root).isEmpty)
     }
 }

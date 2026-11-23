@@ -22,11 +22,17 @@ public enum FontFileEnumerator {
 
     /// Walks `root` recursively. Skips hidden files and packages, follows no symlinks.
     /// Files with a listed extension are included unsniffed; extension-less files only when their magic bytes match a font.
+    /// The stream finishes with an error when the root is missing, is not a directory, or (part of) the tree cannot be
+    /// enumerated: callers must never treat a partial listing as proof that files are gone.
     public static func enumerate(root: URL) -> AsyncThrowingStream<ScannedFile, Error> {
         AsyncThrowingStream { continuation in
             let task = Task.detached {
-                walk(root: root) { continuation.yield($0) }
-                continuation.finish()
+                do {
+                    try walk(root: root) { continuation.yield($0) }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
             }
             continuation.onTermination = { _ in task.cancel() }
         }
@@ -40,13 +46,24 @@ public enum FontFileEnumerator {
     }
 
     /// Synchronous walk (`NSDirectoryEnumerator` iteration is unavailable in async contexts).
-    private static func walk(root: URL, emit: (ScannedFile) -> Void) {
+    private static func walk(root: URL, emit: (ScannedFile) -> Void) throws {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) else {
+            throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: root.path])
+        }
+        guard isDirectory.boolValue else {
+            throw CocoaError(.fileReadUnknown, userInfo: [NSFilePathErrorKey: root.path, NSLocalizedDescriptionKey: "Not a directory"])
+        }
         let given = root
         let root = URL(fileURLWithPath: realPath(root.path), isDirectory: true)
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
+        let failure = FailureBox()
         guard let walker = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return }
+            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { _, error in failure.record(error); return false }) else {
+            throw CocoaError(.fileReadUnknown, userInfo: [NSFilePathErrorKey: root.path])
+        }
         // The enumerator may report either the given or the symlink-resolved form of the root (e.g. /var vs /private/var).
         let prefixes = [root.path, given.path].map { $0.hasSuffix("/") ? $0 : $0 + "/" }
         for case let url as URL in walker {
@@ -69,5 +86,13 @@ public enum FontFileEnumerator {
                 mtime: values.contentModificationDate ?? .distantPast,
                 format: format))
         }
+        if let error = failure.error { throw error }
+    }
+
+    private final class FailureBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var first: Error?
+        var error: Error? { lock.withLock { first } }
+        func record(_ error: Error) { lock.withLock { if first == nil { first = error } } }
     }
 }

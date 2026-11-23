@@ -54,6 +54,13 @@ public final class FontStore: Sendable {
         _ = try s.step()
     }
 
+    public func markScanned(_ id: Int64, at date: Date) throws {
+        let s = try database.prepare("UPDATE locations SET last_scan = ? WHERE id = ?")
+        defer { s.reset() }
+        try s.bind([.double(date.timeIntervalSince1970), .int(id)])
+        _ = try s.step()
+    }
+
     public func deleteLocation(_ id: Int64) throws {
         let s = try database.prepare("DELETE FROM locations WHERE id = ?")
         defer { s.reset() }
@@ -192,6 +199,18 @@ public final class FontStore: Sendable {
                 _ = try s.step()
             }
         }
+    }
+
+    /// Number of faces in the given files carrying user data (a note, or activation other than off).
+    public func userDataFaceCount(fileIDs: [Int64]) throws -> Int {
+        var total = 0
+        for id in fileIDs {
+            let s = try database.prepare("SELECT COUNT(*) FROM faces WHERE file_id = ? AND (note IS NOT NULL OR activation != 0)")
+            defer { s.reset() }
+            try s.bind([.int(id)])
+            if try s.step() { total += Int(s.int64(0)) }
+        }
+        return total
     }
 
     // MARK: Queries
