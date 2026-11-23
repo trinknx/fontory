@@ -39,6 +39,13 @@ public struct FaceInfo: Sendable, Hashable, Identifiable {
     public var activation: ActivationState
     public var lastActivated: Date?
     public var locationKind: LocationKind
+    /// The file is registered on the Mac by someone other than Fontory.
+    public var externalActive: Bool
+
+    /// How the face's activation looks, as in the browser.
+    public var activationStatus: ActivationStatus {
+        ActivationStatus(kind: locationKind, externalActive: externalActive, activation: activation)
+    }
 
     public var embedding: EmbeddingPermissions? { fsType.map(EmbeddingPermissions.init(fsType:)) }
 }

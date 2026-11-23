@@ -112,9 +112,11 @@ struct FamilyDetailView: View {
                 .frame(width: 160)
                 .controlSize(.small)
                 .accessibilityLabel("Preview size")
-                .help("Preview size of the styles (⌘+ / ⌘−)")
+                .help(model.detailLayout == .compact
+                      ? "Preview size of the styles (⌘+ / ⌘−); the compact list draws at most \(Int(AppModel.compactMaxPointSize)) pt"
+                      : "Preview size of the styles (⌘+ / ⌘−)")
             Image(systemName: "textformat.size.larger").foregroundStyle(.secondary).accessibilityHidden(true)
-            Text("\(Int(model.detailPointSize)) pt")
+            Text("\(model.effectiveDetailPointSize) pt")
                 .font(.callout)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
@@ -183,6 +185,8 @@ struct FamilyInfoView: View {
 
     @State private var info: FaceInfo?
     @State private var loadedID: Int64?
+    /// Style names by face, from the rows (the row cache is not observable, so they are copied in when loaded).
+    @State private var styleNames: [Int64: String] = [:]
 
     private struct LoadKey: Equatable {
         let faceID: Int64
@@ -193,10 +197,12 @@ struct FamilyInfoView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 stylePicker
-                if let info, loadedID == faceID {
-                    sections(info)
-                } else if loadedID == faceID {
+                if loadedID == faceID, info == nil {
                     Text("This style is no longer in the library.").foregroundStyle(.secondary)
+                } else if let info {
+                    // While the next style loads, the previous one stays (no flash of a spinner).
+                    sections(info)
+                        .opacity(loadedID == faceID ? 1 : 0.6)
                 } else {
                     ProgressView().controlSize(.small)
                 }
@@ -207,10 +213,16 @@ struct FamilyInfoView: View {
         }
         .task(id: LoadKey(faceID: faceID, rowsVersion: rowsVersion)) {
             let id = faceID
+            // The rows were dropped (activation, rescan): fetch them again for the style names.
+            model.prefetchRows(detail.faceIDs)
             let loaded = await model.faceInfo(id)
             guard !Task.isCancelled else { return }
             info = loaded
             loadedID = id
+            updateStyleNames()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AppModel.rowsLoadedNotification, object: model)) { _ in
+            updateStyleNames()
         }
     }
 
@@ -225,8 +237,16 @@ struct FamilyInfoView: View {
 
     private func styleName(_ id: Int64) -> String {
         if id == info?.id, let info { return info.style.isEmpty ? info.fullName : info.style }
-        guard let row = model.cachedRow(id) else { return "Style \(detail.faceIDs.firstIndex(of: id).map { $0 + 1 } ?? 0)" }
-        return row.style.isEmpty ? row.fullName : row.style
+        return styleNames[id] ?? "Style \(detail.faceIDs.firstIndex(of: id).map { $0 + 1 } ?? 0)"
+    }
+
+    /// Copies the names of the cached rows into state; names already known are kept while rows reload.
+    private func updateStyleNames() {
+        var names = styleNames
+        for id in detail.faceIDs {
+            if let row = model.cachedRow(id) { names[id] = row.style.isEmpty ? row.fullName : row.style }
+        }
+        if names != styleNames { styleNames = names }
     }
 
     @ViewBuilder
@@ -312,8 +332,7 @@ struct FamilyInfoView: View {
     }
 
     private func status(_ info: FaceInfo) -> String {
-        if let row = model.cachedRow(info.id) { return FontListController.statusText(row) }
-        return info.activation == .off ? "Off" : "Active"
+        info.activationStatus.statusText(online: info.online)
     }
 
     private static func outlineTitle(_ type: OutlineType) -> String {

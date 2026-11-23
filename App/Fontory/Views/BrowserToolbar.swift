@@ -11,21 +11,31 @@ struct BrowserToolbar: ToolbarContent {
 
         ToolbarItemGroup {
             PreviewOptionsButton(model: model)
-            Slider(value: pointSize, in: 0...288) { Text("Size") }
-                .frame(width: 90)
-                .help(model.preview.pointSizeOverride.map { "Preview size: \(Int($0)) pt (drag fully left to follow zoom)" }
-                      ?? "Preview size follows the zoom")
+            if model.detail != nil {
+                // On the family page the size slider drives the page's own size (as do ⌘+/⌘−/⌘0 and its slider).
+                Slider(value: $model.detailPointSize, in: AppModel.detailPointSizeRange) { Text("Size") }
+                    .frame(width: 90)
+                    .help("Preview size of the styles: \(model.effectiveDetailPointSize) pt")
+            } else {
+                Slider(value: pointSize, in: 0...288) { Text("Size") }
+                    .frame(width: 90)
+                    .help(model.preview.pointSizeOverride.map { "Preview size: \(Int($0)) pt (drag fully left to follow zoom)" }
+                          ?? "Preview size follows the zoom")
+            }
         }
 
         ToolbarItemGroup {
+            // Zoom and the grid/list switch belong to the browser; the family page has its own layout switch.
             Slider(value: zoom, in: 0...1) { Text("Zoom") }
                 .frame(width: 90)
                 .help("Zoom")
+                .disabled(model.detail != nil)
             Picker("View", selection: $model.viewMode) {
                 Image(systemName: "square.grid.2x2").tag(ViewMode.grid).help("Grid (⌘1)")
                 Image(systemName: "list.bullet").tag(ViewMode.list).help("List (⌘3)")
             }
             .pickerStyle(.segmented)
+            .disabled(model.detail != nil)
             SortMenu(model: model)
         }
     }

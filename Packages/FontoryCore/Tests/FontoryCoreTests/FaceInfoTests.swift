@@ -77,6 +77,45 @@ import Testing
         #expect(try f.store.family(named: "Alpha", includeSystem: false)?.faceIDs.count == 3)
     }
 
+    @Test func familyMatchesWhatTheListGroups() throws {
+        var f = try Fixture.make()
+        // Same family, spelled with a non-ASCII case difference and in NFC and NFD.
+        let nfc = "\u{00C9}b\u{00E8}ne"            // Ébène
+        let upper = "\u{00C9}B\u{00C8}NE"          // ÉBÈNE
+        let nfd = "E\u{0301}be\u{0300}ne"          // Ébène, decomposed
+        try f.add(f.locA.id, "E1.otf", [Fixture.face("Ebene-Regular", family: nfc, style: "Regular", weight: 400)], 5)
+        try f.add(f.locA.id, "E2.otf", [Fixture.face("Ebene-Bold", family: upper, style: "Bold", weight: 700)], 5)
+        try f.add(f.locB.id, "E3.otf", [Fixture.face("Ebene-Light", family: nfd, style: "Light", weight: 300)], 5)
+        let expected = [f.faceIDs["Ebene-Light"]!, f.faceIDs["Ebene-Regular"]!, f.faceIDs["Ebene-Bold"]!]
+
+        let listed = try #require(try f.store.families(for: LibraryQuery()).first { $0.faceIDs.contains(expected[0]) })
+        #expect(Set(listed.faceIDs) == Set(expected))
+        for spelling in [nfc, upper, nfd, "\u{00E9}b\u{00E8}ne"] {
+            let group = try #require(try f.store.family(named: spelling, includeSystem: true), "\(spelling)")
+            #expect(group.faceIDs == expected)
+            #expect(group.representativeID == f.faceIDs["Ebene-Regular"]!)
+        }
+        // A preference stored under another spelling of the key still applies (Swift string equality).
+        try f.store.setRepresentative(familyKey: nfd.lowercased(), faceID: f.faceIDs["Ebene-Bold"]!)
+        #expect(try f.store.family(named: nfc, includeSystem: true)?.representativeID == f.faceIDs["Ebene-Bold"]!)
+        #expect(try f.store.family(named: "Ebene", includeSystem: true) == nil)
+    }
+
+    @Test func faceInfoActivationStatus() throws {
+        let f = try Fixture.make()
+        let id = f.faceIDs["Alpha-Bold"]!
+        #expect(try f.store.faceInfo(id: id)?.activationStatus == .off)
+        try f.store.setExternalActive(fileIDs: [f.fileIDs["Alpha-Bold.otf"]!], true)
+        let info = try #require(try f.store.faceInfo(id: id))
+        #expect(info.externalActive && info.activationStatus == .external)
+        let row = try #require(try f.store.rows(ids: [id])[id])
+        #expect(row.activationStatus == info.activationStatus)
+        try f.store.setActivation(faceIDs: [id], state: .on, at: Date())
+        #expect(try f.store.faceInfo(id: id)?.activationStatus == .on)
+        #expect(ActivationStatus(kind: .system, externalActive: false, activation: .off) == .system)
+        #expect(ActivationStatus(kind: .userInstalled, externalActive: false, activation: .off) == .disabledOutside)
+    }
+
     @Test func familyFollowsCustomFamily() throws {
         let f = try Fixture.make()
         let bold = f.faceIDs["Alpha-Bold"]!

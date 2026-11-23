@@ -128,10 +128,19 @@ final class FamilyStylesController: NSObject, NSTableViewDataSource, NSTableView
         pipeline.cancelAll(lane: .detailStyles)
         let height = StyleCellView.rowHeight(layout: layout, pointSize: pointSize)
         if tableView.rowHeight != height {
-            // Keep the first visible style in place while rows grow or shrink.
-            let first = tableView.rows(in: tableView.visibleRect).location
+            // Keep the first visible style's top edge where it is while rows grow or shrink.
+            let visible = tableView.visibleRect
+            let first = tableView.rows(in: visible).location
+            let offset = first < tableView.numberOfRows ? tableView.rect(ofRow: first).minY - visible.minY : 0
             tableView.rowHeight = height
-            if first > 0 { tableView.scrollRowToVisible(first) }
+            if first > 0, first < tableView.numberOfRows {
+                tableView.layoutSubtreeIfNeeded()
+                let clip = scrollView.contentView
+                let maxY = max(0, tableView.frame.height - clip.bounds.height)
+                let y = min(maxY, max(0, tableView.rect(ofRow: first).minY - offset))
+                clip.scroll(to: NSPoint(x: clip.bounds.minX, y: y))
+                scrollView.reflectScrolledClipView(clip)
+            }
         }
         // Slider drags: show the previous images scaled, render once the size settles.
         if sizeChanged { suspendRendering() }
@@ -327,7 +336,7 @@ final class StyleCellView: NSTableCellView {
     static let inset: CGFloat = 8
     static let labelStrip: CGFloat = 24
     static let compactNameWidth: CGFloat = 200
-    static let compactMaxPointSize: CGFloat = 36
+    static let compactMaxPointSize = CGFloat(AppModel.compactMaxPointSize)
 
     static func previewPointSize(layout: DetailLayout, pointSize: CGFloat) -> CGFloat {
         layout == .rows ? pointSize : min(pointSize, compactMaxPointSize)
@@ -422,7 +431,8 @@ final class StyleCellView: NSTableCellView {
     }
 
     func configure(faceID: Int64, row: FaceRow?, layout: DetailLayout, background: CGColor) {
-        if self.faceID != faceID { previewLayer.contents = nil }
+        let sameFace = self.faceID == faceID
+        if !sameFace { previewLayer.contents = nil }
         self.faceID = faceID
         if layoutMode != layout {
             layoutMode = layout
@@ -430,6 +440,8 @@ final class StyleCellView: NSTableCellView {
         }
         previewLayer.backgroundColor = background
         guard let row else {
+            // The rows were dropped and are being fetched again: keep showing this face until they arrive.
+            if sameFace { return }
             nameLabel.stringValue = ""
             detailLabel.stringValue = ""
             dot.state = .placeholder

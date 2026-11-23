@@ -637,14 +637,7 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
     }
 
     static func statusText(_ row: FaceRow) -> String {
-        switch row.activationStatus {
-        case .system: return "System"
-        case _ where !row.online: return "Offline"
-        case .external: return "Outside Fontory"
-        case .disabledOutside: return "Disabled outside Fontory"
-        case .on: return "Active"
-        case .off: return "Off"
-        }
+        row.activationStatus.statusText(online: row.online)
     }
 
     private func rendered(_ key: PreviewPipeline.Key, _ image: CGImage) {
@@ -909,5 +902,19 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         let y = min(maxY, max(0, rect.midY - clip.bounds.height / 2))
         clip.scroll(to: NSPoint(x: clip.bounds.minX, y: y))
         scrollView.reflectScrolledClipView(clip)
+    }
+}
+
+extension ActivationStatus {
+    /// The status wording shared by the list's Status column and the family page's Info.
+    func statusText(online: Bool) -> String {
+        switch self {
+        case .system: return "System"
+        case _ where !online: return "Offline"
+        case .external: return "Outside Fontory"
+        case .disabledOutside: return "Disabled outside Fontory"
+        case .on: return "Active"
+        case .off: return "Off"
+        }
     }
 }

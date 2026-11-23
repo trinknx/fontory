@@ -463,36 +463,55 @@ public final class FontStore: Sendable {
         }
     }
 
-    /// The family named `family` (the effective family, compared case-insensitively): its faces in family order
-    /// (weight, width, slant) and its representative, chosen as in `families(for:)`. Private system faces are left
-    /// out, like everywhere else; system faces too unless `includeSystem`. Nil when no face matches.
+    /// The family named `family`: the faces that `families(for:)` groups with it (effective family names equal
+    /// after Swift's `lowercased()`, compared with canonical equivalence, so case differences outside ASCII and
+    /// NFC/NFD spellings match), in family order (weight, width, slant), and its representative, chosen as in
+    /// `families(for:)`. Private system faces are left out, like everywhere else; system faces too unless
+    /// `includeSystem`. Nil when no face matches.
     public func family(named family: String, includeSystem: Bool) throws -> FamilyGroup? {
         try reader.withLock {
+            let key = family.lowercased()
+            // SQLite's NOCASE folds ASCII only and compares bytes: find the matching spellings in Swift.
+            let n = try reader.prepare("SELECT DISTINCT \(LibraryQuery.effectiveFamily) FROM faces")
+            defer { n.reset() }
+            var spellings: [String] = []
+            while try n.step() {
+                let name = n.text(0)
+                if name.lowercased() == key { spellings.append(name) }
+            }
+            n.reset()
+            guard !spellings.isEmpty else { return nil }
+
             let s = try reader.prepare("""
             SELECT faces.id, \(LibraryQuery.effectiveFamily), faces.weight, faces.width, faces.slant, faces.is_italic
             FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
-            WHERE \(LibraryQuery.effectiveFamily) = ?1 COLLATE NOCASE AND \(LibraryQuery.publicFaceClause)
-              AND (?2 != 0 OR locations.kind != 2)
-            ORDER BY faces.weight, faces.width, faces.slant, faces.id
+            WHERE \(LibraryQuery.effectiveFamily) = ?1 AND \(LibraryQuery.publicFaceClause) AND (?2 != 0 OR locations.kind != 2)
             """)
             defer { s.reset() }
-            try s.bind([.text(family), .int(includeSystem ? 1 : 0)])
-            var members: [FamilyMember] = []
-            var name: String?
-            while try s.step() {
-                if name == nil { name = s.text(1) }
-                members.append(FamilyMember(id: s.int64(0), weight: s.double(2), width: s.double(3), slant: s.double(4),
-                                            isItalic: s.int64(5) != 0, order: members.count))
+            var members: [(member: FamilyMember, name: String)] = []
+            for spelling in spellings {
+                s.reset()
+                try s.bind([.text(spelling), .int(includeSystem ? 1 : 0)])
+                while try s.step() {
+                    members.append((FamilyMember(id: s.int64(0), weight: s.double(2), width: s.double(3), slant: s.double(4),
+                                                 isItalic: s.int64(5) != 0, order: 0), s.text(1)))
+                }
             }
-            guard let name, let best = members.min(by: { Self.score($0) < Self.score($1) }) else { return nil }
-            let key = name.lowercased()
-            let p = try reader.prepare("SELECT representative_face_id FROM family_prefs WHERE family_key = ? AND representative_face_id IS NOT NULL")
+            members.sort { ($0.member.weight, $0.member.width, $0.member.slant, $0.member.id)
+                < ($1.member.weight, $1.member.width, $1.member.slant, $1.member.id) }
+            guard let first = members.first,
+                  let best = members.min(by: { Self.score($0.member) < Self.score($1.member) }) else { return nil }
+            let ids = members.map(\.member.id)
+
+            // Preferences are keyed by a lowercased spelling; compare them like the list does (Swift equality).
+            let p = try reader.prepare("SELECT family_key, representative_face_id FROM family_prefs WHERE representative_face_id IS NOT NULL")
             defer { p.reset() }
-            try p.bind([.text(key)])
-            let ids = members.map(\.id)
-            var rep = best.id
-            if try p.step(), ids.contains(p.int64(0)) { rep = p.int64(0) }
-            return FamilyGroup(id: key, name: name, faceIDs: ids, representativeID: rep)
+            var rep = best.member.id
+            while try p.step() {
+                // The last matching row wins, as in the dictionary `families(for:)` builds.
+                if p.text(0) == key { rep = ids.contains(p.int64(1)) ? p.int64(1) : best.member.id }
+            }
+            return FamilyGroup(id: first.name.lowercased(), name: first.name, faceIDs: ids, representativeID: rep)
         }
     }
 
@@ -505,7 +524,7 @@ public final class FontStore: Sendable {
               locations.online, files.size, files.added_at, faces.glyph_count, faces.weight, faces.width, faces.slant, faces.is_italic,
               faces.units_per_em, faces.ascender, faces.descender, faces.cap_height, faces.x_height, faces.fs_type, faces.outline_type,
               faces.is_color, faces.is_bitmap, faces.is_variable, faces.axes_json, faces.has_gsub, faces.has_gpos, faces.note,
-              faces.activation, faces.last_activated, locations.kind
+              faces.activation, faces.last_activated, locations.kind, files.external_active
             FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
             WHERE faces.id = ?
             """)
@@ -530,7 +549,8 @@ public final class FontStore: Sendable {
                 isColor: s.int64(28) != 0, isBitmap: s.int64(29) != 0, isVariable: s.int64(30) != 0,
                 axes: VariationAxis.decode(json: optText(31)), hasGSUB: s.int64(32) != 0, hasGPOS: s.int64(33) != 0,
                 note: optText(34), activation: ActivationState(rawValue: Int(s.int64(35))) ?? .off,
-                lastActivated: optDate(36), locationKind: LocationKind(rawValue: Int(s.int64(37))) ?? .folder)
+                lastActivated: optDate(36), locationKind: LocationKind(rawValue: Int(s.int64(37))) ?? .folder,
+                externalActive: s.int64(38) != 0)
         }
     }
 

@@ -360,6 +360,8 @@ final class AppModel {
     @ObservationIgnored weak var browserWindow: NSWindow?
     /// The browser window is the key window (app-wide shortcuts act only then).
     var browserIsKey: Bool { browserWindow != nil && NSApp.keyWindow === browserWindow }
+    /// Observable copy of `browserIsKey`, kept by `MainWindow`, so menu items can enable themselves.
+    var isBrowserKey = false
     @ObservationIgnored private var indexByID: [Int64: Int] = [:]
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var refreshGeneration = 0
@@ -1118,6 +1120,18 @@ final class AppModel {
             detailSelection = ids.contains(faceID) ? [faceID] : []
             prefetchRows(ids)
         }
+    }
+
+    /// The styles' preview size as drawn: compact rows cap it (see `StyleCellView.compactMaxPointSize`).
+    var effectiveDetailPointSize: Int {
+        Int(detailLayout == .compact ? min(detailPointSize, Self.compactMaxPointSize) : detailPointSize)
+    }
+    nonisolated static let compactMaxPointSize = 36.0
+
+    /// ⌘1 / ⌘3: the browser in `mode`, leaving the family page if it is open.
+    func showBrowser(as mode: ViewMode) {
+        closeFamilyDetail()
+        viewMode = mode
     }
 
     /// ⌘I / ⌘↓ / Return: the family page of the selection; on the family page ⌘I shows Info.

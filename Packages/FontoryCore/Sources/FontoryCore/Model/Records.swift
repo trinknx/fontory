@@ -202,15 +202,20 @@ public enum ActivationStatus: Sendable, Hashable {
     case off
 }
 
+extension ActivationStatus {
+    public init(kind: LocationKind, externalActive: Bool, activation: ActivationState) {
+        switch kind {
+        case .system: self = .system
+        case .userInstalled: self = externalActive ? .external : .disabledOutside
+        case .folder, .fileSet:
+            if activation != .off { self = .on } else { self = externalActive ? .external : .off }
+        }
+    }
+}
+
 extension FaceRow {
     public var activationStatus: ActivationStatus {
-        switch locationKind {
-        case .system: return .system
-        case .userInstalled: return externalActive ? .external : .disabledOutside
-        case .folder, .fileSet:
-            if activation != .off { return .on }
-            return externalActive ? .external : .off
-        }
+        ActivationStatus(kind: locationKind, externalActive: externalActive, activation: activation)
     }
 
     /// Fontory does not toggle system fonts or fonts active outside it.

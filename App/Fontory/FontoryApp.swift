@@ -17,9 +17,10 @@ struct FontoryApp: App {
                     .keyboardShortcut("o")
             }
             CommandGroup(before: .toolbar) {
-                Button("as Grid") { model.viewMode = .grid }
+                // On the family page both close it and show the browser in that mode, whichever mode is current.
+                Button("as Grid") { model.showBrowser(as: .grid) }
                     .keyboardShortcut("1")
-                Button("as List") { model.viewMode = .list }
+                Button("as List") { model.showBrowser(as: .list) }
                     .keyboardShortcut("3")
                 Divider()
                 Button("Zoom In") { model.adjustZoom(by: 0.1) }
@@ -31,8 +32,10 @@ struct FontoryApp: App {
                 Divider()
                 Button("Show Family") { if model.browserIsKey { model.showFamilyDetailForSelection() } }
                     .keyboardShortcut("i")
+                    .disabled(!model.isBrowserKey || (model.detail == nil && model.selection.isEmpty))
                 Button("Back") { if model.browserIsKey { model.closeFamilyDetail() } }
                     .keyboardShortcut("[")
+                    .disabled(!model.isBrowserKey || model.detail == nil)
                 Divider()
                 Button("Preview Options…") { model.isShowingPreviewOptions.toggle() }
                     .keyboardShortcut("p", modifiers: [.option, .command])
@@ -80,8 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let handled = MainActor.assumeIsolated { () -> Bool in
                 guard let key = NSApp.keyWindow, key === self.model.browserWindow else { return false }
                 if isEscape {
-                    guard self.model.detail != nil, !self.model.isShowingPreviewOptions,
-                          !(key.firstResponder is NSText) else { return false }
+                    // An empty text field (the search field) has nothing to clear: Esc goes Back from there too.
+                    guard self.model.detail != nil, !self.model.isShowingPreviewOptions else { return false }
+                    if let text = key.firstResponder as? NSText, !text.string.isEmpty { return false }
                     self.model.closeFamilyDetail()
                 } else {
                     self.model.adjustZoom(by: 0.1)

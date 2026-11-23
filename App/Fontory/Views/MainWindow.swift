@@ -51,7 +51,7 @@ struct MainWindow: View {
     }
 }
 
-/// Records the window it is placed in as the model's browser window.
+/// Records the window it is placed in as the model's browser window, and whether it is key (for menu items).
 private struct BrowserWindowReader: NSViewRepresentable {
     let model: AppModel
 
@@ -59,6 +59,10 @@ private struct BrowserWindowReader: NSViewRepresentable {
         let view = ReaderView()
         view.onWindow = { [weak model] window in
             if let window { model?.browserWindow = window }
+            model?.isBrowserKey = window?.isKeyWindow ?? false
+        }
+        view.onKeyChange = { [weak model] isKey in
+            if model?.isBrowserKey != isKey { model?.isBrowserKey = isKey }
         }
         return view
     }
@@ -67,8 +71,24 @@ private struct BrowserWindowReader: NSViewRepresentable {
 
     final class ReaderView: NSView {
         var onWindow: ((NSWindow?) -> Void)?
+        var onKeyChange: ((Bool) -> Void)?
+        nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
+
+        deinit {
+            for o in observers { NotificationCenter.default.removeObserver(o) }
+        }
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            for o in observers { NotificationCenter.default.removeObserver(o) }
+            observers = []
+            if let window {
+                for (name, isKey) in [(NSWindow.didBecomeKeyNotification, true), (NSWindow.didResignKeyNotification, false)] {
+                    observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                        MainActor.assumeIsolated { self?.onKeyChange?(isKey) }
+                    })
+                }
+            }
             onWindow?(window)
         }
     }
