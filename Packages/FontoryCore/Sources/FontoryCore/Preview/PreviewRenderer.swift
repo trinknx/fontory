@@ -55,12 +55,10 @@ public final class PreviewRenderer: Sendable {
         if let cached = fonts[key] { return cached }
         if failed[key] != nil { return nil }
         attempts.increment()
-        guard let descs = CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor],
-              descs.indices.contains(faceIndex) else {
+        guard let font = FontFile.font(at: url, faceIndex: faceIndex) else {
             failed[key] = true
             return nil
         }
-        let font = CTFontCreateWithFontDescriptor(descs[faceIndex], 1, nil)
         fonts[key] = font
         return font
     }
@@ -219,6 +217,12 @@ public final class PreviewRenderer: Sendable {
                   allCaps: request.features.contains(.smallCaps) && Self.isAllCaps(request.text))
     }
 
+    /// The face at `pointSize` with the default features, from the shared font cache (nil when it cannot be loaded).
+    /// The glyph cells of the Characters tab draw with it.
+    public func font(fileURL: URL, faceIndex: Int, pointSize: CGFloat) -> CTFont? {
+        sizedFont(fileURL, faceIndex, pointSize: pointSize, features: .standard, allCaps: false)
+    }
+
     /// The styled text of a request, as drawn. For tests.
     func attributedText(fileURL: URL, faceIndex: Int, request: PreviewRequest) -> NSAttributedString? {
         guard let font = sizedFont(for: request, fileURL, faceIndex) else { return nil }
@@ -266,28 +270,10 @@ public final class PreviewRenderer: Sendable {
         return ctx.makeImage()
     }
 
-    /// Guide color for the baseline (a warm accent); the other guides use the text color, faint.
-    private static let baselineGuide = CGColor(srgbRed: 0.93, green: 0.42, blue: 0.16, alpha: 0.85)
-
     /// Dashed full-width lines at the face's baseline, x-height, cap-height, ascender and descender.
     private func drawGuides(_ ctx: CGContext, font: CTFont, baseline: CGFloat, request: PreviewRequest) {
-        let neutral = request.foreground.copy(alpha: 0.28) ?? request.foreground
-        let lineWidth = 1 / request.scale
-        ctx.saveGState()
-        ctx.setLineWidth(lineWidth)
-        ctx.setLineDash(phase: 0, lengths: [3, 3])
-        func stroke(_ y: CGFloat, _ color: CGColor) {
-            // Snap to the pixel grid so the hairline stays crisp.
-            let snapped = ((y * request.scale).rounded() + 0.5) / request.scale
-            ctx.setStrokeColor(color)
-            ctx.strokeLineSegments(between: [CGPoint(x: 0, y: snapped), CGPoint(x: request.size.width, y: snapped)])
-        }
-        for offset in [CTFontGetAscent(font), CTFontGetCapHeight(font), CTFontGetXHeight(font), -CTFontGetDescent(font)]
-            where offset != 0 {
-            stroke(baseline + offset, neutral)
-        }
-        stroke(baseline, Self.baselineGuide)
-        ctx.restoreGState()
+        MetricGuides.draw(ctx, font: font, baseline: baseline, width: request.size.width, foreground: request.foreground,
+                          scale: request.scale)
     }
 
     /// Ink height of `text` at `pointSize` with the standard features and CoreText fallback.
