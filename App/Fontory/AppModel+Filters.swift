@@ -34,6 +34,18 @@ extension AppModel {
         return f
     }
 
+    /// The Filters button works in the browser only: not on the family page, not in the Duplicates view (which
+    /// ignores filters).
+    var filtersAvailable: Bool { detail == nil && !isShowingDuplicates }
+
+    /// The Filters popover's note while the face backfill fills in coverage, features and figures (the first launch on
+    /// schema v4) and a filter reads them: faces not done yet can be missing from the results. Nil otherwise.
+    var filtersBackfillNote: String? {
+        guard let progress = faceBackfillProgress, effectiveFilters.usesFaceMetadata else { return nil }
+        return "Font details are still updating — \(progress.done.formatted()) of \(progress.total.formatted()); "
+            + "some fonts may be missing from filtered results"
+    }
+
     /// Adds a feature tag (validated); false when it is invalid. A tag already chosen is not added twice.
     @discardableResult
     func addFeatureTag(_ text: String) -> Bool {

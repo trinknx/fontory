@@ -104,6 +104,19 @@ import Testing
         #expect(try w.ids(f).isEmpty)
     }
 
+    @Test func usesFaceMetadata() {
+        var f = LibraryFilters()
+        #expect(!f.usesFaceMetadata)
+        f.outline = .cff; f.variable = .only; f.xHeight = .low; f.scriptIndex = 0; f.requiredCharacters = "  "
+        #expect(!f.usesFaceMetadata)
+        for change in [{ (f: inout LibraryFilters) in f.requiredCharacters = "ß" }, { $0.vietnamese = true },
+                       { $0.figures = .oldstyle }, { $0.features = ["smcp"] }] {
+            var g = f
+            change(&g)
+            #expect(g.usesFaceMetadata)
+        }
+    }
+
     @Test func vietnameseLettersAreComplete() {
         // Derived independently: each of the twelve vowels with each tone mark (grave, acute, hook, tilde, dot below),
         // the bare ă â ê ô ơ ư and đ, upper and lower case, composed to NFC.

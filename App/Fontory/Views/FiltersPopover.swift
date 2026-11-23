@@ -5,7 +5,8 @@ import SwiftUI
 // MARK: Toolbar button
 
 /// The toolbar Filters button: filled with a count while filters are in effect; opens the Filters popover below itself
-/// (same controller and behavior as the preview popover). Browser only: disabled on the family page.
+/// (same controller and behavior as the preview popover). Browser only: disabled on the family page and in the
+/// Duplicates view, which ignores filters.
 struct FiltersButton: View {
     @Bindable var model: AppModel
     @State private var controller = ToolbarPopoverController(isShowing: \.isShowingFilters) { model in
@@ -35,7 +36,7 @@ struct FiltersButton: View {
         }
         .help(count > 0 ? "Filters: \(count) active" : "Filters")
         .accessibilityLabel(count > 0 ? "Filters, \(count) active" : "Filters")
-        .disabled(model.detail != nil)
+        .disabled(!model.filtersAvailable)
         .background(AnchorReader { controller.anchorView = $0 })
         .onChange(of: model.isShowingFilters) { _, show in
             // Out of the SwiftUI update, so AppKit can open its window transaction.
@@ -43,8 +44,8 @@ struct FiltersButton: View {
                 if show { controller.show(model: model) } else { controller.close() }
             }
         }
-        .onChange(of: model.detail != nil) { _, onDetail in
-            if onDetail { model.isShowingFilters = false }
+        .onChange(of: model.filtersAvailable) { _, available in
+            if !available { model.isShowingFilters = false }
         }
     }
 }
@@ -83,6 +84,12 @@ struct FiltersView: View {
                         .help("x-height / cap height: low < 0.66, medium 0.66–0.74, high > 0.74. Fonts without metrics are left out.")
                 }
                 row("Features") { features }
+            }
+            if let note = model.filtersBackfillNote {
+                Label(note, systemImage: "clock")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Divider()
             HStack {

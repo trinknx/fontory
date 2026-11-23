@@ -36,6 +36,12 @@ public struct LibraryFilters: Sendable, Hashable {
 
     public var isEmpty: Bool { activeCount == 0 }
 
+    /// A filter in effect reads the schema v4 face metadata (coverage, features, figures), which the face backfill
+    /// fills in for faces indexed before v4: until it is done, such faces can be missing from the results.
+    public var usesFaceMetadata: Bool {
+        !requiredScalars.isEmpty || vietnamese || figures != nil || !cleanFeatures.isEmpty
+    }
+
     /// Filters in effect, for the toolbar badge: one per control (the feature list counts once).
     public var activeCount: Int {
         var n = 0
