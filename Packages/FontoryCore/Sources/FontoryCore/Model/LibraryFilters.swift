@@ -131,8 +131,14 @@ public enum VietnameseLetters {
 
 /// The `needed` argument of `fontory_covers` as runs of consecutive scalars. It is the same for every row of a query,
 /// so SQLite keeps one per statement (auxiliary data) and a row costs one search per run, not per scalar.
+#if _endian(big)
+#error("NeededRuns reads little-endian blobs through typed pointers; add byte swapping for big-endian hosts")
+#endif
+
 final class NeededRuns {
     let starts: [UInt32], ends: [UInt32]
+    /// The same runs as one buffer, `[start, end]` pairs: plain pointer reads in the per-row loop.
+    private let runPairs: UnsafeMutablePointer<UInt32>
 
     /// `needed`: little-endian `UInt32` scalars in any order.
     init(needed: UnsafeRawBufferPointer) {
@@ -152,6 +158,8 @@ final class NeededRuns {
         }
         self.starts = starts
         self.ends = ends
+        runPairs = .allocate(capacity: max(1, starts.count * 2))
+        for i in 0..<starts.count { runPairs[i * 2] = starts[i]; runPairs[i * 2 + 1] = ends[i] }
     }
 
     /// Aligned copy of the row's ranges, reused across rows: typed reads are far cheaper than unaligned loads. Statements
@@ -159,7 +167,7 @@ final class NeededRuns {
     private var scratch = UnsafeMutablePointer<UInt32>.allocate(capacity: 1024)
     private var capacity = 1024
 
-    deinit { scratch.deallocate() }
+    deinit { scratch.deallocate(); runPairs.deallocate() }
 
     /// True when every run lies inside one range of `ranges` (little-endian `UInt32` `[start, end]` pairs, sorted,
     /// merged). The search resumes where the last run ended, and the ends of the list reject most misses at once.
@@ -173,17 +181,30 @@ final class NeededRuns {
             scratch = .allocate(capacity: capacity)
         }
         memcpy(scratch, base, pairs * 8)
-        let w = scratch   // w[2i] = start, w[2i + 1] = end (little-endian host: Apple platforms)
-        guard starts[0] >= w[0], ends[ends.count - 1] <= w[pairs * 2 - 1] else { return false }
+        return NeededRuns.allCovered(runs: runPairs, runCount: starts.count, ranges: scratch, pairs: pairs)
+    }
+
+    /// The per-row loop, a free-standing function over plain pointers so it can be compiled with optimizations even in
+    /// debug builds (the filters must stay fast under `swift test` too). `ranges[2i]` = start, `[2i + 1]` = end.
+    @_optimize(speed)
+    @inline(never)
+    private static func allCovered(runs: UnsafePointer<UInt32>, runCount: Int, ranges w: UnsafePointer<UInt32>, pairs: Int) -> Bool {
+        guard runs[0] >= w[0], runs[runCount * 2 - 1] <= w[pairs * 2 - 1] else { return false }
         var lo = 0
-        for r in 0..<starts.count {
-            let s = starts[r]
-            var hi = pairs
-            while lo < hi {
-                let mid = (lo + hi) / 2
-                if w[mid * 2 + 1] < s { lo = mid + 1 } else { hi = mid }
+        var r = 0
+        while r < runCount {
+            let s = runs[r * 2]
+            // Usually the range of the previous run holds this one too (a face's ranges are long, needed scalars cluster).
+            if w[lo * 2 + 1] < s {
+                var low = lo + 1, high = pairs
+                while low < high {
+                    let mid = (low + high) / 2
+                    if w[mid * 2 + 1] < s { low = mid + 1 } else { high = mid }
+                }
+                lo = low
             }
-            guard lo < pairs, w[lo * 2] <= s, w[lo * 2 + 1] >= ends[r] else { return false }
+            guard lo < pairs, w[lo * 2] <= s, w[lo * 2 + 1] >= runs[r * 2 + 1] else { return false }
+            r += 1
         }
         return true
     }

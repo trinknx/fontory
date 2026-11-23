@@ -109,7 +109,7 @@ import Testing
         var f = LibraryFilters()
         f.vietnamese = true
         #expect(try w.ids(f) == w.all("Beta-Light"))
-        print("vietnamese letters: \(VietnameseLetters.scalars.count)"); #expect(VietnameseLetters.scalars.count > 100 && VietnameseLetters.scalars.contains(0x1EA0) && VietnameseLetters.scalars.contains(0x1EF9))
+        #expect(VietnameseLetters.scalars.count > 100 && VietnameseLetters.scalars.contains(0x1EA0) && VietnameseLetters.scalars.contains(0x1EF9))
         #expect(!VietnameseLetters.scalars.contains(0xC0))   // À is not in the Vietnamese part
         // Missing one letter fails.
         let missing = VietnameseLetters.scalars.last!
@@ -249,8 +249,8 @@ import Testing
         let f = try Fixture.make()
         let db = f.store.database
         // Realistic coverage: a few hundred ranges per face, most faces cover Latin; features and metrics vary.
-        let letters: [UInt32] = Array(0x20...0x7E) + Array(0xC0...0x17F)
-        var base: [UInt32] = letters
+        let letters: [UInt32] = Array(0x20...0x7E) + Array(0xC0...0x17F) + Array(0x391...0x3C9) + VietnameseLetters.scalars
+        var base: [UInt32] = letters   // covers every case below, so no row exits early
         for i in 0..<250 { base += [UInt32(0x2000 + i * 40), UInt32(0x2000 + i * 40 + 1)] }
         let coverage = CoverageRanges(scalars: base).blob
         let tags = ["liga", "smcp", "onum", "ss01", "kern", "calt"]
@@ -274,7 +274,21 @@ import Testing
         let fifty = String(UnicodeScalar(0x41)!) + String((0x42..<0x42 + 25).map { Character(UnicodeScalar($0)!) }) + String((0xC0..<0xC0 + 24).map { Character(UnicodeScalar($0)!) })
         #expect(fifty.unicodeScalars.count == 50)
 
+        // Worst case: 50 scalars with gaps (no two consecutive, so 50 runs) across Latin, Latin-1 and Greek, all covered.
+        var scattered: [UInt32] = []
+        for (first, count) in [(0x41, 13), (0x61, 13), (0xC0, 12), (0x391, 12)] as [(UInt32, UInt32)] {
+            for i in 0..<count { scattered.append(first + i * 2) }
+        }
+        var scatteredText = ""
+        for v in scattered { scatteredText.unicodeScalars.append(UnicodeScalar(v)!) }
+        let scatteredData = LibraryFilters.encode(scattered)
+        #expect(scatteredText.unicodeScalars.count == 50)
+        #expect(scatteredData.withUnsafeBytes { NeededRuns(needed: $0).starts.count } == 50)
+
         var combos: [(String, LibraryFilters)] = []
+        var w = LibraryFilters(); w.requiredCharacters = scatteredText; combos.append(("50 scattered scalars, all covered", w))
+        w = LibraryFilters(); w.vietnamese = true; combos.append(("vietnamese, every face covers it", w))
+        w = LibraryFilters(); w.vietnamese = true; w.requiredCharacters = scatteredText; combos.append(("vietnamese + 50 scattered", w))
         var a = LibraryFilters(); a.requiredCharacters = fifty; combos.append(("50 chars", a))
         a = LibraryFilters(); a.requiredCharacters = fifty + "\u{2000}"; combos.append(("50 chars + U+2000", a))
         a = LibraryFilters(); a.vietnamese = true; combos.append(("vietnamese", a))
