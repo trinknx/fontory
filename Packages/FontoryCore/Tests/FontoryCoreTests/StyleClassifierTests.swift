@@ -193,7 +193,8 @@ struct StyleClassifierTests {
     @Test func backfillMarksUnreadable() async throws {
         let temp = try TempFonts(); defer { temp.cleanup() }
         let (store, _) = try libraryOfFonts([(TempFonts.arialBold, "a.ttf"), (TempFonts.hoeflerText, "h.ttc")], temp: temp)
-        try FileManager.default.removeItem(at: temp.root.appendingPathComponent("a.ttf"))
+        // Present but not a font any more.
+        try Data(repeating: 0x5A, count: 512).write(to: temp.root.appendingPathComponent("a.ttf"))
         for await _ in StyleBackfill(store: store).run() {}
         #expect(try versions(store).allSatisfy { $0 == StyleClassifier.version })
         let got = try classes(store)
@@ -204,8 +205,10 @@ struct StyleClassifierTests {
     }
 
     @Test func backfillRunsInBatchesOfAtMost200() async throws {
+        let temp = try TempFonts(); defer { temp.cleanup() }
+        _ = try temp.junk("big.ttc")  // present, unparsable: classified unknown
         let store = try FontStore(database: Database(path: ":memory:"))
-        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "F", displayName: "F", lastKnownPath: "/nonexistent")
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "F", displayName: "F", lastKnownPath: temp.root.path)
         let batch = try store.nextImportBatch()
         let faces = (0..<450).map { Fixture.face("P-\($0)", family: "P", style: "\($0)", weight: 400, index: $0) }
         _ = try store.insertFile(FileRecord(locationID: loc.id, relativePath: "big.ttc", size: 1, mtime: Date(), format: "ttc", fingerprint: "big"),
@@ -217,8 +220,10 @@ struct StyleClassifierTests {
     }
 
     @Test func backfillCancellationKeepsWrittenBatches() async throws {
+        let temp = try TempFonts(); defer { temp.cleanup() }
+        _ = try temp.junk("big.ttc")  // present, unparsable: classified unknown
         let store = try FontStore(database: Database(path: ":memory:"))
-        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "F", displayName: "F", lastKnownPath: "/nonexistent")
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "F", displayName: "F", lastKnownPath: temp.root.path)
         let batch = try store.nextImportBatch()
         let faces = (0..<450).map { Fixture.face("P-\($0)", family: "P", style: "\($0)", weight: 400, index: $0) }
         _ = try store.insertFile(FileRecord(locationID: loc.id, relativePath: "big.ttc", size: 1, mtime: Date(), format: "ttc", fingerprint: "big"),
@@ -243,8 +248,10 @@ struct StyleClassifierTests {
     }
 
     @Test func cancelledRunLeavesNothingInFlight() async throws {
+        let temp = try TempFonts(); defer { temp.cleanup() }
+        _ = try temp.junk("big.ttc")  // present, unparsable: classified unknown
         let store = try FontStore(database: Database(path: ":memory:"))
-        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "F", displayName: "F", lastKnownPath: "/nonexistent")
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "F", displayName: "F", lastKnownPath: temp.root.path)
         let batch = try store.nextImportBatch()
         let faces = (0..<450).map { Fixture.face("P-\($0)", family: "P", style: "\($0)", weight: 400, index: $0) }
         _ = try store.insertFile(FileRecord(locationID: loc.id, relativePath: "big.ttc", size: 1, mtime: Date(), format: "ttc", fingerprint: "big"),
@@ -260,5 +267,24 @@ struct StyleClassifierTests {
         try await Task.sleep(for: .milliseconds(200))
         let later = try store.countFacesNeedingClassification()
         #expect(remaining == 250 && later == remaining)
+    }
+
+    @Test func backfillLeavesUnreachableFilesForLater() async throws {
+        let temp = try TempFonts(); defer { temp.cleanup() }
+        let (store, _) = try libraryOfFonts([(TempFonts.arialBold, "a.ttf"), (TempFonts.hoeflerText, "h.ttc")], temp: temp)
+        // Gone (a pulled drive looks the same): not stamped, while the other file is still classified.
+        let moved = temp.root.appendingPathComponent("a.moved")
+        try FileManager.default.moveItem(at: temp.root.appendingPathComponent("a.ttf"), to: moved)
+        var last: BackfillProgress?
+        for await p in StyleBackfill(store: store).run() { last = p }
+        let stamped = try versions(store)
+        #expect(stamped.first == 0 && stamped.dropFirst().allSatisfy { $0 == StyleClassifier.version })
+        #expect(last?.done == last?.total)
+        #expect(try store.countFacesNeedingClassification() == 1)
+        // Back: classified by the next run.
+        try FileManager.default.moveItem(at: moved, to: temp.root.appendingPathComponent("a.ttf"))
+        for await _ in StyleBackfill(store: store).run() {}
+        #expect(try versions(store).allSatisfy { $0 == StyleClassifier.version })
+        #expect(try classes(store).first == .sans)
     }
 }

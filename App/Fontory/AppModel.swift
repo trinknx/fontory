@@ -564,6 +564,9 @@ final class AppModel {
     @ObservationIgnored var styleBackfillTask: Task<Void, Never>?
     /// A start was asked for while a run was going: run again once it ends.
     @ObservationIgnored var styleBackfillRerun = false
+    /// Unmounts being handled (from the first event until their locations are marked offline): no run starts
+    /// meanwhile, the store still lists the volume online. The handler starts it when the last one is done.
+    @ObservationIgnored var unmountsInProgress = 0
     /// Set when quitting: no new runs.
     @ObservationIgnored var styleBackfillStopped = false
     /// Runs started, and the most that ever ran at once (smoke checks of the coalescing).
@@ -1238,7 +1241,8 @@ final class AppModel {
             // with "disk in use". Pending renders are dropped and parsed fonts released.
             previewPipeline.cancelAll()
             glyphPipeline.cancelAll()
-            // The backfill may be reading from the volume; it starts again once the locations are offline.
+            // The backfill may be reading from the volume; no run starts until the locations are offline.
+            unmountsInProgress += 1
             cancelStyleBackfill()
             previewRenderer.forgetFonts(under: volumeURL)
             for id in ids { forgetPreviewFonts(of: id) }
@@ -1251,11 +1255,12 @@ final class AppModel {
             }
             await backend.activation.volumeUnmounted(locationIDs: ids)
             _ = await runBackground { try backend.markOffline(ids) }
+            unmountsInProgress -= 1
+            startStyleBackfill()
             await reloadLocations()
             invalidateRows()
             refreshCounts()
             scheduleRefresh()
-            startStyleBackfill()
         }
     }
 

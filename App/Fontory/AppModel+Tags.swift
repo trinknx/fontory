@@ -388,10 +388,20 @@ extension AppModel {
             id = existing.id
         } else {
             guard let created = await createTag(name: trimmed, parentID: nil) else { return nil }
-            id = created
+            await assignNewTag(created, toFaces: faceIDs)
+            return created
         }
         await setTag(id, onFaces: faceIDs, included: true)
         return id
+    }
+
+    /// Tags faces with a plain tag created just now. Unlike `setTag` it does not look the tag up in `tags`: a
+    /// newer organization reload (the backfill's, say) can drop the one that would have listed it.
+    func assignNewTag(_ tagID: Int64, toFaces faceIDs: [Int64]) async {
+        guard !faceIDs.isEmpty else { return }
+        if await tagWrite("The fonts could not be tagged", { try $0.addTag(tagID, toFaces: faceIDs) }) != nil {
+            await afterTagChange()
+        }
     }
 
     /// Fonts dragged from the browser may be dropped on plain tag rows only; Style rows, smart tags and Library

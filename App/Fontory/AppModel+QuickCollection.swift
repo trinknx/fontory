@@ -74,15 +74,15 @@ extension AppModel {
     }
 
     /// Save as Tag…: a new top-level tag named `name` with the faces of the collection. A taken name shows the
-    /// usual tag alert and creates nothing. Returns the tag's id.
+    /// usual tag alert and creates nothing; so does an empty collection. Returns the tag's id.
     @discardableResult
     func saveQuickCollectionAsTag(name: String) async -> Int64? {
         await quickCollectionWriteChain?.value
         guard let backend,
-              let ids = await runBackground({ try backend.store.quickCollectionFaceIDs() }, failureTitle: "The Quick Collection could not be read")
-        else { return nil }
-        guard let id = await createTag(name: name, parentID: nil) else { return nil }
-        await setTag(id, onFaces: ids.sorted(), included: true)
+              let ids = await runBackground({ try backend.store.quickCollectionFaceIDs() }, failureTitle: "The Quick Collection could not be read"),
+              !ids.isEmpty,
+              let id = await createTag(name: name, parentID: nil) else { return nil }
+        await assignNewTag(id, toFaces: ids.sorted())
         return id
     }
 
@@ -112,6 +112,8 @@ extension AppModel {
     /// mount and every scan. Never two at once: a start while one runs makes it run once more when it ends.
     func startStyleBackfill() {
         guard let backend, !styleBackfillStopped else { return }
+        // During an unmount the handler starts it afterwards.
+        if unmountsInProgress > 0 { return }
         if styleBackfillTask != nil {
             styleBackfillRerun = true
             return

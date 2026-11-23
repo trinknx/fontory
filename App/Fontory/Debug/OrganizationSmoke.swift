@@ -413,6 +413,27 @@ enum OrganizationSmoke {
               && direct[serif]?.contains(tagID ?? -1) == true && direct[mono]?.contains(tagID ?? -1) == true
               && direct[sans]?.contains(tagID ?? -1) != true && model.organizationCounts.perTag[tagID ?? -1] == 2,
               "Save as Tag creates a top-level tag with the same faces", "\(direct)")
+        // Again while organization reloads keep firing (as during a backfill): every face is still tagged.
+        let reloads = Task { @MainActor in
+            while !Task.isCancelled {
+                Task { await model.reloadOrganization() }
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+        }
+        var busyOK = true
+        for i in 0..<10 {
+            let busyID = await model.saveQuickCollectionAsTag(name: "Busy \(i)")
+            let busyTags = await model.faceTagMap([serif, mono]) ?? [:]
+            if busyID == nil || busyTags[serif]?.contains(busyID ?? -1) != true || busyTags[mono]?.contains(busyID ?? -1) != true {
+                busyOK = false
+            }
+        }
+        reloads.cancel()
+        await model.reloadOrganization()
+        check(busyOK, "Save as Tag while organization reloads are firing still tags every face")
+        let created = await model.createTagAndAssign(name: "Busy New", faces: [serif])
+        let createdTags = await model.faceTagMap([serif]) ?? [:]
+        check(created != nil && createdTags[serif]?.contains(created ?? -1) == true, "New Tag… tags the face")
         let tagCount = model.tags.count
         let dup = await model.saveQuickCollectionAsTag(name: "picks")
         check(dup == nil && model.alert != nil && model.tags.count == tagCount, "Save as Tag with a taken name shows the alert")
@@ -439,6 +460,10 @@ enum OrganizationSmoke {
         let store = backend.store
         let before: Int
         do {
+            // The seeded faces' files: present but not fonts (classified unknown; missing files would be skipped).
+            for name in ["Serif", "Sans", "Mono"] {
+                try Data(repeating: 0x5A, count: 256).write(to: folder.appendingPathComponent("Smoke\(name).otf"))
+            }
             let url = folder.appendingPathComponent("ArialBold.ttf")
             try FileManager.default.copyItem(at: URL(fileURLWithPath: "/System/Library/Fonts/Supplemental/Arial Bold.ttf"), to: url)
             guard let loc = try store.locations().first(where: { $0.volumeUUID == "SMOKE-VOLUME" }) else {
@@ -456,6 +481,13 @@ enum OrganizationSmoke {
             return
         }
 
+        // During an unmount nothing starts (the handler starts it once the volume is offline).
+        model.unmountsInProgress = 1
+        let idleRuns = model.styleBackfillRuns
+        model.startStyleBackfill()
+        check(model.styleBackfillRuns == idleRuns && model.styleBackfillTask == nil, "backfill: no start while an unmount is handled")
+        model.unmountsInProgress = 0
+
         // Coalescing: starting while a run goes only asks for one more run, never a second at once.
         let runs = model.styleBackfillRuns
         model.startStyleBackfill()
@@ -471,7 +503,7 @@ enum OrganizationSmoke {
         check(model.styleBackfillProgress == nil, "backfill: progress hidden when done")
         await model.reloadOrganization()
         check(model.organizationCounts.perStyle[.sans] == 1 && model.organizationCounts.perStyle[.unknown] == 3,
-              "backfill: Arial Bold reclassified as Sans, the fileless faces unknown", "\(model.organizationCounts.perStyle)")
+              "backfill: Arial Bold reclassified as Sans, the unparsable files unknown", "\(model.organizationCounts.perStyle)")
 
         // Nothing to do: no progress shown.
         model.startStyleBackfill()
