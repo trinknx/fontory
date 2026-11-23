@@ -526,9 +526,24 @@ final class AppModel {
     var alert: AlertItem?
     private(set) var isReady = false
 
+    // MARK: Tags (actions in AppModel+Tags.swift)
+
+    /// Every tag, plain and smart, in id order (the sidebar builds the tree).
+    var tags: [TagRecord] = []
+    var organizationCounts = OrganizationCounts()
+    /// Smart-tag row counts (`OrganizationCounts.perTag` covers plain tags only).
+    var smartTagCounts: [Int64: Int] = [:]
+    /// The tag whose sidebar row shows an inline name field.
+    var renamingTagID: Int64?
+    /// Expanded tag rows in the sidebar tree.
+    var expandedTagIDs: Set<Int64> = []
+    /// The smart tag whose rule editor should be shown. Hook for the smart tag editor sheet (Task 8).
+    var editingSmartTagID: Int64?
+    @ObservationIgnored var organizationGeneration = 0
+
     // MARK: Private
 
-    @ObservationIgnored private var backend: LibraryBackend?
+    @ObservationIgnored private(set) var backend: LibraryBackend?
     @ObservationIgnored private var presetStore: PresetStore?
     @ObservationIgnored private let rowCache = LRUCache<Int64, FaceRow>(limit: 4000)
     /// Ids whose rows are being fetched by `prefetchRows`.
@@ -792,6 +807,7 @@ final class AppModel {
             guard !Task.isCancelled, let counts else { return }
             self?.counts = counts
         }
+        Task { await reloadOrganization() }
     }
 
     /// The row for a face, from a small cache filled in batches around the requested position.
@@ -1208,6 +1224,8 @@ final class AppModel {
         refreshCounts()
         switch query.scope {
         case .activated, .user, .deactivated: scheduleRefresh()
+        // A smart tag may test activation.
+        case .tags(let picks) where picks.contains(where: { $0.rule != nil }): scheduleRefresh()
         default: if query.sort == .lastActivated { scheduleRefresh() }
         }
     }
@@ -1458,11 +1476,22 @@ final class AppModel {
         }
     }
 
+    #if DEBUG
+    /// Debug smoke hooks: use a backend opened elsewhere (a temporary library) without the launch sequence.
+    func attachBackendForSmoke(_ backend: LibraryBackend) async {
+        self.backend = backend
+        await reloadLocations()
+        isReady = true
+    }
+
+    func refreshNowForSmoke() async { await refreshNow() }
+    #endif
+
     // MARK: Helpers
 
     /// Runs `work` off the main actor. On error, logs it and (with a title) shows an alert; returns nil.
     @discardableResult
-    private func runBackground<T: Sendable>(_ work: @escaping @Sendable () throws -> T, failureTitle: String? = nil) async -> T? {
+    func runBackground<T: Sendable>(_ work: @escaping @Sendable () throws -> T, failureTitle: String? = nil) async -> T? {
         let result = await Task.detached(priority: .userInitiated) { Result { try work() } }.value
         switch result {
         case .success(let value):

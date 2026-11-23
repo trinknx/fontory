@@ -1,3 +1,4 @@
+import AppKit
 import FontoryCore
 import SwiftUI
 
@@ -7,7 +8,7 @@ struct SidebarView: View {
 
     var body: some View {
         @Bindable var model = model
-        List(selection: scope) {
+        List(selection: selection) {
             Section("Library") {
                 libraryRow("All Fonts", "textformat", .all, model.counts.all)
                 libraryRow("System", "lock", .system, model.counts.system)
@@ -20,6 +21,9 @@ struct SidebarView: View {
                     .help("Library fonts that are active nowhere")
                 libraryRow("Offline", "externaldrive.badge.xmark", .offline, model.counts.offline)
                 libraryRow("Last Import", "square.and.arrow.down", .recentImport, model.counts.lastImport)
+                libraryRow("Untagged", "square.dashed", .untagged, model.organizationCounts.untagged)
+                    .help("Fonts without any tag")
+                libraryRow("Quick Collection", "bookmark", .quickCollection, model.organizationCounts.quickCollection)
             }
 
             Section("Locations") {
@@ -47,8 +51,11 @@ struct SidebarView: View {
                 .accessibilityValue(model.query.includeSystem ? "Shown" : "Hidden")
                 ForEach(model.installedLocations) { LocationNode(location: $0) }
             }
+
+            TagsSection()
         }
         .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom, spacing: 0) { SidebarAddButton() }
         .overlay {
             if isDropTargeted {
                 RoundedRectangle(cornerRadius: 8)
@@ -65,14 +72,17 @@ struct SidebarView: View {
         } isTargeted: { isDropTargeted = $0 }
     }
 
-    private var scope: Binding<LibraryQuery.Scope?> {
-        Binding(get: { model.query.scope }, set: { if let s = $0 { model.query.scope = s } })
+    /// Tag rows may be selected together (⌘-click); the model turns the list's change into a scope, reading the
+    /// click's modifier keys (⌥ inverts a tag).
+    private var selection: Binding<Set<SidebarItem>> {
+        Binding(get: { model.sidebarSelection },
+                set: { model.applySidebarSelection($0, modifiers: EventModifiers(NSApp.currentEvent?.modifierFlags ?? [])) })
     }
 
     private func libraryRow(_ title: String, _ symbol: String, _ scope: LibraryQuery.Scope, _ count: Int) -> some View {
         Label(title, systemImage: symbol)
             .badge(count)
-            .tag(scope)
+            .tag(SidebarItem.scope(scope))
     }
 }
 
@@ -109,7 +119,7 @@ private struct LocationNode: View {
 
     private var label: some View {
         LocationRow(location: location)
-            .tag(LibraryQuery.Scope.location(id: location.id, subfolder: nil))
+            .tag(SidebarItem.scope(.location(id: location.id, subfolder: nil)))
             .contextMenu { LocationMenu(location: location) }
     }
 }
@@ -140,7 +150,7 @@ private struct SubfolderNode: View {
 
     private var label: some View {
         Label((path as NSString).lastPathComponent, systemImage: "folder")
-            .tag(LibraryQuery.Scope.location(id: locationID, subfolder: path))
+            .tag(SidebarItem.scope(.location(id: locationID, subfolder: path)))
     }
 }
 
@@ -301,4 +311,14 @@ func chooseRelinkTarget(for location: LocationRecord, model: AppModel) {
     panel.message = "Choose the new place of “\(location.displayName)”."
     guard panel.runModal() == .OK, let url = panel.url else { return }
     Task { await model.relink(location.id, to: url) }
+}
+
+extension EventModifiers {
+    init(_ flags: NSEvent.ModifierFlags) {
+        self = []
+        if flags.contains(.command) { insert(.command) }
+        if flags.contains(.option) { insert(.option) }
+        if flags.contains(.shift) { insert(.shift) }
+        if flags.contains(.control) { insert(.control) }
+    }
 }

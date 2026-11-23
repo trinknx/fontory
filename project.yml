@@ -20,5 +20,6 @@ targets:
         ENABLE_HARDENED_RUNTIME: NO
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: App/Fontory/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.graphics-design

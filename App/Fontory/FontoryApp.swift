@@ -2,6 +2,16 @@ import AppKit
 import SwiftUI
 
 @main
+enum FontoryMain {
+    @MainActor static func main() {
+        #if DEBUG
+        // Headless checks on a temporary library; they never open the user's library or any window.
+        if CommandLine.arguments.contains(OrganizationSmoke.argument) { OrganizationSmoke.runAndExit() }
+        #endif
+        FontoryApp.main()
+    }
+}
+
 struct FontoryApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 

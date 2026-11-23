@@ -260,4 +260,23 @@ final class LibraryBackend: Sendable {
     func counts(includeSystem: Bool) throws -> LibraryCounts {
         LibraryCounts(groups: try store.faceCountGroups(), includeSystem: includeSystem)
     }
+
+    struct Organization: Sendable {
+        var tags: [TagRecord]
+        var counts: OrganizationCounts
+        /// Faces matching each smart tag's rule, for the same `includeSystem`.
+        var smartCounts: [Int64: Int]
+    }
+
+    /// Tags and the sidebar counts of the Tags section, Untagged and the Quick Collection.
+    func organization(includeSystem: Bool) throws -> Organization {
+        let tags = try store.tags()
+        let counts = try store.organizationCounts(includeSystem: includeSystem)
+        var smart: [Int64: Int] = [:]
+        for tag in tags where tag.kind == .smart {
+            let pick = TagPick(tagID: tag.id, rule: SmartRule.decode(tag.ruleJSON ?? ""))
+            smart[tag.id] = try store.faceIDs(for: LibraryQuery(scope: .tags([pick]), includeSystem: includeSystem)).count
+        }
+        return Organization(tags: tags, counts: counts, smartCounts: smart)
+    }
 }
