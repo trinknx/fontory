@@ -71,7 +71,7 @@ extension LibraryQuery {
         case .name: order = "faces.full_name COLLATE NOCASE \(dir), faces.id \(dir)"
         case .weight: order = "faces.weight \(dir), \(Self.effectiveFamily) COLLATE NOCASE \(dir), faces.id \(dir)"
         case .dateAdded: order = "files.added_at \(dir), faces.id \(dir)"
-        case .lastActivated: order = "faces.last_activated \(dir), faces.id \(dir)"
+        case .lastActivated: order = "faces.last_activated IS NULL, faces.last_activated \(dir), faces.id \(dir)"
         case .random(let seed):
             // Reduce the seed first so id * seed stays well inside Int64.
             let s = Int64(seed % Self.randomModulus)

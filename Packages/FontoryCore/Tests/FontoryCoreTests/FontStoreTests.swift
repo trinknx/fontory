@@ -195,4 +195,24 @@ import Testing
         #expect(ids.count == 444)
         #expect(elapsed < .milliseconds(100), "took \(elapsed)")
     }
+
+    @Test func lastActivatedSortsNeverActivatedLast() throws {
+        let f = try Fixture.make()
+        let ids = f.faceIDs
+        try f.store.setActivation(faceIDs: [ids["Beta-Black"]!], state: .on, at: Date(timeIntervalSince1970: 100))
+        try f.store.setActivation(faceIDs: [ids["Alpha-Bold"]!], state: .on, at: Date(timeIntervalSince1970: 200))
+        let asc = try f.store.faceIDs(for: LibraryQuery(sort: .lastActivated))
+        #expect(Array(asc.prefix(2)) == [ids["Beta-Black"]!, ids["Alpha-Bold"]!])
+        let desc = try f.store.faceIDs(for: LibraryQuery(sort: .lastActivated, ascending: false))
+        #expect(Array(desc.prefix(2)) == [ids["Alpha-Bold"]!, ids["Beta-Black"]!])
+        #expect(desc.count == 6)
+    }
+
+    @Test func rowsHandlesMoreThanOneChunk() throws {
+        let f = try Fixture.make()
+        let id = f.faceIDs["Alpha-Bold"]!
+        let rows = try f.store.rows(ids: Array(repeating: id, count: 1203))
+        #expect(rows.count == 1 && rows[id]?.postScriptName == "Alpha-Bold")
+        #expect(try f.store.rows(ids: []).isEmpty)
+    }
 }

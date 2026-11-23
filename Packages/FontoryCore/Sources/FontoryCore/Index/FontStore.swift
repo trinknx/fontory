@@ -28,12 +28,12 @@ public final class FontStore: Sendable {
               kind = excluded.kind, display_name = excluded.display_name,
               last_known_path = excluded.last_known_path, online = 1
             """)
+            defer { up.reset() }
             try up.bind([.int(Int64(kind.rawValue)), .text(volumeUUID), .text(relativePath), .text(displayName), .text(lastKnownPath)])
             _ = try up.step()
-            up.reset()
             let sel = try database.prepare("SELECT \(Self.locationColumns) FROM locations WHERE volume_uuid = ? AND relative_path = ?")
-            try sel.bind([.text(volumeUUID), .text(relativePath)])
             defer { sel.reset() }
+            try sel.bind([.text(volumeUUID), .text(relativePath)])
             guard try sel.step() else { throw SQLiteError(code: -1, message: "location vanished after upsert") }
             return location(sel)
         }
@@ -49,15 +49,15 @@ public final class FontStore: Sendable {
 
     public func setLocationOnline(_ id: Int64, online: Bool, lastKnownPath: String?) throws {
         let s = try database.prepare("UPDATE locations SET online = ?, last_known_path = COALESCE(?, last_known_path) WHERE id = ?")
-        try s.bind([.int(online ? 1 : 0), lastKnownPath.map { .text($0) } ?? .null, .int(id)])
         defer { s.reset() }
+        try s.bind([.int(online ? 1 : 0), lastKnownPath.map { .text($0) } ?? .null, .int(id)])
         _ = try s.step()
     }
 
     public func deleteLocation(_ id: Int64) throws {
         let s = try database.prepare("DELETE FROM locations WHERE id = ?")
-        try s.bind([.int(id)])
         defer { s.reset() }
+        try s.bind([.int(id)])
         _ = try s.step()
     }
 
@@ -65,8 +65,8 @@ public final class FontStore: Sendable {
 
     public func files(in locationID: Int64) throws -> [FileRecord] {
         let s = try database.prepare("SELECT id, location_id, relative_path, size, mtime, format, fingerprint FROM files WHERE location_id = ? ORDER BY relative_path")
-        try s.bind([.int(locationID)])
         defer { s.reset() }
+        try s.bind([.int(locationID)])
         var out: [FileRecord] = []
         while try s.step() {
             out.append(FileRecord(id: s.int64(0), locationID: s.int64(1), relativePath: s.text(2), size: s.int64(3),
@@ -88,11 +88,11 @@ public final class FontStore: Sendable {
             INSERT INTO files(location_id, relative_path, size, mtime, format, fingerprint, added_at, import_batch)
             VALUES(?,?,?,?,?,?,?,?)
             """)
+            defer { s.reset() }
             try s.bind([.int(file.locationID), .text(file.relativePath), .int(file.size),
                         .double(file.mtime.timeIntervalSince1970), .text(file.format), .text(file.fingerprint),
                         .double(Date().timeIntervalSince1970), .int(importBatch)])
             _ = try s.step()
-            s.reset()
             let fileID = database.lastInsertRowID
             for face in faces { try insertFace(face, fileID: fileID) }
             return fileID
@@ -121,8 +121,8 @@ public final class FontStore: Sendable {
     private func insertFace(_ f: ParsedFace, fileID: Int64) throws {
         let marks = Array(repeating: "?", count: 28).joined(separator: ",")
         let s = try database.prepare("INSERT INTO faces(\(Self.faceColumns)) VALUES(\(marks))")
-        try s.bind(faceValues(f, fileID: fileID))
         defer { s.reset() }
+        try s.bind(faceValues(f, fileID: fileID))
         _ = try s.step()
     }
 
@@ -131,11 +131,12 @@ public final class FontStore: Sendable {
     public func replaceFaces(fileID: Int64, size: Int64, mtime: Date, fingerprint: String, faces: [ParsedFace]) throws {
         try database.transaction {
             let f = try database.prepare("UPDATE files SET size = ?, mtime = ?, fingerprint = ? WHERE id = ?")
+            defer { f.reset() }
             try f.bind([.int(size), .double(mtime.timeIntervalSince1970), .text(fingerprint), .int(fileID)])
             _ = try f.step()
-            f.reset()
 
             let old = try database.prepare("SELECT id, postscript_name FROM faces WHERE file_id = ? ORDER BY face_index")
+            defer { old.reset() }
             try old.bind([.int(fileID)])
             var oldByName: [String: [Int64]] = [:]
             var oldIDs: [Int64] = []
@@ -158,18 +159,18 @@ public final class FontStore: Sendable {
             let keep = Set(matched.map(\.id))
             for id in oldIDs where !keep.contains(id) {
                 let d = try database.prepare("DELETE FROM faces WHERE id = ?")
+                defer { d.reset() }
                 try d.bind([.int(id)])
                 _ = try d.step()
-                d.reset()
             }
             // Park surviving rows on unique negative indices so reindexing can't collide.
             try database.execute("UPDATE faces SET face_index = -id - 1 WHERE file_id = \(fileID)")
             let sets = Self.faceColumns.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) + " = ?" }.joined(separator: ", ")
             for (id, face) in matched {
                 let u = try database.prepare("UPDATE faces SET \(sets) WHERE id = ?")
+                defer { u.reset() }
                 try u.bind(faceValues(face, fileID: fileID) + [.int(id)])
                 _ = try u.step()
-                u.reset()
             }
             for face in fresh { try insertFace(face, fileID: fileID) }
         }
@@ -177,8 +178,8 @@ public final class FontStore: Sendable {
 
     public func moveFile(fileID: Int64, toRelativePath: String, mtime: Date) throws {
         let s = try database.prepare("UPDATE files SET relative_path = ?, mtime = ? WHERE id = ?")
-        try s.bind([.text(toRelativePath), .double(mtime.timeIntervalSince1970), .int(fileID)])
         defer { s.reset() }
+        try s.bind([.text(toRelativePath), .double(mtime.timeIntervalSince1970), .int(fileID)])
         _ = try s.step()
     }
 
@@ -186,9 +187,9 @@ public final class FontStore: Sendable {
         try database.transaction {
             for id in ids {
                 let s = try database.prepare("DELETE FROM files WHERE id = ?")
+                defer { s.reset() }
                 try s.bind([.int(id)])
                 _ = try s.step()
-                s.reset()
             }
         }
     }
@@ -198,8 +199,8 @@ public final class FontStore: Sendable {
     public func faceIDs(for query: LibraryQuery) throws -> [Int64] {
         let (sql, bindings) = query.sql(columns: "faces.id")
         let s = try database.prepare(sql)
-        try s.bind(bindings)
         defer { s.reset() }
+        try s.bind(bindings)
         var out: [Int64] = []
         out.reserveCapacity(1024)
         while try s.step() { out.append(s.int64(0)) }
@@ -208,8 +209,8 @@ public final class FontStore: Sendable {
 
     public func faceIDs(state: ActivationState) throws -> [Int64] {
         let s = try database.prepare("SELECT id FROM faces WHERE activation = ? ORDER BY id")
-        try s.bind([.int(Int64(state.rawValue))])
         defer { s.reset() }
+        try s.bind([.int(Int64(state.rawValue))])
         var out: [Int64] = []
         while try s.step() { out.append(s.int64(0)) }
         return out
@@ -226,6 +227,7 @@ public final class FontStore: Sendable {
         let eff = LibraryQuery.effectiveFamily
         let (sql, bindings) = query.sql(columns: "faces.id, \(eff), faces.weight, faces.width, faces.slant, faces.is_italic")
         let s = try database.prepare(sql)
+        defer { s.reset() }
         try s.bind(bindings)
         var order: [String] = []
         var names: [String: String] = [:]
@@ -239,12 +241,11 @@ public final class FontStore: Sendable {
                 FamilyMember(id: s.int64(0), weight: s.double(2), width: s.double(3), slant: s.double(4), isItalic: s.int64(5) != 0, order: n))
             n += 1
         }
-        s.reset()
 
         var prefs: [String: Int64] = [:]
         let p = try database.prepare("SELECT family_key, representative_face_id FROM family_prefs WHERE representative_face_id IS NOT NULL")
+        defer { p.reset() }
         while try p.step() { prefs[p.text(0)] = p.int64(1) }
-        p.reset()
 
         return order.map { key in
             let faces = members[key]!.sorted {
@@ -266,14 +267,19 @@ public final class FontStore: Sendable {
         (m.isItalic ? 1 : 0, abs(m.weight - 400), abs(m.width - 5))
     }
 
+    /// Fixed chunk size so `rows(ids:)` uses a single cached statement; the last chunk is
+    /// padded by repeating its final id (duplicates in `IN` are harmless).
+    private static let rowsChunk = 500
+
     public func rows(ids: [Int64]) throws -> [Int64: FaceRow] {
         var out: [Int64: FaceRow] = [:]
         out.reserveCapacity(ids.count)
+        let marks = Array(repeating: "?", count: Self.rowsChunk).joined(separator: ",")
         var start = 0
         while start < ids.count {
-            let chunk = Array(ids[start..<min(start + 500, ids.count)])
+            var chunk = Array(ids[start..<min(start + Self.rowsChunk, ids.count)])
             start += chunk.count
-            let marks = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            chunk += Array(repeating: chunk[chunk.count - 1], count: Self.rowsChunk - chunk.count)
             let s = try database.prepare("""
             SELECT faces.id, faces.file_id, faces.face_index, faces.postscript_name, \(LibraryQuery.effectiveFamily), faces.style,
               faces.full_name, faces.weight, faces.is_variable, files.format, faces.vendor, faces.version, faces.glyph_count,
@@ -281,6 +287,7 @@ public final class FontStore: Sendable {
             FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
             WHERE faces.id IN (\(marks))
             """)
+            defer { s.reset() }
             try s.bind(chunk.map { .int($0) })
             while try s.step() {
                 let online = s.int64(15) != 0
@@ -300,7 +307,6 @@ public final class FontStore: Sendable {
                     online: online, fileURL: url, locationID: s.int64(18))
                 out[row.id] = row
             }
-            s.reset()
         }
         return out
     }
@@ -310,12 +316,12 @@ public final class FontStore: Sendable {
     public func setActivation(faceIDs: [Int64], state: ActivationState, at date: Date) throws {
         try database.transaction {
             let s = try database.prepare("UPDATE faces SET activation = ?1, last_activated = CASE WHEN ?1 != 0 THEN ?2 ELSE last_activated END WHERE id = ?3")
+            defer { s.reset() }
             for id in faceIDs {
                 s.reset()
                 try s.bind([.int(Int64(state.rawValue)), .double(date.timeIntervalSince1970), .int(id)])
                 _ = try s.step()
             }
-            s.reset()
         }
     }
 
@@ -324,8 +330,8 @@ public final class FontStore: Sendable {
         INSERT INTO family_prefs(family_key, representative_face_id) VALUES(?,?)
         ON CONFLICT(family_key) DO UPDATE SET representative_face_id = excluded.representative_face_id
         """)
-        try s.bind([.text(familyKey), faceID.map { .int($0) } ?? .null])
         defer { s.reset() }
+        try s.bind([.text(familyKey), faceID.map { .int($0) } ?? .null])
         _ = try s.step()
     }
 

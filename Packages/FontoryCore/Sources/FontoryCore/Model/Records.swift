@@ -13,6 +13,18 @@ public struct LocationRecord: Sendable, Identifiable, Hashable {
     public var lastKnownPath: String
     public var online: Bool
     public var lastScan: Date?
+
+    public init(id: Int64, kind: LocationKind, volumeUUID: String, relativePath: String, displayName: String,
+                lastKnownPath: String, online: Bool, lastScan: Date? = nil) {
+        self.id = id
+        self.kind = kind
+        self.volumeUUID = volumeUUID
+        self.relativePath = relativePath
+        self.displayName = displayName
+        self.lastKnownPath = lastKnownPath
+        self.online = online
+        self.lastScan = lastScan
+    }
 }
 
 public struct FileRecord: Sendable, Hashable {
@@ -132,6 +144,29 @@ public struct FaceRow: Sendable, Identifiable, Hashable {
     /// nil when the file's location is offline.
     public var fileURL: URL?
     public var locationID: Int64
+
+    public init(id: Int64, fileID: Int64, faceIndex: Int, postScriptName: String, family: String, style: String,
+                fullName: String, weight: Double, isVariable: Bool, format: String, vendor: String?, version: String?,
+                glyphCount: Int, activation: ActivationState, lastActivated: Date?, online: Bool, fileURL: URL?, locationID: Int64) {
+        self.id = id
+        self.fileID = fileID
+        self.faceIndex = faceIndex
+        self.postScriptName = postScriptName
+        self.family = family
+        self.style = style
+        self.fullName = fullName
+        self.weight = weight
+        self.isVariable = isVariable
+        self.format = format
+        self.vendor = vendor
+        self.version = version
+        self.glyphCount = glyphCount
+        self.activation = activation
+        self.lastActivated = lastActivated
+        self.online = online
+        self.fileURL = fileURL
+        self.locationID = locationID
+    }
 }
 
 public struct FamilyGroup: Sendable, Identifiable, Hashable {
@@ -140,4 +175,11 @@ public struct FamilyGroup: Sendable, Identifiable, Hashable {
     public var name: String
     public var faceIDs: [Int64]
     public var representativeID: Int64
+
+    public init(id: String, name: String, faceIDs: [Int64], representativeID: Int64) {
+        self.id = id
+        self.name = name
+        self.faceIDs = faceIDs
+        self.representativeID = representativeID
+    }
 }
