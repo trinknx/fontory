@@ -613,6 +613,7 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         case .system: return "System"
         case _ where !row.online: return "Offline"
         case .external: return "Outside Fontory"
+        case .disabledOutside: return "Disabled outside Fontory"
         case .on: return "Active"
         case .off: return "Off"
         }

@@ -15,7 +15,6 @@ struct SettingsView: View {
 
 private struct GeneralSettings: View {
     @Environment(AppModel.self) private var model
-    @AppStorage(SettingsKey.restoreOnLaunch) private var restoreOnLaunch = true
     @AppStorage(SettingsKey.keepRunningInMenuBar) private var keepRunningInMenuBar = true
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var loginNote: String?
@@ -23,7 +22,6 @@ private struct GeneralSettings: View {
     var body: some View {
         @Bindable var model = model
         Form {
-            Toggle("Restore activated fonts on launch", isOn: $restoreOnLaunch)
             Toggle("Launch at login", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { _, on in updateLaunchAtLogin(on) }
             if let loginNote {

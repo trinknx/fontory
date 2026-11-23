@@ -40,6 +40,7 @@ extension LibraryQuery {
 
         switch scope {
         case .all: break
+        // Kind 3 faces count as active only while registered (external_active), like library files.
         // Keep in step with `LibraryCounts.init(groups:includeSystem:)` and `FaceRow.activationStatus`.
         case .system: clauses.append("locations.kind = 2")
         case .user: clauses.append("files.external_active != 0 AND (locations.kind = 3 OR locations.kind IN (0, 1) AND faces.activation = 0)")

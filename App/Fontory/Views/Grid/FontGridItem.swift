@@ -149,12 +149,13 @@ private final class GridCellView: NSView {
 /// and system fonts show their own, inert look.
 final class ActivationDot: NSView {
     enum State {
-        case placeholder, off, on, external, locked
+        case placeholder, off, on, external, disabledOutside, locked
 
         init(_ status: ActivationStatus) {
             switch status {
             case .system: self = .locked
             case .external: self = .external
+            case .disabledOutside: self = .disabledOutside
             case .on: self = .on
             case .off: self = .off
             }
@@ -198,6 +199,7 @@ final class ActivationDot: NSView {
         case .off: symbol = "circle"; tint = .secondaryLabelColor; help = "Off — click to activate, hold for more"
         case .on: symbol = "circle.fill"; tint = .systemGreen; help = "Active — click to deactivate, hold for more"
         case .external: symbol = "circle.inset.filled"; tint = .systemBlue; help = "Active outside Fontory"
+        case .disabledOutside: symbol = "circle.dashed"; tint = .tertiaryLabelColor; help = "Installed, disabled outside Fontory"
         case .locked: symbol = "lock.fill"; tint = .tertiaryLabelColor; help = "System font — always available"
         }
         if isOffline && isInteractive { tint = .tertiaryLabelColor }

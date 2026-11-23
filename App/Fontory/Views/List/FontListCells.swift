@@ -98,7 +98,7 @@ extension ListColumn {
             case _ where !row.online: rank = 4
             case .on: rank = 0
             case .external: rank = 1
-            case .off: rank = 2
+            case .off, .disabledOutside: rank = 2
             }
             return .number(Double(rank))
         default:

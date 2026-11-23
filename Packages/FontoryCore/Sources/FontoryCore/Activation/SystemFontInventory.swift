@@ -14,10 +14,10 @@ public struct InventoryResult: Sendable, Equatable {
     public var failedFiles = 0
     /// Auto-indexed locations were created or deleted.
     public var locationsChanged = false
-    /// Scanned locations (folder, system, user-installed) that contain registered files they have not indexed yet:
-    /// their next scan picks them up. `pendingPaths` lists those files.
-    public var pendingLocationIDs: Set<Int64> = []
-    public var pendingPaths: Set<String> = []
+    /// Registered files inside scanned locations (folder, system, user-installed) that have not indexed them yet,
+    /// by location: the location's next scan picks them up.
+    public var pendingPaths: [Int64: Set<String>] = [:]
+    public var pendingLocationIDs: Set<Int64> { Set(pendingPaths.keys) }
 
     public init() {}
 
@@ -31,6 +31,9 @@ public struct InventoryResult: Sendable, Equatable {
 /// - A registered file outside every location is indexed into an auto-indexed, read-only location for its folder:
 ///   kind `.system` under /System, `.userInstalled` elsewhere. Such files are forgotten once they are inactive.
 /// - A registered file inside a scanned location that has not indexed it yet is left to that location's scan.
+/// - Nothing is ever written into a user's location (folder or file set): a registered file in a file set's folder
+///   that the set does not list is not indexed, and a folder the user owns is never turned into an auto-indexed one.
+/// - Private faces are ignored: dot-prefixed PostScript names or files, and FontServices' Reserved fonts.
 ///
 /// All database changes of one pass are applied in one transaction. Paths are matched in both their standardized
 /// and their symlink-resolved spelling, like `CoreTextRegistrar` matches registration errors.
@@ -58,6 +61,8 @@ public actor SystemFontInventory {
     private let readFile: @Sendable (URL) -> FileContents?
     private let volumeRef: @Sendable (URL) -> VolumeRef?
     private let resolvePath: @Sendable (String) -> String
+    /// Registered files that could not be read this session; not read again on every pass.
+    private var unreadable = Set<String>()
 
     public init(
         store: FontStore,
@@ -106,6 +111,18 @@ public actor SystemFontInventory {
         path == "/System" || path.hasPrefix(systemPrefix)
     }
 
+    /// Fonts macOS keeps for itself: hidden files, and FontServices' Reserved fonts.
+    static func isPrivatePath(_ path: String) -> Bool {
+        if (path as NSString).lastPathComponent.hasPrefix(".") { return true }
+        return path.contains("/FontServices.framework/") && path.contains("/Reserved/")
+    }
+
+    /// CoreText names the face in the fragment (`postscript-name=…`); a dot-prefixed name is a private face.
+    static func isPrivateFace(_ url: URL) -> Bool {
+        guard let fragment = url.fragment(percentEncoded: false) else { return false }
+        return fragment.hasPrefix("postscript-name=.")
+    }
+
     private enum Target: Hashable {
         case location(Int64)
         case newAutoLocation(folder: String)
@@ -124,10 +141,11 @@ public actor SystemFontInventory {
         var canonicalByKey: [String: String] = [:]
         var registered: [String] = []
         var seen = Set<String>()
-        for url in available where url.isFileURL {
+        for url in available where url.isFileURL && !Self.isPrivateFace(url) {
             let std = url.standardizedFileURL.path
             guard !std.isEmpty, canonicalByKey[std] == nil else { continue }
             let canonical = resolvePath(std)
+            if Self.isPrivatePath(std) || Self.isPrivatePath(canonical) { continue }
             canonicalByKey[std] = canonical
             canonicalByKey[canonical] = canonical
             if seen.insert(canonical).inserted { registered.append(canonical) }
@@ -147,7 +165,7 @@ public actor SystemFontInventory {
         var matched = Set<String>()
         var flagOn: [Int64] = []
         var flagOff: [Int64] = []
-        var forget: [Int64] = []
+        var forget: [(fileID: Int64, locationID: Int64)] = []
         for file in try store.inventoryFiles() {
             guard let loc = byID[file.locationID] else { continue }
             var canonical: String?
@@ -159,13 +177,14 @@ public actor SystemFontInventory {
             if let canonical { matched.insert(canonical) }
             let external = canonical != nil && !file.fontoryActive
             if external != file.externalActive { if external { flagOn.append(file.fileID) } else { flagOff.append(file.fileID) } }
-            if loc.autoIndexed && canonical == nil { forget.append(file.fileID) }
+            if loc.autoIndexed && canonical == nil { forget.append((file.fileID, loc.id)) }
         }
         result.flagsChanged = flagOn.count + flagOff.count
         result.removedFiles = forget.count
 
-        // 4. Registered files the index does not have.
+        // 4. Registered files the index does not have. File sets never cover: they hold only what the user imported.
         let fixed = locations.filter { !$0.autoIndexed }
+        let scanned = fixed.filter { $0.kind != .fileSet }
         var autoByFolder: [String: Int64] = [:]
         for loc in locations where loc.autoIndexed && loc.online {
             for root in roots[loc.id] ?? [] { autoByFolder[root] = loc.id }
@@ -173,21 +192,14 @@ public actor SystemFontInventory {
         var newFiles: [NewFile] = []
         for path in registered where !matched.contains(path) {
             var covering: (loc: LocationRecord, root: String)?
-            for loc in fixed {
+            for loc in scanned {
                 for root in roots[loc.id] ?? [] where Self.isUnder(path, root) {
                     if covering == nil || root.count > covering!.root.count { covering = (loc, root) }
                 }
             }
             if let covering {
                 // An offline location's old path cannot hold a registered file; nothing to do.
-                guard covering.loc.online else { continue }
-                if covering.loc.kind == .fileSet {
-                    let rel = covering.root == "/" ? String(path.dropFirst()) : String(path.dropFirst(covering.root.count + 1))
-                    newFiles.append(NewFile(target: .location(covering.loc.id), path: path, relativePath: rel))
-                } else {
-                    result.pendingLocationIDs.insert(covering.loc.id)
-                    result.pendingPaths.insert(path)
-                }
+                if covering.loc.online { result.pendingPaths[covering.loc.id, default: []].insert(path) }
                 continue
             }
             let folder = (path as NSString).deletingLastPathComponent
@@ -210,13 +222,16 @@ public actor SystemFontInventory {
 
         // 6. Read the new files, outside any transaction.
         var reads: [(file: NewFile, contents: FileContents)] = []
-        for file in newFiles {
+        for file in newFiles where !unreadable.contains(file.path) {
             if case .newAutoLocation(let folder) = file.target, refs[folder] == nil { continue }
-            guard let contents = readFile(URL(fileURLWithPath: file.path)) else {
+            guard var contents = readFile(URL(fileURLWithPath: file.path)) else {
                 result.failedFiles += 1
+                unreadable.insert(file.path)
                 Self.log.debug("active font could not be read: \(file.path, privacy: .public)")
                 continue
             }
+            contents.faces.removeAll { $0.postScriptName.hasPrefix(".") }
+            if contents.faces.isEmpty { unreadable.insert(file.path); continue }
             reads.append((file, contents))
         }
 
@@ -224,22 +239,37 @@ public actor SystemFontInventory {
 
         // 7. Apply everything in one transaction.
         try store.database.transaction {
+            // Ownership is checked again under the write lock: a location the user took over since step 2 (Add Folder
+            // on an auto-indexed folder) is neither written into nor cleaned up.
+            let stillAuto = Set(try store.locations().filter(\.autoIndexed).map(\.id))
             var created: [String: Int64] = [:]
             var inserted: [Int64] = []
             for (file, contents) in reads {
+                if case .newAutoLocation(let folder) = file.target, refs[folder] == nil { continue }
                 let locationID: Int64
                 switch file.target {
                 case .location(let id):
+                    guard stillAuto.contains(id) else { continue }
                     locationID = id
                 case .newAutoLocation(let folder):
                     if let id = created[folder] {
                         locationID = id
                     } else {
+                        // One auto location per folder. Downloaded system fonts (MobileAsset …/AssetData) each sit in
+                        // a folder of their own, so there can be many of these; they are never listed as locations,
+                        // only their fonts show (System / User views).
                         let ref = refs[folder]!
                         let loc = try store.upsertLocation(
                             kind: Self.isSystemPath(folder) ? .system : .userInstalled, volumeUUID: ref.volumeUUID,
                             relativePath: ref.relativePath, displayName: (folder as NSString).lastPathComponent,
                             lastKnownPath: folder, autoIndexed: true)
+                        // The user may have added this folder since step 2: the upsert leaves a user's location
+                        // alone, and nothing is written into it.
+                        guard loc.autoIndexed else {
+                            refs[folder] = nil
+                            Self.log.info("\(folder, privacy: .public) became a user location; its active fonts are left to its scan")
+                            continue
+                        }
                         created[folder] = loc.id
                         locationID = loc.id
                         result.locationsChanged = true
@@ -252,7 +282,9 @@ public actor SystemFontInventory {
             }
             try store.setExternalActive(fileIDs: flagOn + inserted, true)
             try store.setExternalActive(fileIDs: flagOff, false)
-            try store.deleteFiles(forget)
+            let gone = forget.filter { stillAuto.contains($0.locationID) }.map(\.fileID)
+            try store.deleteFiles(gone)
+            result.removedFiles = gone.count
             if try store.deleteEmptyAutoLocations() > 0 { result.locationsChanged = true }
             result.indexedFiles = inserted.count
         }

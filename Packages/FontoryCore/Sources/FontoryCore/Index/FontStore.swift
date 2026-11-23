@@ -42,6 +42,8 @@ public final class FontStore: Sendable {
     }
 
     /// Inserts a location, or updates the one with the same volume reference (its kind and auto-indexed flag too).
+    /// A user-owned location is never claimed by an auto-indexed upsert: it is returned unchanged (check `autoIndexed`
+    /// on the result). The reverse, a user adding a folder the inventory had auto-indexed, converts it.
     public func upsertLocation(kind: LocationKind, volumeUUID: String, relativePath: String, displayName: String, lastKnownPath: String,
                                autoIndexed: Bool = false) throws -> LocationRecord {
         try database.withLock {
@@ -52,6 +54,7 @@ public final class FontStore: Sendable {
                 ON CONFLICT(volume_uuid, relative_path) DO UPDATE SET
                   kind = excluded.kind, display_name = excluded.display_name,
                   last_known_path = excluded.last_known_path, online = 1, auto_indexed = excluded.auto_indexed
+                WHERE NOT (locations.auto_indexed = 0 AND excluded.auto_indexed != 0)
                 """)
                 defer { up.reset() }
                 try up.bind([.int(Int64(kind.rawValue)), .text(volumeUUID), .text(relativePath), .text(displayName), .text(lastKnownPath),
@@ -487,15 +490,20 @@ public final class FontStore: Sendable {
 
     // MARK: External activity
 
-    /// Sets or clears the "registered by someone other than Fontory" flag of files.
+    /// Sets or clears the "registered by someone other than Fontory" flag of files. Setting it skips, in the same
+    /// statement, any file with a face Fontory has on: Fontory's own registrations are never external, even when
+    /// an activation lands between the inventory's read and this write.
     public func setExternalActive(fileIDs: [Int64], _ active: Bool) throws {
         try database.withLock {
             try database.transaction {
-                let s = try database.prepare("UPDATE files SET external_active = ? WHERE id = ?")
+                let sql = active
+                    ? "UPDATE files SET external_active = 1 WHERE id = ? AND NOT EXISTS (SELECT 1 FROM faces WHERE faces.file_id = files.id AND faces.activation != 0)"
+                    : "UPDATE files SET external_active = 0 WHERE id = ?"
+                let s = try database.prepare(sql)
                 defer { s.reset() }
                 for id in fileIDs {
                     s.reset()
-                    try s.bind([.int(active ? 1 : 0), .int(id)])
+                    try s.bind([.int(id)])
                     _ = try s.step()
                 }
             }

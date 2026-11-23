@@ -62,15 +62,16 @@ struct AlertItem: Identifiable {
 }
 
 enum SettingsKey {
-    static let restoreOnLaunch = "restoreOnLaunch"
     static let keepRunningInMenuBar = "keepRunningInMenuBar"
     static let showSystemFonts = "showSystemFonts"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
-            restoreOnLaunch: true, keepRunningInMenuBar: true, showSystemFonts: true,
+            keepRunningInMenuBar: true, showSystemFonts: true,
             "zoom.grid": 0.25, "zoom.list": 0.25,
         ])
+        // Activation is always restored at launch now; drop the old "restore on launch" switch.
+        UserDefaults.standard.removeObject(forKey: "restoreOnLaunch")
     }
 }
 
@@ -83,6 +84,9 @@ final class AppModel {
     private static let folderEventDelay: Duration = .seconds(5)
     /// Registered-fonts notifications come in bursts (one per registration batch, from any process).
     private static let inventoryDelay: Duration = .seconds(1)
+    /// Fallback re-read of the registered fonts while the app runs (in menu-bar-only mode the app is never
+    /// activated, and other apps' changes might not be announced).
+    private static let inventoryInterval: Duration = .seconds(60)
 
     // MARK: Browsing state
 
@@ -158,6 +162,10 @@ final class AppModel {
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
     @ObservationIgnored private var inventoryTask: Task<Void, Never>?
     @ObservationIgnored private var inventoryObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private var inventoryTimer: Task<Void, Never>?
+    /// Identifies the run in `scanTasks[id]`, so a finished run clears its entry only if no newer one replaced it.
+    @ObservationIgnored private var scanTokens: [Int64: UInt64] = [:]
+    @ObservationIgnored private var nextScanToken: UInt64 = 0
     /// Registered files inside scanned locations for which a rescan was already started (rescanned once, so a file
     /// the scan cannot read does not loop).
     @ObservationIgnored private var requestedPendingPaths: Set<String> = []
@@ -208,15 +216,10 @@ final class AppModel {
         // 2. System folders are indexed once.
         let newSystem = await runBackground { try backend.ensureSystemLocations() } ?? []
         await reloadLocations()
-        // 3. Restore activated fonts. Activation is always persistent: faces left temporary by an older version are
-        // reset to off and never registered.
-        if UserDefaults.standard.bool(forKey: SettingsKey.restoreOnLaunch) {
-            let report = await backend.activation.restoreOnLaunch()
-            present(report, state: .on, context: "Restoring activated fonts")
-        } else {
-            let report = await backend.activation.forgetTemporary()
-            present(report, state: .off, context: "Resetting temporary fonts")
-        }
+        // 3. Restore activated fonts, always: Activated must match what is really active. Faces left temporary by an
+        // older version are reset to off and never registered.
+        let report = await backend.activation.restoreOnLaunch()
+        present(report, state: .on, context: "Restoring activated fonts")
         invalidateRows()
         // 3b. What is active on the Mac, then whenever the registered fonts change.
         await reconcileInventory()
@@ -247,6 +250,13 @@ final class AppModel {
                 MainActor.assumeIsolated { self?.scheduleInventory() }
             })
         }
+        inventoryTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: AppModel.inventoryInterval)
+                guard !Task.isCancelled else { return }
+                await self?.reconcileInventory()
+            }
+        }
     }
 
     /// Re-reads the registered fonts after the next quiet second.
@@ -270,11 +280,13 @@ final class AppModel {
             Self.log.error("registered fonts could not be matched: \(String(describing: error), privacy: .public)")
             return
         }
-        // Registered files a scanned location has not indexed yet: rescan it, once per file.
-        let fresh = result.pendingPaths.subtracting(requestedPendingPaths)
-        if !fresh.isEmpty {
-            requestedPendingPaths.formUnion(fresh)
-            for id in result.pendingLocationIDs where scanTasks[id] == nil { rescan(id) }
+        // Registered files a scanned location has not indexed yet: rescan it, once per file. A location already
+        // scanning is left alone (its scan ends with another pass); paths count as requested only once a rescan started.
+        for (id, paths) in result.pendingPaths {
+            let fresh = paths.subtracting(requestedPendingPaths)
+            guard !fresh.isEmpty, scanTasks[id] == nil else { continue }
+            rescan(id)
+            if scanTasks[id] != nil { requestedPendingPaths.formUnion(fresh) }
         }
         guard result.changed else { return }
         if result.locationsChanged { await reloadLocations() }
@@ -523,10 +535,14 @@ final class AppModel {
             return
         }
         scanTasks[id]?.cancel()
+        nextScanToken &+= 1
+        let token = nextScanToken
+        scanTokens[id] = token
         // Auto-indexed locations hold only the files the inventory added: refresh those like a file set.
         if loc.kind == .fileSet || loc.autoIndexed {
             scanProgress[id] = ScanProgress(locationID: id, phase: .parsing)
             scanTasks[id] = Task { [weak self] in
+                defer { self?.scanEnded(id, token: token) }
                 let progress = await Task.detached(priority: .utility) { try? backend.refreshFileSet(loc) }.value
                 guard let self, !Task.isCancelled else { return }
                 self.scanProgress[id] = progress ?? ScanProgress(locationID: id, phase: .aborted(reason: "rescan failed"))
@@ -536,6 +552,7 @@ final class AppModel {
             return
         }
         scanTasks[id] = Task { [weak self] in
+            defer { self?.scanEnded(id, token: token) }
             let stream = await backend.scanner.scan(locationID: id)
             var lastRefresh = ContinuousClock.now
             var last: ScanProgress?
@@ -561,6 +578,13 @@ final class AppModel {
             guard !Task.isCancelled else { return }
             await self.scanFinished()
         }
+    }
+
+    /// A scan run ended: `scanTasks[id]` is empty again unless a newer run replaced it.
+    private func scanEnded(_ id: Int64, token: UInt64) {
+        guard scanTokens[id] == token else { return }
+        scanTokens[id] = nil
+        scanTasks[id] = nil
     }
 
     /// Drops the preview renderer's parsed fonts for a location's files (they may hold the files open).

@@ -193,8 +193,10 @@ public struct FaceRow: Sendable, Identifiable, Hashable {
 public enum ActivationStatus: Sendable, Hashable {
     /// Ships with macOS: always active, read-only.
     case system
-    /// Installed or activated outside Fontory: read-only in Fontory.
+    /// Installed or activated outside Fontory and active now: read-only in Fontory.
     case external
+    /// In an installed-fonts folder (e.g. ~/Library/Fonts) but disabled there, e.g. by Font Book: read-only, inactive.
+    case disabledOutside
     /// Activated by Fontory.
     case on
     case off
@@ -204,7 +206,7 @@ extension FaceRow {
     public var activationStatus: ActivationStatus {
         switch locationKind {
         case .system: return .system
-        case .userInstalled: return .external
+        case .userInstalled: return externalActive ? .external : .disabledOutside
         case .folder, .fileSet:
             if activation != .off { return .on }
             return externalActive ? .external : .off
@@ -214,7 +216,7 @@ extension FaceRow {
     /// Fontory does not toggle system fonts or fonts active outside it.
     public var isActivationReadOnly: Bool {
         switch activationStatus {
-        case .system, .external: return true
+        case .system, .external, .disabledOutside: return true
         case .on, .off: return false
         }
     }

@@ -282,7 +282,7 @@ import Testing
         let status = Dictionary(uniqueKeysWithValues: rows.values.map { ($0.postScriptName, $0.activationStatus) })
         #expect(status["Sys"] == .system)
         #expect(status["Usr"] == .external)
-        #expect(status["UsrDisabled"] == .external)  // installed outside Fontory: read-only even when not active
+        #expect(status["UsrDisabled"] == .disabledOutside)  // installed outside Fontory but not registered: read-only, off
         #expect(status["Beta-Light"] == .external)
         #expect(status["Alpha-Bold"] == .on)
         #expect(status["Alpha-Regular"] == .off)
