@@ -43,11 +43,16 @@ public final class Database: @unchecked Sendable {
         }
         handle = h
         // Unicode-aware case folding for SQL (built-in lower() is ASCII-only); same helper as Swift-side checks.
-        sqlite3_create_function_v2(h, "fontory_fold", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, nil, { ctx, argc, argv in
+        let fnRC = sqlite3_create_function_v2(h, "fontory_fold", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, nil, { ctx, argc, argv in
             guard argc == 1, let argv, let v = argv[0], sqlite3_value_type(v) == SQLITE_TEXT,
                   let c = sqlite3_value_text(v) else { sqlite3_result_null(ctx); return }
             sqlite3_result_text(ctx, TagName.fold(String(cString: c)), -1, SQLITE_TRANSIENT)
         }, nil, nil, nil)
+        guard fnRC == SQLITE_OK else {
+            // The handle is closed by deinit, like after a failing PRAGMA below.
+            let msg = String(cString: sqlite3_errmsg(h))
+            throw SQLiteError(code: fnRC, message: "fontory_fold: \(msg)")
+        }
         if readOnly {
             try execute("PRAGMA query_only=ON")
         } else {
