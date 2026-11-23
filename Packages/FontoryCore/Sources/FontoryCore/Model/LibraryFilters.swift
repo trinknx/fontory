@@ -119,13 +119,22 @@ public struct LibraryFilters: Sendable, Hashable {
     }
 }
 
-/// The precomposed Vietnamese letters (upper and lower case) of `PreviewSamples.accented`'s Vietnamese part.
+/// Every precomposed Vietnamese letter, upper and lower case (134): Ă Â Đ Ê Ô Ơ Ư and each of the twelve vowels
+/// (a ă â e ê i o ô ơ u ư y) with each of the five tone marks, including the Latin-1 letters À Á Ã È É Ì Í Ò Ó Õ Ù Ú Ý.
+/// The plain ASCII vowels are not precomposed letters and are not listed. Defined explicitly (spec §18 "Filters").
 public enum VietnameseLetters {
+    static let lowercase = ["ăâđêôơư",
+        "àáảãạ", "ằắẳẵặ", "ầấẩẫậ", "èéẻẽẹ", "ềếểễệ", "ìíỉĩị",
+        "òóỏõọ", "ồốổỗộ", "ờớởỡợ", "ùúủũụ", "ừứửữự", "ỳýỷỹỵ"].joined()
+    static let uppercase = ["ĂÂĐÊÔƠƯ",
+        "ÀÁẢÃẠ", "ẰẮẲẴẶ", "ẦẤẨẪẬ", "ÈÉẺẼẸ", "ỀẾỂỄỆ", "ÌÍỈĨỊ",
+        "ÒÓỎÕỌ", "ỒỐỔỖỘ", "ỜỚỞỠỢ", "ÙÚỦŨỤ", "ỪỨỬỮỰ", "ỲÝỶỸỴ"].joined()
+
+    /// Ascending, unique.
     public static let scalars: [UInt32] = {
-        let text = PreviewSamples.accented.text
-        guard let start = text.range(of: "Ă") else { return [] }
-        let letters = text[start.lowerBound...].unicodeScalars.filter { !$0.properties.isWhitespace }
-        return Set(letters.map(\.value)).sorted()
+        // NFC, whatever form the source file's literals were saved in.
+        let text = (lowercase + uppercase).precomposedStringWithCanonicalMapping
+        return Set(text.unicodeScalars.map(\.value)).sorted()
     }()
 }
 

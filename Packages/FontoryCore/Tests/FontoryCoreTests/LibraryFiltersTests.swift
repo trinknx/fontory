@@ -104,13 +104,39 @@ import Testing
         #expect(try w.ids(f).isEmpty)
     }
 
+    @Test func vietnameseLettersAreComplete() {
+        // Derived independently: each of the twelve vowels with each tone mark (grave, acute, hook, tilde, dot below),
+        // the bare ă â ê ô ơ ư and đ, upper and lower case, composed to NFC.
+        let vowels = ["a", "a\u{306}", "a\u{302}", "e", "e\u{302}", "i", "o", "o\u{302}", "o\u{31B}", "u", "u\u{31B}", "y"]
+        let tones = ["\u{300}", "\u{301}", "\u{309}", "\u{303}", "\u{323}"]
+        var letters = vowels.flatMap { v in tones.map { v + $0 } } + vowels.filter { $0.unicodeScalars.count == 2 } + ["đ"]
+        letters += letters.map { $0.uppercased() }
+        var expected = Set<UInt32>()
+        for letter in letters {
+            let nfc = letter.precomposedStringWithCanonicalMapping.unicodeScalars
+            #expect(nfc.count == 1, "\(letter) is not one precomposed scalar")
+            expected.formUnion(nfc.map(\.value))
+        }
+        #expect(expected.count == 134)
+        #expect(VietnameseLetters.scalars == expected.sorted())
+        // The Latin-1 tone letters are included, upper and lower case.
+        for letter in "ÀÁÃÈÉÌÍÒÓÕÙÚÝàáãèéìíòóõùúý".unicodeScalars { #expect(VietnameseLetters.scalars.contains(letter.value), "\(letter)") }
+        #expect(!VietnameseLetters.scalars.contains(0x61))  // plain a
+    }
+
     @Test func vietnameseRequiresAllLetters() throws {
         let w = try world()
         var f = LibraryFilters()
         f.vietnamese = true
         #expect(try w.ids(f) == w.all("Beta-Light"))
-        #expect(VietnameseLetters.scalars.count > 100 && VietnameseLetters.scalars.contains(0x1EA0) && VietnameseLetters.scalars.contains(0x1EF9))
-        #expect(!VietnameseLetters.scalars.contains(0xC0))   // À is not in the Vietnamese part
+        // Missing one Latin-1 tone letter (Ã) fails too: it is part of the set.
+        try w.s.database.withLock {
+            let cov = CoverageRanges(scalars: [0x41] + VietnameseLetters.scalars.filter { $0 != 0xC3 })
+            let c = try w.s.database.prepare("UPDATE face_coverage SET ranges = ? WHERE face_id = ?")
+            defer { c.reset() }
+            try c.bind([.blob(cov.blob), .int(w.id("Beta-Light"))]); _ = try c.step()
+        }
+        #expect(try w.ids(f).isEmpty)
         // Missing one letter fails.
         let missing = VietnameseLetters.scalars.last!
         try w.s.database.withLock {
@@ -311,7 +337,6 @@ import Testing
                 n = try f.store.count(for: q)
                 counted = min(counted, ContinuousClock.now - countStart)
             }
-            print("filter \(name): \(ids.count) faces, ids \(listed), count \(counted)")
             #expect(n == ids.count)
             #expect(listed < .milliseconds(100) && counted < .milliseconds(100), "\(name): ids \(listed), count \(counted)")
         }
