@@ -23,7 +23,7 @@ enum DetailTab: String, CaseIterable, Sendable {
         }
     }
 
-    var isAvailable: Bool { self == .styles || self == .characters || self == .text || self == .info }
+    var isAvailable: Bool { self != .variables }
 }
 
 /// How the family page lists styles: one big preview per style, or one compact line each.

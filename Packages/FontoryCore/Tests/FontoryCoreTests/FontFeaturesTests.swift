@@ -204,6 +204,9 @@ private func syntheticName() -> [UInt8] {
         #expect(FeatureCatalog.entry(for: "zzzz").group == .other)
         #expect(FeatureCatalog.demoText(for: "frac") == "1/2 3/4 5/8 7/16")
         #expect(FeatureCatalog.demoText(for: "zzzz") == nil)
+        #expect(FeatureCatalog.scriptName("latn") == "Latin")
+        #expect(FeatureCatalog.scriptName("qqqq") == "qqqq")
+        #expect(FeatureCatalog.languageName("TRK ") == "Turkish")
     }
 }
 

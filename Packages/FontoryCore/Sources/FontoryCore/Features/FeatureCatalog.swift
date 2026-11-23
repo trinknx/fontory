@@ -206,3 +206,46 @@ public enum FeatureCatalog {
         "mark": "à é î õ ü ç ñ", "mkmk": "ệ ặ ẫ ổ ữ", "ccmp": "à é î õ ü ç ñ",
     ]
 }
+
+// MARK: Script and language names
+
+extension FeatureCatalog {
+    /// "Latin" for `latn`; unknown tags are returned as they are.
+    public static func scriptName(_ tag: String) -> String {
+        scriptNames[tag] ?? tag
+    }
+
+    /// "Turkish" for `TRK`; unknown tags are returned as they are.
+    public static func languageName(_ tag: String) -> String {
+        languageNames[tag.trimmingCharacters(in: .whitespaces)] ?? tag
+    }
+
+    private static let scriptNames: [String: String] = [
+        "DFLT": "Default Script", "latn": "Latin", "grek": "Greek", "cyrl": "Cyrillic", "armn": "Armenian",
+        "geor": "Georgian", "arab": "Arabic", "hebr": "Hebrew", "syrc": "Syriac", "thaa": "Thaana", "nko ": "N’Ko",
+        "deva": "Devanagari", "dev2": "Devanagari (v2)", "beng": "Bengali", "bng2": "Bengali (v2)",
+        "gujr": "Gujarati", "gjr2": "Gujarati (v2)", "guru": "Gurmukhi", "gur2": "Gurmukhi (v2)",
+        "knda": "Kannada", "knd2": "Kannada (v2)", "mlym": "Malayalam", "mlm2": "Malayalam (v2)",
+        "orya": "Odia", "ory2": "Odia (v2)", "taml": "Tamil", "tml2": "Tamil (v2)", "telu": "Telugu",
+        "tel2": "Telugu (v2)", "sinh": "Sinhala", "thai": "Thai", "lao ": "Lao", "khmr": "Khmer", "mymr": "Myanmar",
+        "mym2": "Myanmar (v2)", "tibt": "Tibetan", "hani": "Han", "kana": "Kana", "hang": "Hangul", "jamo": "Jamo",
+        "bopo": "Bopomofo", "ethi": "Ethiopic", "cher": "Cherokee", "mong": "Mongolian", "math": "Math",
+        "copt": "Coptic", "brai": "Braille", "zmth": "Math", "zsym": "Symbols", "zsye": "Emoji",
+    ]
+
+    private static let languageNames: [String: String] = [
+        "ENG": "English", "TRK": "Turkish", "AZE": "Azerbaijani", "CRT": "Crimean Tatar", "KAZ": "Kazakh",
+        "TAT": "Tatar", "ROM": "Romanian", "MOL": "Moldavian", "CAT": "Catalan", "NLD": "Dutch", "DEU": "German",
+        "FRA": "French", "ESP": "Spanish", "ITA": "Italian", "PTG": "Portuguese", "PLK": "Polish", "CSY": "Czech",
+        "SKY": "Slovak", "HUN": "Hungarian", "HRV": "Croatian", "SRB": "Serbian", "BGR": "Bulgarian",
+        "MKD": "Macedonian", "RUS": "Russian", "UKR": "Ukrainian", "BEL": "Belarusian", "ELL": "Greek",
+        "VIT": "Vietnamese", "LTH": "Lithuanian", "LVI": "Latvian", "ETI": "Estonian", "FIN": "Finnish",
+        "SVE": "Swedish", "NOR": "Norwegian", "DAN": "Danish", "ISL": "Icelandic", "IPPH": "Phonetic (IPA)",
+        "APPH": "Phonetic (Americanist)", "GAG": "Gagauz", "CHU": "Church Slavonic", "SQI": "Albanian",
+        "KUR": "Kurdish", "MAH": "Marshallese", "NAV": "Navajo", "GRN": "Greenlandic", "SMO": "Samoan",
+        "ARA": "Arabic", "FAR": "Persian", "URD": "Urdu", "SND": "Sindhi", "KSH": "Kashmiri", "PAS": "Pashto",
+        "IWR": "Hebrew", "HIN": "Hindi", "MAR": "Marathi", "NEP": "Nepali", "SAN": "Sanskrit", "BEN": "Bengali",
+        "TAM": "Tamil", "JAN": "Japanese", "KOR": "Korean", "ZHS": "Chinese, Simplified",
+        "ZHT": "Chinese, Traditional", "ZHH": "Chinese, Hong Kong", "ZHP": "Chinese, Phonetic", "THA": "Thai",
+    ]
+}
