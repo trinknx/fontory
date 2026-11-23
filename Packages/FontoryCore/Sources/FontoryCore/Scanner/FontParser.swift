@@ -72,7 +72,44 @@ public enum FontParser {
             isColor: isColor,
             isBitmap: outline == .bitmap,
             hasGSUB: tables.contains(tag("GSUB")),
-            hasGPOS: tables.contains(tag("GPOS")))
+            hasGPOS: tables.contains(tag("GPOS")),
+            styleClass: classify(font: font, family: family, fullName: fullName, style: style,
+                                 monospace: symbolic.contains(.traitMonoSpace), tables: tables))
+    }
+
+    /// Style class of one face, read from its descriptor. Used by the background backfill.
+    static func styleClass(descriptor: CTFontDescriptor, fallbackName: String) -> StyleClass {
+        let font = CTFontCreateWithFontDescriptor(descriptor, size, nil)
+        var family = CTFontCopyFamilyName(font) as String
+        var fullName = CTFontCopyFullName(font) as String
+        if family.isEmpty { family = fallbackName }
+        if fullName.isEmpty { fullName = fallbackName }
+        let style = (CTFontCopyName(font, kCTFontStyleNameKey) as String?) ?? ""
+        let traits = CTFontCopyTraits(font) as NSDictionary
+        let symbolic = CTFontSymbolicTraits(rawValue: (traits[kCTFontSymbolicTrait as String] as? NSNumber)?.uint32Value ?? 0)
+        return classify(font: font, family: family, fullName: fullName, style: style,
+                        monospace: symbolic.contains(.traitMonoSpace), tables: availableTables(font))
+    }
+
+    private static func classify(font: CTFont, family: String, fullName: String, style: String,
+                                 monospace: Bool, tables: Set<UInt32>) -> StyleClass {
+        var input = StyleClassifier.Input(isMonospace: monospace, coversLatin: ScriptCoverage.bitmask(for: font) & 1 != 0,
+                                          names: [family, fullName, style])
+        if let os2 = SfntReader.table("OS/2", of: font) {
+            if let fc = os2.u16(30) {
+                input.familyClass = Int(fc >> 8)
+                input.familySubclass = Int(fc & 0xFF)
+            }
+            if let p = os2.slice(32, 10) { input.panose = Array(p) }
+        }
+        if tables.contains(tag("cmap")), let cmap = SfntReader.table("cmap", of: font), let n = cmap.u16(2) {
+            for i in 0..<Int(n) {
+                let rec = 4 + i * 8
+                guard let platform = cmap.u16(rec), let encoding = cmap.u16(rec + 2) else { break }
+                if platform == 3 && encoding == 0 { input.hasSymbolCmap = true; break }
+            }
+        }
+        return StyleClassifier.classify(input)
     }
 
     // MARK: - Helpers

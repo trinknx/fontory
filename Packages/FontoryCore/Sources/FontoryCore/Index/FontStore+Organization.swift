@@ -255,3 +255,55 @@ extension FontStore {
         }
     }
 }
+
+// MARK: Style classes
+
+extension FontStore {
+    /// Online faces classified under an older classifier version (or never), oldest id first. Faces on an offline
+    /// location are left alone until it comes back.
+    public func facesNeedingClassification(limit: Int) throws -> [(faceID: Int64, url: URL, faceIndex: Int)] {
+        try reader.withLock {
+            let s = try reader.prepare("""
+            SELECT faces.id, locations.last_known_path, files.relative_path, faces.face_index
+            FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
+            WHERE faces.class_version < ? AND locations.online = 1 ORDER BY faces.id LIMIT ?
+            """)
+            defer { s.reset() }
+            try s.bind([.int(Int64(StyleClassifier.version)), .int(Int64(limit))])
+            var out: [(faceID: Int64, url: URL, faceIndex: Int)] = []
+            while try s.step() {
+                let base = URL(fileURLWithPath: s.text(1))
+                let rel = s.text(2)
+                out.append((s.int64(0), rel.isEmpty ? base : base.appendingPathComponent(rel), Int(s.int64(3))))
+            }
+            return out
+        }
+    }
+
+    public func countFacesNeedingClassification() throws -> Int {
+        try reader.withLock {
+            let s = try reader.prepare("""
+            SELECT COUNT(*) FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
+            WHERE faces.class_version < ? AND locations.online = 1
+            """)
+            defer { s.reset() }
+            try s.bind([.int(Int64(StyleClassifier.version))])
+            return try s.step() ? Int(s.int64(0)) : 0
+        }
+    }
+
+    /// Writes classes and their classifier version in one transaction.
+    public func setStyleClasses(_ classes: [(faceID: Int64, styleClass: StyleClass)], version: Int) throws {
+        try database.withLock {
+            try database.transaction {
+                let s = try database.prepare("UPDATE faces SET style_class = ?, class_version = ? WHERE id = ?")
+                defer { s.reset() }
+                for item in classes {
+                    try s.bind([.int(Int64(item.styleClass.rawValue)), .int(Int64(version)), .int(item.faceID)])
+                    _ = try s.step()
+                    s.reset()
+                }
+            }
+        }
+    }
+}

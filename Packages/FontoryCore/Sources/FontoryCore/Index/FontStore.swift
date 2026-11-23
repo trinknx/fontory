@@ -153,7 +153,7 @@ public final class FontStore: Sendable {
     private static let faceColumns = """
     file_id, face_index, postscript_name, family, style, full_name, weight, width, slant, is_italic, is_variable,
     axes_json, vendor, designer, version, glyph_count, scripts_bitmask, units_per_em, ascender, descender,
-    cap_height, x_height, fs_type, outline_type, is_color, is_bitmap, has_gsub, has_gpos
+    cap_height, x_height, fs_type, outline_type, is_color, is_bitmap, has_gsub, has_gpos, style_class, class_version
     """
 
     private func faceValues(_ f: ParsedFace, fileID: Int64) -> [SQLValue] {
@@ -166,12 +166,13 @@ public final class FontStore: Sendable {
             .int(Int64(f.metrics.unitsPerEm)), .double(f.metrics.ascender), .double(f.metrics.descender),
             .double(f.metrics.capHeight), .double(f.metrics.xHeight), f.fsType.map { .int(Int64($0)) } ?? .null,
             .text(f.outlineType.rawValue), flag(f.isColor), flag(f.isBitmap), flag(f.hasGSUB), flag(f.hasGPOS),
+            .int(Int64(f.styleClass.rawValue)), .int(Int64(StyleClassifier.version)),
         ]
     }
 
     private func insertFace(_ f: ParsedFace, fileID: Int64) throws {
         try database.withLock {
-            let marks = Array(repeating: "?", count: 28).joined(separator: ",")
+            let marks = Array(repeating: "?", count: 30).joined(separator: ",")
             let s = try database.prepare("INSERT INTO faces(\(Self.faceColumns)) VALUES(\(marks))")
             defer { s.reset() }
             try s.bind(faceValues(f, fileID: fileID))

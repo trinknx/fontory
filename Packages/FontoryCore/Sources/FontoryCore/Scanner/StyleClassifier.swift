@@ -1,0 +1,55 @@
+import Foundation
+
+/// Assigns a coarse `StyleClass` from OS/2 `sFamilyClass`, PANOSE, CoreText's monospace trait, the cmap and the names.
+/// The decision order is spec section 17, "Style classification", steps 1 to 7. Pure and stateless.
+public enum StyleClassifier {
+    /// Bump to reclassify every face in the background (see `StyleBackfill`).
+    public static let version = 1
+
+    public struct Input: Sendable, Hashable {
+        public var familyClass: Int?      // sFamilyClass high byte
+        public var familySubclass: Int?
+        public var panose: [UInt8]?       // 10 bytes
+        public var isMonospace: Bool
+        public var hasSymbolCmap: Bool
+        public var coversLatin: Bool
+        public var names: [String]        // family, full name, style
+
+        public init(familyClass: Int? = nil, familySubclass: Int? = nil, panose: [UInt8]? = nil, isMonospace: Bool = false,
+                    hasSymbolCmap: Bool = false, coversLatin: Bool = true, names: [String] = []) {
+            self.familyClass = familyClass
+            self.familySubclass = familySubclass
+            self.panose = panose
+            self.isMonospace = isMonospace
+            self.hasSymbolCmap = hasSymbolCmap
+            self.coversLatin = coversLatin
+            self.names = names
+        }
+    }
+
+    public static func classify(_ input: Input) -> StyleClass {
+        let cls = input.familyClass ?? 0
+        let panose = input.panose.flatMap { $0.count >= 10 ? $0 : nil }
+        let family = panose.map { Int($0[0]) }       // bFamilyType
+        let serifStyle = panose.map { Int($0[1]) }   // bSerifStyle (meaningful for family 2, Latin text)
+        let proportion = panose.map { Int($0[3]) }   // bProportion
+        let name = input.names.joined(separator: " ").lowercased()
+        func named(_ words: String...) -> Bool { words.contains { name.contains($0) } }
+
+        // 1. Symbol. The cmap test stands in for "pictographic glyphs": a (3,0) subtable marks a symbol encoding.
+        if cls == 12 || family == 5 || input.hasSymbolCmap { return .symbol }
+        // 2. Mono
+        if input.isMonospace || proportion == 9 { return .mono }
+        // 3. Script
+        if cls == 10 || family == 3 || named("script", "hand", "brush", "calligraph") { return .script }
+        // 4. Slab
+        if cls == 4 || cls == 5 || named("slab") { return .slab }
+        // 5. Sans
+        if cls == 8 || (family == 2 && (11...13).contains(serifStyle ?? 0)) || named("sans", "grotesk", "gothic") { return .sans }
+        // 6. Serif
+        if (1...3).contains(cls) || cls == 7 || (family == 2 && (2...10).contains(serifStyle ?? 0)) || named("serif") { return .serif }
+        // 7. Display
+        if cls == 9 || family == 4 || input.coversLatin { return .display }
+        return .unknown
+    }
+}

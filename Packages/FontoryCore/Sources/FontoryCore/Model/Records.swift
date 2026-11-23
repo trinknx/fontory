@@ -99,6 +99,7 @@ public struct ParsedFace: Sendable, Hashable {
     public var isBitmap: Bool
     public var hasGSUB: Bool
     public var hasGPOS: Bool
+    public var styleClass: StyleClass
 
     public init(
         faceIndex: Int = 0, postScriptName: String, family: String, style: String, fullName: String,
@@ -107,7 +108,8 @@ public struct ParsedFace: Sendable, Hashable {
         glyphCount: Int = 0, scriptsBitmask: Int64 = 0,
         metrics: FaceMetrics = FaceMetrics(unitsPerEm: 1000, ascender: 800, descender: -200, capHeight: 700, xHeight: 500),
         fsType: Int? = nil, outlineType: OutlineType = .truetype,
-        isColor: Bool = false, isBitmap: Bool = false, hasGSUB: Bool = false, hasGPOS: Bool = false
+        isColor: Bool = false, isBitmap: Bool = false, hasGSUB: Bool = false, hasGPOS: Bool = false,
+        styleClass: StyleClass = .unknown
     ) {
         self.faceIndex = faceIndex
         self.postScriptName = postScriptName
@@ -132,6 +134,7 @@ public struct ParsedFace: Sendable, Hashable {
         self.isBitmap = isBitmap
         self.hasGSUB = hasGSUB
         self.hasGPOS = hasGPOS
+        self.styleClass = styleClass
     }
 }
 
