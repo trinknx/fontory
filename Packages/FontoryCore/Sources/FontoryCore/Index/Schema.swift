@@ -53,7 +53,7 @@ public enum Schema {
       INSERT INTO faces_fts(faces_fts, rowid, family, style, full_name, postscript_name, vendor, designer, note)
       VALUES ('delete', old.id, old.family, old.style, old.full_name, old.postscript_name, old.vendor, old.designer, old.note);
     END;
-    CREATE TRIGGER faces_au AFTER UPDATE ON faces BEGIN
+    CREATE TRIGGER faces_au AFTER UPDATE OF family, style, full_name, postscript_name, vendor, designer, note ON faces BEGIN
       INSERT INTO faces_fts(faces_fts, rowid, family, style, full_name, postscript_name, vendor, designer, note)
       VALUES ('delete', old.id, old.family, old.style, old.full_name, old.postscript_name, old.vendor, old.designer, old.note);
       INSERT INTO faces_fts(rowid, family, style, full_name, postscript_name, vendor, designer, note)
