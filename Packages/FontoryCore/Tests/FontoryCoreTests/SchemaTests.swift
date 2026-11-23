@@ -64,7 +64,7 @@ import Testing
 
         let v = try db.prepare("PRAGMA user_version")
         #expect(try v.step())
-        #expect(v.int64(0) == 2)
+        #expect(v.int64(0) == Int64(Schema.currentVersion))
         v.reset()
         let s = try db.prepare("SELECT id, kind, auto_indexed FROM locations ORDER BY id")
         var kinds: [Int64: Int64] = [:]

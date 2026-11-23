@@ -5,7 +5,7 @@ import Foundation
 /// same file, so browsing never waits for a scanner transaction (WAL). In-memory databases use one connection.
 public final class FontStore: Sendable {
     public let database: Database
-    private let reader: Database
+    let reader: Database
 
     public init(database: Database) throws {
         self.database = database
@@ -180,7 +180,7 @@ public final class FontStore: Sendable {
     }
 
     /// Re-parses a file's faces in place. Faces whose PostScript name survives keep their
-    /// row id (so activation, note, last_activated, custom family and representative prefs persist).
+    /// row id (so activation, note, tags, Quick Collection membership, last_activated, custom family and representative prefs persist).
     public func replaceFaces(fileID: Int64, size: Int64, mtime: Date, fingerprint: String, faces: [ParsedFace]) throws {
         try database.withLock {
             try database.transaction {
@@ -253,12 +253,12 @@ public final class FontStore: Sendable {
         }
     }
 
-    /// Number of faces in the given files carrying user data (a note, or activation other than off).
+    /// Number of faces in the given files carrying user data (a note, a tag, Quick Collection membership, or activation other than off).
     public func userDataFaceCount(fileIDs: [Int64]) throws -> Int {
         try database.withLock {
             var total = 0
             for id in fileIDs {
-                let s = try database.prepare("SELECT COUNT(*) FROM faces WHERE file_id = ? AND (note IS NOT NULL OR activation != 0)")
+                let s = try database.prepare("SELECT COUNT(*) FROM faces WHERE file_id = ? AND (note IS NOT NULL OR activation != 0 OR EXISTS(SELECT 1 FROM face_tags WHERE face_id = faces.id) OR EXISTS(SELECT 1 FROM quick_collection WHERE face_id = faces.id))")
                 defer { s.reset() }
                 try s.bind([.int(id)])
                 if try s.step() { total += Int(s.int64(0)) }

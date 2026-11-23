@@ -1,9 +1,9 @@
 import Foundation
 
 public enum Schema {
-    public static let currentVersion: Int32 = 2
+    public static let currentVersion: Int32 = 3
 
-    private static let steps: [(version: Int32, sql: String)] = [(1, v1), (2, v2)]
+    private static let steps: [(version: Int32, sql: String)] = [(1, v1), (2, v2), (3, v3)]
 
     /// Runs each step whose version is greater than the database's `user_version`.
     public static func migrate(_ db: Database) throws {
@@ -22,6 +22,19 @@ public enum Schema {
     /// Activation views follow the Mac's real state. Locations: kind 3 (user-installed, read-only) for every
     /// former system location outside /System, plus `auto_indexed` for folders the inventory indexes on its own.
     /// Files: `external_active`, set while someone other than Fontory has the file registered.
+    /// Organization: hierarchical tags (plain or smart), per-face tag links, the Quick Collection, and the
+    /// style-class columns the classifier fills. Notes already live on `faces.note`.
+    static let v3 = """
+    CREATE TABLE tags(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES tags(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, kind INTEGER NOT NULL DEFAULT 0, rule_json TEXT, created_at REAL NOT NULL);
+    CREATE TABLE face_tags(face_id INTEGER NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
+      tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE, PRIMARY KEY(face_id, tag_id));
+    CREATE INDEX face_tags_tag ON face_tags(tag_id);
+    CREATE TABLE quick_collection(face_id INTEGER PRIMARY KEY REFERENCES faces(id) ON DELETE CASCADE, added_at REAL NOT NULL);
+    ALTER TABLE faces ADD COLUMN style_class INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE faces ADD COLUMN class_version INTEGER NOT NULL DEFAULT 0;
+    """
+
     static let v2 = """
     ALTER TABLE locations ADD COLUMN auto_indexed INTEGER NOT NULL DEFAULT 0;
     UPDATE locations SET kind = 3
