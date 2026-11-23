@@ -12,6 +12,7 @@ final class GlyphPipeline {
         let faceID: Int64
         let glyph: CGGlyph
         let pointSize: CGFloat
+        let box: GlyphCellBox
         let style: GlyphCellStyle
     }
 
@@ -102,7 +103,7 @@ private final class GlyphRenderOperation: Operation, @unchecked Sendable {
         }
         // A render that finishes after being cancelled is still delivered and cached: the work is done, and the cell
         // may scroll back.
-        deliver(GlyphCellRenderer.render(font: font, glyph: key.glyph, style: key.style))
+        deliver(GlyphCellRenderer.render(font: font, glyph: key.glyph, style: key.style, box: key.box))
     }
 
     private func deliver(_ image: CGImage?) {

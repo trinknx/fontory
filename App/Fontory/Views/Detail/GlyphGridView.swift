@@ -10,14 +10,12 @@ struct GlyphFace: Equatable, Sendable {
     let fileURL: URL
     let faceIndex: Int
     let postScriptName: String
-    /// Ascent, descent and cap height per em, for the cells' point size.
-    let ascent: CGFloat
-    let descent: CGFloat
-    let capHeight: CGFloat
+    /// The face's cell box (`GlyphInventory.cellBox`), shared by all its cells.
+    let box: GlyphCellBox
 
     /// The point size of this face in a cell `side` points high.
     func cellPointSize(_ side: CGFloat) -> CGFloat {
-        GlyphCellRenderer.pointSize(cellHeight: side, ascent: ascent, descent: descent, capHeight: capHeight)
+        GlyphCellRenderer.pointSize(cellHeight: side, box: box)
     }
 }
 
@@ -199,7 +197,7 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
         let style = GlyphCellStyle(size: CGSize(width: side, height: side), scale: scale,
                                    foreground: preview.foreground, background: preview.background)
         let pointSize = face.cellPointSize(side)
-        return GlyphPipeline.Key(faceID: face.faceID, glyph: entry.glyphID, pointSize: pointSize, style: style)
+        return GlyphPipeline.Key(faceID: face.faceID, glyph: entry.glyphID, pointSize: pointSize, box: face.box, style: style)
     }
 
     private func configure(_ item: GlyphGridItem, at index: Int) {

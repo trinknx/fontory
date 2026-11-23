@@ -102,12 +102,10 @@ struct CharactersTabView: View {
             return
         }
         let (loaded, entries) = result
-        let em = Double(max(1, loaded.unitsPerEm))
         failure = nil
         inventory = loaded
         face = GlyphFace(faceID: id, fileURL: url, faceIndex: index, postScriptName: info.postScriptName,
-                         ascent: CGFloat(loaded.ascent / em), descent: CGFloat(loaded.descent / em),
-                         capHeight: CGFloat(loaded.capHeight / em))
+                         box: loaded.cellBox)
         publish(entries, key: key)
         loadedID = id
         updateStyleNames()
@@ -362,7 +360,7 @@ private struct GlyphInspector: View {
             guard let font = renderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: pointSize) else {
                 return (nil, false)
             }
-            return (GlyphCellRenderer.render(font: font, glyph: entry.glyphID, style: style),
+            return (GlyphCellRenderer.render(font: font, glyph: entry.glyphID, style: style, box: face.box),
                     GlyphSVG.hasOutline(font: font, glyph: entry.glyphID))
         }.value
         guard !Task.isCancelled else { return }

@@ -261,26 +261,55 @@ import Testing
         _ = CTFontGetGlyphsForCharacters(font, &unit, &glyph, 1)
         let style = GlyphCellStyle(size: CGSize(width: 64, height: 64), scale: 2,
                                    foreground: CGColor(gray: 0, alpha: 1), background: CGColor(gray: 1, alpha: 1))
-        let image = try #require(GlyphCellRenderer.render(font: font, glyph: glyph, style: style))
+        let box = GlyphCellBox(above: 0.9, below: 0.2)
+        let image = try #require(GlyphCellRenderer.render(font: font, glyph: glyph, style: style, box: box))
         #expect(image.width == 128 && image.height == 128)
         #expect(PreviewRendererTests().hasInk(image))
-        #expect(GlyphCellRenderer.pointSize(cellHeight: 64, ascent: 0.9, descent: 0.2, capHeight: 0.7) > 20)
+        #expect(GlyphCellRenderer.pointSize(cellHeight: 64, box: box) > 20)
     }
 
-    /// A face with a huge ascent and descent (Zapfino) is scaled by its typical ink, not by its typographic box,
-    /// so its glyphs are not drawn tiny; ordinary faces keep their box.
+    /// A face with a huge ascent and descent (Zapfino) is scaled by its real ink, not by its typographic box, so its
+    /// glyphs are not drawn tiny; ordinary faces keep their box.
     @Test func cellScaleFollowsTypicalInk() throws {
         let arial = try #require(GlyphInventory.load(fileURL: URL(fileURLWithPath: TempFonts.arialBold), faceIndex: 0))
-        func perEm(_ inv: GlyphInventory) -> (CGFloat, CGFloat, CGFloat) {
-            let em = Double(inv.unitsPerEm)
-            return (CGFloat(inv.ascent / em), CGFloat(inv.descent / em), CGFloat(inv.capHeight / em))
-        }
-        let (a, d, c) = perEm(arial)
-        let arialBox = GlyphCellRenderer.referenceBox(ascent: a, descent: d, capHeight: c)
-        #expect(abs(arialBox.above - a) < 0.001 && abs(arialBox.below - d) < 0.001)
+        let em = Double(arial.unitsPerEm)
+        #expect(abs(Double(arial.cellBox.above) - arial.ascent / em) < 0.001)
+        #expect(abs(Double(arial.cellBox.below) - arial.descent / em) < 0.001)
         let zapfino = try #require(GlyphInventory.load(fileURL: URL(fileURLWithPath: Self.zapfino), faceIndex: 0))
-        let (za, zd, zc) = perEm(zapfino)
-        let naive = 64 * GlyphCellRenderer.fill / (za + zd)
-        #expect(GlyphCellRenderer.pointSize(cellHeight: 64, ascent: za, descent: zd, capHeight: zc) > naive * 1.3)
+        let zem = Double(zapfino.unitsPerEm)
+        let naive = 64 * GlyphCellRenderer.fill / CGFloat((zapfino.ascent + zapfino.descent) / zem)
+        #expect(GlyphCellRenderer.pointSize(cellHeight: 64, box: zapfino.cellBox) > naive * 1.2)
+    }
+
+    /// Glyphs whose ink leaves the cell, for a face drawn with `box` (per em): the cell's height is the box / `fill`,
+    /// centred on the box, as `GlyphCellRenderer` draws it.
+    static func clippedCount(_ path: String, box: (CGFloat, CGFloat)) throws -> Int {
+        let font = try Self.font(path)
+        let glyphs = Array(Set(try #require(GlyphInventory.load(fileURL: URL(fileURLWithPath: path), faceIndex: 0))
+            .entries.filter { $0.isMapped }.map(\.glyphID)))
+        var rects = [CGRect](repeating: .zero, count: glyphs.count)
+        CTFontGetBoundingRectsForGlyphs(font, .horizontal, glyphs, &rects, glyphs.count)
+        let half = (box.0 + box.1) / GlyphCellRenderer.fill / 2, centre = (box.0 - box.1) / 2
+        return rects.filter { !$0.isEmpty && ($0.maxY > centre + half + 0.001 || $0.minY < centre - half - 0.001) }.count
+    }
+
+    /// Scripts whose marks reach far above the cap height (Khmer, Arabic, Myanmar) clip no more glyphs than with
+    /// their typographic box (the cells' box before tall faces were fitted to their ink).
+    @Test func tallScriptsAreNotClipped() throws {
+        let paths = ["/System/Library/Fonts/Supplemental/Khmer Sangam MN.ttf", "/System/Library/Fonts/Supplemental/Baghdad.ttc",
+                     "/System/Library/Fonts/Supplemental/Trattatello.ttf"]
+        for path in paths where FileManager.default.fileExists(atPath: path) {
+            let inv = try #require(GlyphInventory.load(fileURL: URL(fileURLWithPath: path), faceIndex: 0))
+            let em = CGFloat(inv.unitsPerEm)
+            let before = try Self.clippedCount(path, box: (CGFloat(inv.ascent) / em, CGFloat(inv.descent) / em))
+            let after = try Self.clippedCount(path, box: (inv.cellBox.above, inv.cellBox.below))
+            #expect(after <= before, "\(path): \(after) clipped, \(before) with the typographic box")
+        }
+        // Khmer Sangam MN clipped no glyph at 4281521 (typographic box) and 206 of 264 in fix round 1.
+        let khmer = "/System/Library/Fonts/Supplemental/Khmer Sangam MN.ttf"
+        if FileManager.default.fileExists(atPath: khmer) {
+            let inv = try #require(GlyphInventory.load(fileURL: URL(fileURLWithPath: khmer), faceIndex: 0))
+            #expect(try Self.clippedCount(khmer, box: (inv.cellBox.above, inv.cellBox.below)) == 0)
+        }
     }
 }
