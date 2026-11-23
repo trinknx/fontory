@@ -58,7 +58,7 @@ final class FontGridItem: NSCollectionViewItem {
         for v in [dot, label, offlineBadge] as [NSView] { root.addSubview(v) }
         NSLayoutConstraint.activate([
             dot.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.padding - 2),
-            dot.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -3),
+            dot.topAnchor.constraint(equalTo: root.topAnchor, constant: 3),
             dot.widthAnchor.constraint(equalToConstant: 18),
             dot.heightAnchor.constraint(equalToConstant: 18),
             label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 3),
@@ -72,7 +72,7 @@ final class FontGridItem: NSCollectionViewItem {
         view = root
     }
 
-    /// The preview area in points (the cell minus the label strip and padding).
+    /// The preview area in points (the cell minus the name strip on top and the padding).
     static func previewSize(itemSize: CGSize) -> CGSize {
         CGSize(width: max(1, itemSize.width - padding * 2), height: max(1, itemSize.height - labelHeight - padding))
     }
@@ -80,8 +80,9 @@ final class FontGridItem: NSCollectionViewItem {
     private func layoutPreview() {
         let b = view.bounds
         let size = Self.previewSize(itemSize: b.size)
-        // The view is flipped (collection view items are not by default; GridCellView is), so y grows downward.
-        previewLayer.frame = CGRect(x: Self.padding, y: Self.padding, width: size.width, height: size.height)
+        // The view is flipped (collection view items are not by default; GridCellView is), so y grows downward:
+        // the name strip is on top, the preview below it.
+        previewLayer.frame = CGRect(x: Self.padding, y: Self.labelHeight, width: size.width, height: size.height)
     }
 
     override func prepareForReuse() {

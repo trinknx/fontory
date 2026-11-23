@@ -17,19 +17,21 @@ struct BrowserToolbar: ToolbarContent {
                     .frame(width: 90)
                     .help("Preview size of the styles: \(model.effectiveDetailPointSize) pt")
             } else {
-                Slider(value: pointSize, in: 0...288) { Text("Size") }
-                    .frame(width: 90)
-                    .help(model.preview.pointSizeOverride.map { "Preview size: \(Int($0)) pt (drag fully left to follow zoom)" }
-                          ?? "Preview size follows the zoom")
+                // One size control, as in Typeface: the preview size, and with it how many fonts fit in a row.
+                HStack(spacing: 6) {
+                    Text("\(Int(GridMetrics.pointSize(zoom: zoom.wrappedValue)))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 26, alignment: .trailing)
+                    Slider(value: zoom, in: 0...1) { Text("Size") }
+                        .frame(width: 120)
+                }
+                .help("Preview size: \(Int(GridMetrics.pointSize(zoom: zoom.wrappedValue))) pt (⌘+ / ⌘− / ⌘0, or pinch)")
             }
         }
 
         ToolbarItemGroup {
-            // Zoom and the grid/list switch belong to the browser; the family page has its own layout switch.
-            Slider(value: zoom, in: 0...1) { Text("Zoom") }
-                .frame(width: 90)
-                .help("Zoom")
-                .disabled(model.detail != nil)
+            // The grid/list switch belongs to the browser; the family page has its own layout switch.
             Picker("View", selection: $model.viewMode) {
                 Image(systemName: "square.grid.2x2").tag(ViewMode.grid).help("Grid (⌘1)")
                 Image(systemName: "list.bullet").tag(ViewMode.list).help("List (⌘3)")
@@ -38,11 +40,6 @@ struct BrowserToolbar: ToolbarContent {
             .disabled(model.detail != nil)
             SortMenu(model: model)
         }
-    }
-
-    private var pointSize: Binding<Double> {
-        Binding(get: { model.preview.pointSizeOverride ?? 0 },
-                set: { model.preview.pointSizeOverride = $0 < 6 ? nil : $0.rounded() })
     }
 
     private var zoom: Binding<Double> {

@@ -467,3 +467,17 @@ private struct InfoRow: View {
         }
     }
 }
+
+extension ActivationStatus {
+    /// The status wording of the family page's Info.
+    func statusText(online: Bool) -> String {
+        switch self {
+        case .system: return "System"
+        case _ where !online: return "Offline"
+        case .external: return "Outside Fontory"
+        case .disabledOutside: return "Disabled outside Fontory"
+        case .on: return "Active"
+        case .off: return "Off"
+        }
+    }
+}

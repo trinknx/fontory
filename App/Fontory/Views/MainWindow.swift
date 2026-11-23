@@ -17,16 +17,12 @@ struct MainWindow: View {
             // The browser stays alive (hidden) under the family page, so Back finds its scroll position and selection.
             let browserHidden = model.detail != nil
             ZStack {
-                switch model.viewMode {
-                case .grid:
-                    FontGridView(model: model, faceIDs: model.faceIDs, rowsVersion: model.rowsVersion,
-                                 zoom: model.zoom[.grid] ?? AppModel.defaultZoom, preview: model.preview,
-                                 selection: model.selection, query: model.query, isHidden: browserHidden)
-                case .list:
-                    FontListView(model: model, families: model.families, rowsVersion: model.rowsVersion,
-                                 zoom: model.zoom[.list] ?? AppModel.defaultZoom, preview: model.preview,
-                                 selection: model.selection, query: model.query, isHidden: browserHidden)
-                }
+                // Grid and list are the same card view: the list keeps one font per row. Each mode keeps its own size.
+                let mode = model.viewMode
+                FontGridView(model: model, faceIDs: model.faceIDs, rowsVersion: model.rowsVersion, mode: mode,
+                             zoom: model.zoom[mode] ?? AppModel.defaultZoom, preview: model.preview,
+                             selection: model.selection, query: model.query, isHidden: browserHidden)
+                    .id(mode)
                 if let detail = model.detail {
                     FamilyDetailView(model: model, detail: detail)
                 }

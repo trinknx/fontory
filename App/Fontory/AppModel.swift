@@ -139,8 +139,6 @@ struct PreviewSettings: Equatable {
     /// The preset menu item that filled `text` ("sample:…", "language:…", "preset:…"), so only that item is checked
     /// even when another item has the same text. nil for typed text, Dynamic and Font Names.
     var textSource: String?
-    /// nil: the size follows the zoom level.
-    var pointSizeOverride: Double?
     var tracking: Double = 0
     var foreground = PreviewSettings.defaultForeground
     var background = PreviewSettings.defaultBackground
@@ -187,7 +185,7 @@ struct PreviewSettings: Equatable {
     func request(pointSize: CGFloat, size: CGSize, scale: CGFloat) -> PreviewRequest {
         var request = PreviewRequest(
             text: text,
-            pointSize: pointSizeOverride.map { CGFloat($0) } ?? pointSize,
+            pointSize: pointSize,
             tracking: CGFloat(tracking),
             foreground: foreground, background: background,
             alignment: alignment.ctAlignment, smoothing: smoothing,
@@ -203,7 +201,7 @@ struct PreviewSettings: Equatable {
 
 extension PreviewSettings: Codable {
     private enum CodingKeys: String, CodingKey {
-        case text, dynamicStyle, showsFontNames, textSource, pointSizeOverride, tracking, foreground, background, alignment
+        case text, dynamicStyle, showsFontNames, textSource, tracking, foreground, background, alignment
         case smoothing, autoSize, showGuides, showMissingGlyphs, outline, underline, ligatures
         case discretionaryLigatures, alternates, smallCaps
     }
@@ -219,7 +217,6 @@ extension PreviewSettings: Codable {
         read(.dynamicStyle, into: &dynamicStyle)
         read(.showsFontNames, into: &showsFontNames)
         textSource = (try? c.decodeIfPresent(String.self, forKey: .textSource)) ?? nil
-        pointSizeOverride = (try? c.decodeIfPresent(Double.self, forKey: .pointSizeOverride)) ?? nil
         read(.tracking, into: &tracking)
         if let rgba = try? c.decodeIfPresent([CGFloat].self, forKey: .foreground), rgba.count == 4 {
             foreground = CGColor(srgbRed: rgba[0], green: rgba[1], blue: rgba[2], alpha: rgba[3])
@@ -248,7 +245,6 @@ extension PreviewSettings: Codable {
         try c.encode(dynamicStyle, forKey: .dynamicStyle)
         try c.encode(showsFontNames, forKey: .showsFontNames)
         try c.encodeIfPresent(textSource, forKey: .textSource)
-        try c.encodeIfPresent(pointSizeOverride, forKey: .pointSizeOverride)
         try c.encode(tracking, forKey: .tracking)
         try c.encode(Self.rgba(foreground), forKey: .foreground)
         try c.encode(Self.rgba(background), forKey: .background)
@@ -358,8 +354,6 @@ final class AppModel {
             guard viewMode != oldValue else { return }
             if detail != nil { closeFamilyDetail() }
             UserDefaults.standard.set(viewMode.rawValue, forKey: "viewMode")
-            // Families are computed only for the list; drop them when it closes so a reopened list starts fresh.
-            if viewMode == .list { scheduleRefresh(delay: .zero) } else { families = [] }
         }
     }
     var zoom: [ViewMode: Double] {
@@ -380,8 +374,6 @@ final class AppModel {
 
     /// Matching faces in sort order. Refreshed off-main, debounced 80 ms after any query change.
     private(set) var faceIDs: [Int64] = []
-    /// Matching faces grouped by family. Computed only while the list view is showing.
-    private(set) var families: [FamilyGroup] = []
     private(set) var counts = LibraryCounts()
     /// Bumped whenever cached rows change (activation, rescans), so views reading `row(_:)` update.
     private(set) var rowsVersion = 0
@@ -729,25 +721,22 @@ final class AppModel {
         refreshGeneration += 1
         let generation = refreshGeneration
         let query = query
-        let wantFamilies = viewMode == .list
-        let result = await Task.detached(priority: .userInitiated) { () -> Result<([Int64], [Int64: Int], [FamilyGroup]), Error> in
+        let result = await Task.detached(priority: .userInitiated) { () -> Result<([Int64], [Int64: Int]), Error> in
             Result {
                 let ids = try backend.store.faceIDs(for: query)
                 var index: [Int64: Int] = [:]
                 index.reserveCapacity(ids.count)
                 for (i, id) in ids.enumerated() { index[id] = i }
-                let families = wantFamilies ? try backend.store.families(for: query) : []
-                return (ids, index, families)
+                return (ids, index)
             }
         }.value
         guard generation == refreshGeneration else { return }
         switch result {
-        case .success(let (ids, index, families)):
+        case .success(let (ids, index)):
             // Rows are keyed by face id and do not depend on the query, so the cache survives refreshes;
             // it is dropped only when activation changes or a scan finishes.
             indexByID = index
             if ids != faceIDs { faceIDs = ids }
-            if wantFamilies, families != self.families { self.families = families }
             let kept = selection.filter { index[$0] != nil }
             if kept.count != selection.count { selection = kept }
             // Rescans and inventory changes may add or remove styles of the family shown.

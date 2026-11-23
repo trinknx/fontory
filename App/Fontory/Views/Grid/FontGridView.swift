@@ -9,6 +9,8 @@ struct FontGridView: NSViewRepresentable {
     let model: AppModel
     let faceIDs: [Int64]
     let rowsVersion: Int
+    /// `.grid`: as many columns as the size allows; `.list`: one font per row.
+    let mode: ViewMode
     let zoom: Double
     let preview: PreviewSettings
     let selection: Set<Int64>
@@ -18,7 +20,7 @@ struct FontGridView: NSViewRepresentable {
     var isHidden = false
 
     func makeCoordinator() -> FontGridController {
-        FontGridController(model: model)
+        FontGridController(model: model, mode: mode)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -50,6 +52,7 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
     static let magnifySensitivity = 0.6
 
     private let model: AppModel
+    private let mode: ViewMode
     private let pipeline: PreviewPipeline
     private(set) var collectionView: FontCollectionView!
     private var scrollView: NSScrollView!
@@ -86,8 +89,9 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
     private var loggedFirstFrame = false
     #endif
 
-    init(model: AppModel) {
+    init(model: AppModel, mode: ViewMode) {
         self.model = model
+        self.mode = mode
         pipeline = model.previewPipeline
         super.init()
         pipeline.addRenderObserver(self) { [weak self] key, image in self?.rendered(key, image) }
@@ -212,21 +216,8 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
 
     func update(preview new: PreviewSettings) {
         guard new != preview else { return }
-        let sizeChanged = new.pointSizeOverride != preview.pointSizeOverride
         preview = new
         settingsChanged()
-        if sizeChanged, scrollView != nil { applyLayout(anchorPoint: nil) }
-    }
-
-    /// Tallest cell a fixed preview size may ask for.
-    static let maxOverrideItemHeight: CGFloat = 520
-
-    /// The zoom's item size, grown in height so a fixed preview size (the toolbar's size slider) fits.
-    private func fittedItemSize(_ size: CGSize) -> CGSize {
-        guard let points = preview.pointSizeOverride else { return size }
-        let previewHeight = (CGFloat(points) * 1.35).rounded(.up)
-        let needed = previewHeight + (size.height - FontGridItem.previewSize(itemSize: size).height)
-        return CGSize(width: size.width, height: min(Self.maxOverrideItemHeight, max(size.height, needed)))
     }
 
     func update(zoom new: Double) {
@@ -278,8 +269,9 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
     private func applyLayout(anchorPoint: CGPoint?) {
         let width = scrollView.contentView.bounds.width
         guard width > 0 else { return }
-        let new = GridMetrics.compute(zoom: zoom, availableWidth: width, spacing: Self.spacing)
-        let itemSize = Self.flooredSize(fittedItemSize(new.itemSize))
+        let new = GridMetrics.compute(zoom: zoom, availableWidth: width, spacing: Self.spacing,
+                                      singleColumn: mode == .list)
+        let itemSize = Self.flooredSize(new.itemSize)
         guard new != metrics || itemSize != layout.itemSize else { return }
         let anchor = captureAnchor(at: anchorPoint)
         // Resizes and zoom bursts render once they settle (nothing visible yet, e.g. the first layout: no wait).
@@ -338,7 +330,7 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         if abs(new - zoom) > 1e-9 {
             zoom = new
             applyLayout(anchorPoint: point)
-            model.zoom[.grid] = new
+            model.zoom[mode] = new
         }
         if phase.contains(.ended) || phase.contains(.cancelled) {
             gestureActive = false
