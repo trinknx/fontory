@@ -73,6 +73,8 @@ public final class PreviewRenderer: Sendable {
         let features: Int
         /// `PreviewRequest.featureSettings`.
         let settings: [FontFeatureSetting]
+        /// `PreviewRequest.variations`.
+        let variations: [UInt32: Double]
     }
 
     private static let allCapsBit = 1 << 30
@@ -85,16 +87,23 @@ public final class PreviewRenderer: Sendable {
     var sizedFontCreations: Int { sizedCreations.value }
 
     private func sizedFont(_ url: URL, _ faceIndex: Int, pointSize: CGFloat, features: PreviewFeatures, allCaps: Bool,
-                           extra: [FontFeatureSetting] = []) -> CTFont? {
+                           extra: [FontFeatureSetting] = [], variations: [UInt32: Double] = [:]) -> CTFont? {
         let capsBit = features.contains(.smallCaps) && allCaps ? Self.allCapsBit : 0
         let key = SizedKey(face: FontKey(url: url, faceIndex: faceIndex), pointSize: pointSize,
-                           features: features.rawValue | capsBit, settings: extra)
+                           features: features.rawValue | capsBit, settings: extra, variations: variations)
         if let cached = sized[key] { return cached }
         guard let base = baseFont(url, faceIndex) else { return nil }
         sizedCreations.increment()
         let settings = Self.featureSettings(features, allCaps: capsBit != 0, extra: extra)
-        let attributes = settings.isEmpty ? nil
-            : CTFontDescriptorCreateWithAttributes([kCTFontFeatureSettingsAttribute: settings] as CFDictionary)
+        var attributeValues: [CFString: Any] = [:]
+        if !settings.isEmpty { attributeValues[kCTFontFeatureSettingsAttribute] = settings }
+        if !variations.isEmpty {
+            attributeValues[kCTFontVariationAttribute] = Dictionary(uniqueKeysWithValues: variations.map {
+                (NSNumber(value: $0.key), NSNumber(value: $0.value))
+            })
+        }
+        let attributes = attributeValues.isEmpty ? nil
+            : CTFontDescriptorCreateWithAttributes(attributeValues as CFDictionary)
         let font = CTFontCreateCopyWithAttributes(base, pointSize, nil, attributes)
         sized[key] = font
         return font
@@ -232,7 +241,7 @@ public final class PreviewRenderer: Sendable {
     private func sizedFont(for request: PreviewRequest, _ url: URL, _ faceIndex: Int) -> CTFont? {
         sizedFont(url, faceIndex, pointSize: request.pointSize, features: request.features,
                   allCaps: request.features.contains(.smallCaps) && Self.isAllCaps(request.text),
-                  extra: request.featureSettings)
+                  extra: request.featureSettings, variations: request.variations)
     }
 
     /// The face at `pointSize` with the default features, from the shared font cache (nil when it cannot be loaded).

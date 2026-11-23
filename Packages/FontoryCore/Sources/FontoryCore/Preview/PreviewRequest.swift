@@ -45,6 +45,9 @@ public struct PreviewRequest: Sendable, Hashable {
     public var disablesKerning = false
     /// BCP 47 language of the text (`kCTLanguageAttributeName`), which selects `locl` forms; nil for none.
     public var language: String?
+    /// Variation-axis coordinates (axis tag code → value, `kCTFontVariationAttribute`); empty keeps the font's
+    /// default instance.
+    public var variations: [UInt32: Double] = [:]
     public var size: CGSize          // in points; pixel size = size * scale
     public var scale: CGFloat
     /// sRGB components, computed once when a color is set so == and hash never convert colors.
@@ -80,7 +83,7 @@ public struct PreviewRequest: Sendable, Hashable {
             && a.showGuides == b.showGuides && a.showMissingGlyphs == b.showMissingGlyphs
             && a.outline == b.outline && a.underline == b.underline && a.features == b.features
             && a.featureSettings == b.featureSettings && a.disablesKerning == b.disablesKerning
-            && a.language == b.language
+            && a.language == b.language && a.variations == b.variations
     }
 
     public func hash(into h: inout Hasher) {
@@ -93,5 +96,6 @@ public struct PreviewRequest: Sendable, Hashable {
         h.combine(featureSettings)
         h.combine(disablesKerning)
         h.combine(language)
+        h.combine(variations)
     }
 }
