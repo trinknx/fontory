@@ -79,7 +79,7 @@ final class GlyphPipeline {
     }
 }
 
-/// One glyph cell render. Checks for cancellation before and after the work; delivers on the main actor.
+/// One glyph cell render. A cancelled operation that has not started does nothing; delivers on the main actor.
 private final class GlyphRenderOperation: Operation, @unchecked Sendable {
     let key: GlyphPipeline.Key
     private let fileURL: URL
@@ -100,8 +100,9 @@ private final class GlyphRenderOperation: Operation, @unchecked Sendable {
               let font = renderer.font(fileURL: fileURL, faceIndex: faceIndex, pointSize: key.pointSize) else {
             return deliver(nil)
         }
-        let image = GlyphCellRenderer.render(font: font, glyph: key.glyph, style: key.style)
-        deliver(isCancelled ? nil : image)
+        // A render that finishes after being cancelled is still delivered and cached: the work is done, and the cell
+        // may scroll back.
+        deliver(GlyphCellRenderer.render(font: font, glyph: key.glyph, style: key.style))
     }
 
     private func deliver(_ image: CGImage?) {

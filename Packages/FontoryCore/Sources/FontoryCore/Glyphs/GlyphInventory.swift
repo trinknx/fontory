@@ -274,9 +274,10 @@ public struct GlyphInventory: Sendable {
 /// - Empty (after trimming) searches nothing. A lone space is the space character.
 /// - One character searches for that character only (so "7" is the digit, "a" the letter).
 /// - `U+XXXX`, `u+xxxx` or `0xXXXX` (1–6 hex digits) is that code point only.
-/// - A bare token of 2–6 hex digits is a code point: in hex when it has a hex letter (`00e4`); when it is all
-///   decimal digits it is read both as decimal and as hex (`228` finds U+00E4 and U+0228). The token is also
-///   searched as text, since words like "face" are valid hex.
+/// - A bare token of 2–6 hex digits is a code point. With a hex letter (`00e4`) it is hex. All decimal digits are
+///   read both as decimal and as hex (`228` finds U+00E4 and U+0228), except with a leading zero, which marks
+///   hex only (`0041` is U+0041). A token with a hex letter is also searched as text (words like "face" are valid
+///   hex, and glyph names like "uni00E4" contain them); an all-digit token is not.
 /// - Any other text matches a substring of the Unicode name or of the glyph name, ignoring case. Characters
 ///   outside ASCII in it are also searched for themselves (pasting "äöü" finds the three letters).
 public struct GlyphSearch: Sendable, Equatable {
@@ -305,9 +306,14 @@ public struct GlyphSearch: Sendable, Equatable {
             }
         }
         var points: Set<UInt32> = []
+        let allDigits = lower.allSatisfy(\.isASCIIDigit)
         if trimmed.count <= 6, let hex = Self.hexValue(Substring(lower)) {
             if hex <= 0x10FFFF { points.insert(hex) }
-            if lower.allSatisfy(\.isASCIIDigit), let decimal = UInt32(lower), decimal <= 0x10FFFF { points.insert(decimal) }
+            if allDigits, !lower.hasPrefix("0"), let decimal = UInt32(lower), decimal <= 0x10FFFF { points.insert(decimal) }
+            if allDigits {
+                self.init(codePoints: points, text: nil)
+                return
+            }
         }
         for s in trimmed.unicodeScalars where !s.isASCII && !s.properties.isWhitespace { points.insert(s.value) }
         self.init(codePoints: points, text: trimmed)

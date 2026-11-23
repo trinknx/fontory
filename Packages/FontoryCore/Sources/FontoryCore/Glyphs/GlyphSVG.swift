@@ -4,34 +4,41 @@ import Foundation
 
 /// A glyph outline as an SVG document, in font units, with y flipped to SVG's downward axis.
 public enum GlyphSVG {
-    /// The SVG of `glyph` in the face at `faceIndex` of `fileURL`; nil when the face cannot be loaded.
+    /// The SVG of `glyph` in the face at `faceIndex` of `fileURL`; nil when the face cannot be loaded or the glyph has
+    /// no outline.
     public static func document(fileURL: URL, faceIndex: Int, glyph: CGGlyph) -> String? {
-        FontFile.font(at: fileURL, faceIndex: faceIndex).map { document(font: $0, glyph: glyph) }
+        FontFile.font(at: fileURL, faceIndex: faceIndex).flatMap { document(font: $0, glyph: glyph) }
     }
 
-    /// The viewBox is the advance wide (the ink's extent for a zero-width glyph such as a combining mark) and
-    /// ascent + descent high, with the ascender line at y = 0. A glyph without an outline (a space, a bitmap-only
-    /// glyph) has an empty path.
-    public static func document(font: CTFont, glyph: CGGlyph) -> String {
+    /// Whether `glyph` has a vector outline. Spaces, and bitmap or colour glyphs (sbix, emoji), have none.
+    public static func hasOutline(font: CTFont, glyph: CGGlyph) -> Bool {
+        guard let path = CTFontCreatePathForGlyph(font, glyph, nil) else { return false }
+        return !path.isEmpty
+    }
+
+    /// The outline in font units, or nil when the glyph has none (see `hasOutline`).
+    ///
+    /// The viewBox is the union of the advance × (ascent + descent) box, with the ascender line at y = 0, and the
+    /// ink's bounds, so negative side bearings, swashes and tall accents are not clipped.
+    public static func document(font: CTFont, glyph: CGGlyph) -> String? {
         let upem = CGFloat(max(1, CTFontGetUnitsPerEm(font)))
         let unitFont = CTFontCreateCopyWithAttributes(font, upem, nil, nil)
+        guard let path = CTFontCreatePathForGlyph(unitFont, glyph, nil), !path.isEmpty else { return nil }
         let ascent = CTFontGetAscent(unitFont)
         let descent = CTFontGetDescent(unitFont)
         var g = glyph
         var advance = CGSize.zero
         CTFontGetAdvancesForGlyphs(unitFont, .horizontal, &g, &advance, 1)
-        let path = CTFontCreatePathForGlyph(unitFont, glyph, nil)
-        var minX: CGFloat = 0
-        var width = advance.width
-        if width <= 0, let path, !path.isEmpty {
-            let box = path.boundingBoxOfPath
-            minX = box.minX
-            width = box.width
-        }
-        let d = path.map { pathData($0, ascent: ascent) } ?? ""
-        let box = [minX, 0, max(0, width), ascent + descent].map { number($0.rounded()) }.joined(separator: " ")
+        // In SVG coordinates (y down from the ascender).
+        let ink = path.boundingBoxOfPath
+        let inkBox = CGRect(x: ink.minX, y: ascent - ink.maxY, width: ink.width, height: ink.height)
+        let typographic = CGRect(x: 0, y: 0, width: max(0, advance.width), height: ascent + descent)
+        let union = typographic.union(inkBox)
+        let minX = union.minX.rounded(.down), minY = union.minY.rounded(.down)
+        let box = [minX, minY, union.maxX.rounded(.up) - minX, union.maxY.rounded(.up) - minY].map(number)
+            .joined(separator: " ")
         return "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"\(box)\">"
-            + "<path d=\"\(d)\"/></svg>\n"
+            + "<path d=\"\(pathData(path, ascent: ascent))\"/></svg>\n"
     }
 
     /// SVG path data for `path`, flipping y around the ascender (y' = ascent − y).

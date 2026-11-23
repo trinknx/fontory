@@ -2,6 +2,7 @@ import AppKit
 import FontoryCore
 import SwiftUI
 import UniformTypeIdentifiers
+import os
 
 /// The face the Characters tab shows: where to load it from and the metrics that size its cells.
 struct GlyphFace: Equatable, Sendable {
@@ -9,13 +10,19 @@ struct GlyphFace: Equatable, Sendable {
     let fileURL: URL
     let faceIndex: Int
     let postScriptName: String
-    /// Ascent and descent per em, for the cells' point size.
+    /// Ascent, descent and cap height per em, for the cells' point size.
     let ascent: CGFloat
     let descent: CGFloat
+    let capHeight: CGFloat
+
+    /// The point size of this face in a cell `side` points high.
+    func cellPointSize(_ side: CGFloat) -> CGFloat {
+        GlyphCellRenderer.pointSize(cellHeight: side, ascent: ascent, descent: descent, capHeight: capHeight)
+    }
 }
 
-/// The Characters tab's glyph grid: an `NSCollectionView` with a flow layout, so only the visible cells exist and
-/// render. Inputs are explicit so `updateNSView` runs exactly when one changes; `entriesVersion` stands for the
+/// The Characters tab's glyph grid: an `NSCollectionView` with an arithmetic grid layout (`GlyphGridLayout`), so
+/// only the visible cells exist and render, and reloads and size changes do not measure every glyph. Inputs are explicit so `updateNSView` runs exactly when one changes; `entriesVersion` stands for the
 /// entries (comparing tens of thousands of entries on every update would be wasted work).
 struct GlyphGridView: NSViewRepresentable {
     let model: AppModel
@@ -48,11 +55,13 @@ struct GlyphGridView: NSViewRepresentable {
 final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollectionViewDelegate, NSCollectionViewPrefetching {
     static let spacing: CGFloat = 6
     static let renderResumeDelay: Duration = .milliseconds(150)
+    /// Intervals "Glyph grid reload" and "Glyph grid resize" (Instruments ▸ os_signpost, subsystem local.fontory.app).
+    static let signposter = OSSignposter(subsystem: "local.fontory.app", category: "characters")
 
     private let model: AppModel
     private let pipeline: GlyphPipeline
     private(set) var collectionView: GlyphCollectionView!
-    private let layout = NSCollectionViewFlowLayout()
+    private let layout = GlyphGridLayout()
     private let promiseWriter = GlyphPromiseWriter()
 
     private var face: GlyphFace?
@@ -74,10 +83,8 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
     }
 
     func makeScrollView() -> NSScrollView {
-        let s = Self.spacing
-        layout.sectionInset = NSEdgeInsets(top: s * 2, left: s * 2, bottom: s * 2, right: s * 2)
-        layout.minimumInteritemSpacing = s
-        layout.minimumLineSpacing = s
+        layout.spacing = Self.spacing
+        layout.inset = Self.spacing * 2
 
         let cv = GlyphCollectionView()
         cv.controller = self
@@ -111,7 +118,10 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
         entries = newEntries
         version = newVersion
         pipeline.cancelAll()
+        let state = Self.signposter.beginInterval("Glyph grid reload", "\(newEntries.count) glyphs")
         collectionView.reloadData()
+        collectionView.layoutSubtreeIfNeeded()
+        Self.signposter.endInterval("Glyph grid reload", state)
         applySelection(scroll: false)
         if faceChanged || selectedIndex == nil { collectionView.scroll(.zero) } else { scrollSelectionToVisible() }
     }
@@ -123,8 +133,10 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
         preview = newPreview
         let itemSize = GlyphGridItem.itemSize(cellSize: newSize)
         if layout.itemSize != itemSize {
+            let state = Self.signposter.beginInterval("Glyph grid resize", "\(self.entries.count) glyphs")
             layout.itemSize = itemSize
-            layout.invalidateLayout()
+            collectionView.layoutSubtreeIfNeeded()
+            Self.signposter.endInterval("Glyph grid resize", state)
         }
         pipeline.cancelAll()
         // Slider drags: cells keep their image scaled; renders resume once the size settles.
@@ -186,7 +198,7 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
         let side = GlyphGridItem.glyphSide(cellSize: cellSize)
         let style = GlyphCellStyle(size: CGSize(width: side, height: side), scale: scale,
                                    foreground: preview.foreground, background: preview.background)
-        let pointSize = GlyphCellRenderer.pointSize(cellHeight: side, ascent: face.ascent, descent: face.descent)
+        let pointSize = face.cellPointSize(side)
         return GlyphPipeline.Key(faceID: face.faceID, glyph: entry.glyphID, pointSize: pointSize, style: style)
     }
 
@@ -235,7 +247,10 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
 
     func collectionView(_ collectionView: NSCollectionView, didEndDisplaying item: NSCollectionViewItem,
                         forRepresentedObjectAt indexPath: IndexPath) {
-        if let key = (item as? GlyphGridItem)?.wantedKey { pipeline.cancel(key) }
+        // A reused cell may already show the same glyph elsewhere: cancel only when no visible cell wants it.
+        guard let key = (item as? GlyphGridItem)?.wantedKey else { return }
+        let stillWanted = collectionView.visibleItems().contains { $0 !== item && ($0 as? GlyphGridItem)?.wantedKey == key }
+        if !stillWanted { pipeline.cancel(key) }
     }
 
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
@@ -270,11 +285,14 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
         true
     }
 
-    /// An SVG file promise, plus the character as plain text.
+    /// An SVG file promise, plus the character as plain text. A glyph without an outline (bitmap, colour) drags only
+    /// its character, and not at all when it has none.
     func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
         guard let face, entries.indices.contains(indexPath.item) else { return nil }
         let entry = entries[indexPath.item]
-        guard let svg = svg(of: entry, face: face) else { return nil }
+        guard let svg = svg(of: entry, face: face) else {
+            return entry.isMapped ? entry.character as NSString : nil
+        }
         let provider = GlyphPromiseProvider(fileType: UTType.svg.identifier, delegate: promiseWriter)
         provider.character = entry.character
         provider.userInfo = GlyphPromiseProvider.Payload(fileName: GlyphExport.fileName(entry, face: face), svg: svg)
@@ -283,19 +301,22 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
 
     func svg(of entry: GlyphEntry, face: GlyphFace) -> String? {
         model.previewRenderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: 1)
-            .map { GlyphSVG.document(font: $0, glyph: entry.glyphID) }
+            .flatMap { GlyphSVG.document(font: $0, glyph: entry.glyphID) }
     }
 
     var selectedEntry: GlyphEntry? {
         selectedIndex.map { entries[$0] }
     }
 
+    /// ⌘C: the character; for an unmapped glyph its SVG; a beep when there is neither.
     func copySelection() {
         guard let entry = selectedEntry, let face else { return NSSound.beep() }
         if entry.isMapped {
             GlyphExport.copyCharacter(entry)
         } else if let svg = svg(of: entry, face: face) {
             GlyphExport.copySVG(svg)
+        } else {
+            NSSound.beep()
         }
     }
 }
@@ -304,11 +325,15 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
 final class GlyphCollectionView: NSCollectionView {
     weak var controller: GlyphGridController?
 
+    private var claimedFocus = false
+
+    /// The first time the tab is shown, the grid takes the keyboard (arrows, ⌘C), unless a text field is editing.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard window != nil else { return }
+        guard window != nil, !claimedFocus else { return }
+        claimedFocus = true
         Task { @MainActor [weak self] in
-            guard let self, let window = self.window else { return }
+            guard let self, let window = self.window, !(window.firstResponder is NSText) else { return }
             window.makeFirstResponder(self)
         }
     }
@@ -316,7 +341,6 @@ final class GlyphCollectionView: NSCollectionView {
     @objc func copy(_ sender: Any?) {
         controller?.copySelection()
     }
-
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()

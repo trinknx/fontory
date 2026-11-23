@@ -36,14 +36,27 @@ public enum GlyphCellRenderer {
     /// Share of the cell height the face's ascent + descent fill.
     public static let fill: CGFloat = 0.72
 
-    /// The point size at which a face whose ascent and descent (per em) are given fills `fill` of the cell height.
-    public static func pointSize(cellHeight: CGFloat, ascent: CGFloat, descent: CGFloat) -> CGFloat {
-        let box = ascent + descent
+    /// The vertical extent a cell fits, above and below the baseline, in the units of the arguments (per em, or
+    /// points). Normally the typographic box (ascent, descent). Faces whose box is far taller than their letters
+    /// (Zapfino: ascent + descent ≈ 3.4 em) are fitted to their typical ink instead, so they are not drawn tiny:
+    /// at most 1.3 × the cap height above and max(0.25 em, 0.35 × cap height) below. Without a cap height the box
+    /// is used. Guides beyond the reference box fall outside the cell; baseline, x-height and cap height stay.
+    public static func referenceBox(ascent: CGFloat, descent: CGFloat, capHeight: CGFloat, em: CGFloat = 1)
+        -> (above: CGFloat, below: CGFloat) {
+        guard capHeight > 0 else { return (ascent, descent) }
+        return (min(ascent, capHeight * 1.3), min(descent, max(0.25 * em, capHeight * 0.35)))
+    }
+
+    /// The point size at which a face whose metrics (per em) are given fills `fill` of the cell height with its
+    /// reference box.
+    public static func pointSize(cellHeight: CGFloat, ascent: CGFloat, descent: CGFloat, capHeight: CGFloat) -> CGFloat {
+        let ref = referenceBox(ascent: ascent, descent: descent, capHeight: capHeight)
+        let box = ref.above + ref.below
         guard box > 0.01 else { return cellHeight * fill }
         return max(1, (cellHeight * fill / box * 2).rounded() / 2)   // half-point steps keep the font cache small
     }
 
-    /// Renders `glyph` of `font` (already at the cell's point size). The typographic box is centred vertically; the
+    /// Renders `glyph` of `font` (already at the cell's point size). The reference box is centred vertically; the
     /// advance is centred horizontally, or the ink when the glyph has no advance or its ink would leave the cell.
     public static func render(font: CTFont, glyph: CGGlyph, style: GlyphCellStyle) -> CGImage? {
         let w = Int((style.size.width * style.scale).rounded())
@@ -61,9 +74,9 @@ public enum GlyphCellRenderer {
         ctx.setShouldSmoothFonts(true)
 
         let size = style.size
-        let ascent = CTFontGetAscent(font)
-        let descent = CTFontGetDescent(font)
-        let baseline = ((size.height / 2 - (ascent - descent) / 2) * style.scale).rounded() / style.scale
+        let ref = referenceBox(ascent: CTFontGetAscent(font), descent: CTFontGetDescent(font),
+                               capHeight: CTFontGetCapHeight(font), em: CTFontGetSize(font))
+        let baseline = ((size.height / 2 - (ref.above - ref.below) / 2) * style.scale).rounded() / style.scale
         if style.showGuides {
             MetricGuides.draw(ctx, font: font, baseline: baseline, width: size.width, foreground: style.foreground,
                               scale: style.scale)

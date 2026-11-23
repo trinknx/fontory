@@ -78,12 +78,11 @@ struct CharactersTabView: View {
         let id = faceID
         model.prefetchRows(detail.faceIDs)
         guard let info = await model.faceInfo(id), !Task.isCancelled else {
-            if !Task.isCancelled { failure = "This style is no longer in the library."; loadedID = id }
+            if !Task.isCancelled { fail("This style is no longer in the library.", id) }
             return
         }
         guard info.online else {
-            failure = "The file of this style is offline."
-            loadedID = id
+            fail("The file of this style is offline.", id)
             return
         }
         let cache = model.glyphInventories
@@ -99,8 +98,7 @@ struct CharactersTabView: View {
         }.value
         guard !Task.isCancelled else { return }
         guard let result else {
-            failure = "This font file could not be read."
-            loadedID = id
+            fail("This font file could not be read.", id)
             return
         }
         let (loaded, entries) = result
@@ -108,10 +106,18 @@ struct CharactersTabView: View {
         failure = nil
         inventory = loaded
         face = GlyphFace(faceID: id, fileURL: url, faceIndex: index, postScriptName: info.postScriptName,
-                         ascent: CGFloat(loaded.ascent / em), descent: CGFloat(loaded.descent / em))
+                         ascent: CGFloat(loaded.ascent / em), descent: CGFloat(loaded.descent / em),
+                         capHeight: CGFloat(loaded.capHeight / em))
         publish(entries, key: key)
         loadedID = id
         updateStyleNames()
+    }
+
+    /// A face that cannot be shown: its message, and no selection left over from the previous face.
+    private func fail(_ message: String, _ id: Int64) {
+        failure = message
+        selected = nil
+        loadedID = id
     }
 
     private func filterKey(faceID: Int64?) -> FilterKey {
@@ -140,7 +146,8 @@ struct CharactersTabView: View {
         let result = await Task.detached(priority: .userInitiated) {
             inventory.entries(filter: filter, search: search, order: order)
         }.value
-        guard !Task.isCancelled else { return }
+        // The face may have changed while filtering: never pair its glyph IDs with another face.
+        guard !Task.isCancelled, key.faceID == loadedID else { return }
         publish(result, key: key)
     }
 
@@ -268,6 +275,8 @@ private struct GlyphInspector: View {
     let entry: GlyphEntry?
 
     @State private var image: CGImage?
+    /// Whether the selected glyph has a vector outline (bitmap and colour glyphs have none: no SVG).
+    @State private var hasOutline = true
     @Environment(\.displayScale) private var displayScale
 
     static let side: CGFloat = 96
@@ -302,7 +311,8 @@ private struct GlyphInspector: View {
                         .disabled(!entry.isMapped)
                         .help(entry.isMapped ? "Copy \(entry.character) as text" : "This glyph has no character")
                     Button("Copy SVG") { copySVG(entry) }
-                        .help("Copy the outline as an SVG document")
+                        .disabled(!hasOutline)
+                        .help(hasOutline ? "Copy the outline as an SVG document" : "This glyph has no outline (bitmap/colour)")
                 }
                 .controlSize(.small)
             } else {
@@ -342,25 +352,30 @@ private struct GlyphInspector: View {
     }
 
     private func render() async {
-        guard let face, let entry else { image = nil; return }
+        guard let face, let entry else { image = nil; hasOutline = true; return }
         let renderer = model.previewRenderer
         let side = Self.side
         let style = GlyphCellStyle(size: CGSize(width: side, height: side), scale: displayScale,
                                    foreground: model.preview.foreground, background: model.preview.background)
-        let pointSize = GlyphCellRenderer.pointSize(cellHeight: side, ascent: face.ascent, descent: face.descent)
-        let rendered = await Task.detached(priority: .userInitiated) { () -> CGImage? in
-            guard let font = renderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: pointSize) else { return nil }
-            return GlyphCellRenderer.render(font: font, glyph: entry.glyphID, style: style)
+        let pointSize = face.cellPointSize(side)
+        let rendered = await Task.detached(priority: .userInitiated) { () -> (CGImage?, Bool) in
+            guard let font = renderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: pointSize) else {
+                return (nil, false)
+            }
+            return (GlyphCellRenderer.render(font: font, glyph: entry.glyphID, style: style),
+                    GlyphSVG.hasOutline(font: font, glyph: entry.glyphID))
         }.value
         guard !Task.isCancelled else { return }
-        image = rendered
+        image = rendered.0
+        hasOutline = rendered.1
     }
 
     private func copySVG(_ entry: GlyphEntry) {
         guard let face,
-              let font = model.previewRenderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: 1) else {
+              let font = model.previewRenderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: 1),
+              let svg = GlyphSVG.document(font: font, glyph: entry.glyphID) else {
             return NSSound.beep()
         }
-        GlyphExport.copySVG(GlyphSVG.document(font: font, glyph: entry.glyphID))
+        GlyphExport.copySVG(svg)
     }
 }

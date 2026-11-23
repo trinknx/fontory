@@ -152,6 +152,10 @@ import Testing
         #expect(GlyphSearch("0xE4")?.codePoints == [0xE4])
         #expect(GlyphSearch("00e4")?.codePoints == [0xE4])        // hex letters: hex only
         #expect(GlyphSearch("228")?.codePoints == [228, 0x228])   // all digits: decimal and hex
+        #expect(GlyphSearch("228")?.text == nil)                  // digits only: no name search
+        #expect(GlyphSearch("0041")?.codePoints == [0x41])        // leading zero: hex only
+        #expect(GlyphSearch("0041")?.text == nil)
+        #expect(GlyphSearch("00e4")?.text == "00e4")              // hex letters: glyph names like "uni00E4" too
         #expect(GlyphSearch("U+110000") == nil || GlyphSearch("U+110000")?.codePoints.isEmpty == true)
         #expect(GlyphSearch("diaeresis")?.text == "diaeresis")
         #expect(GlyphSearch("face")?.codePoints == [0xFACE])      // hex-looking words also search names
@@ -208,12 +212,44 @@ import Testing
         #expect(GlyphSVG.number(12.3456) == "12.35")
     }
 
-    @Test func emptyGlyphHasEmptyPath() throws {
+    @Test func glyphsWithoutOutlineHaveNoSVG() throws {
         let url = URL(fileURLWithPath: TempFonts.arialBold)
         let inv = try #require(GlyphInventory.load(fileURL: url, faceIndex: 0))
         let space = try #require(inv.entries.first { $0.scalarValue == 0x20 })
-        let svg = try #require(GlyphSVG.document(fileURL: url, faceIndex: 0, glyph: space.glyphID))
-        #expect(svg.contains("d=\"\""))
+        let arial = try Self.font(TempFonts.arialBold)
+        #expect(!GlyphSVG.hasOutline(font: arial, glyph: space.glyphID))
+        #expect(GlyphSVG.document(fileURL: url, faceIndex: 0, glyph: space.glyphID) == nil)
+        // Colour bitmap glyphs (sbix) have no outline either.
+        let emojiURL = URL(fileURLWithPath: TempFonts.emoji)
+        let emoji = try #require(GlyphInventory.load(fileURL: emojiURL, faceIndex: 0))
+        let grinning = try #require(emoji.entries.first { $0.scalarValue == 0x1F600 })
+        let emojiFont = try Self.font(TempFonts.emoji)
+        #expect(!GlyphSVG.hasOutline(font: emojiFont, glyph: grinning.glyphID))
+        #expect(GlyphSVG.document(font: emojiFont, glyph: grinning.glyphID) == nil)
+        let m = try #require(inv.entries.first { $0.scalarValue == 0x4D })
+        #expect(GlyphSVG.hasOutline(font: arial, glyph: m.glyphID))
+    }
+
+    /// Ink left of the origin (negative side bearing) or above the ascender (swashes) stays inside the viewBox.
+    @Test func svgViewBoxContainsTheInk() throws {
+        let font = try Self.font(Self.zapfino)
+        let unit = CTFontCreateCopyWithAttributes(font, CGFloat(CTFontGetUnitsPerEm(font)), nil, nil)
+        let ascent = CTFontGetAscent(unit)
+        var checked = 0
+        for g in 1..<CGGlyph(CTFontGetGlyphCount(unit)) {
+            guard let path = CTFontCreatePathForGlyph(unit, g, nil), !path.isEmpty else { continue }
+            let ink = path.boundingBoxOfPath
+            guard ink.minX < 0 || ink.maxY > ascent else { continue }
+            let svg = try #require(GlyphSVG.document(font: font, glyph: g))
+            let box = try #require(svg.firstMatch(of: /viewBox="([^"]+)"/)?.1).split(separator: " ").compactMap { Double($0) }
+            #expect(box[0] <= Double(ink.minX).rounded(.down) + 0.5)
+            #expect(box[0] + box[2] >= Double(ink.maxX).rounded(.up) - 0.5)
+            #expect(box[1] <= Double(ascent - ink.maxY) + 0.5)
+            #expect(box[1] + box[3] >= Double(ascent - ink.minY) - 0.5)
+            checked += 1
+            if checked >= 20 { break }
+        }
+        #expect(checked > 0)
     }
 
     // MARK: Cell rendering
@@ -228,6 +264,23 @@ import Testing
         let image = try #require(GlyphCellRenderer.render(font: font, glyph: glyph, style: style))
         #expect(image.width == 128 && image.height == 128)
         #expect(PreviewRendererTests().hasInk(image))
-        #expect(GlyphCellRenderer.pointSize(cellHeight: 64, ascent: 0.9, descent: 0.2) > 20)
+        #expect(GlyphCellRenderer.pointSize(cellHeight: 64, ascent: 0.9, descent: 0.2, capHeight: 0.7) > 20)
+    }
+
+    /// A face with a huge ascent and descent (Zapfino) is scaled by its typical ink, not by its typographic box,
+    /// so its glyphs are not drawn tiny; ordinary faces keep their box.
+    @Test func cellScaleFollowsTypicalInk() throws {
+        let arial = try #require(GlyphInventory.load(fileURL: URL(fileURLWithPath: TempFonts.arialBold), faceIndex: 0))
+        func perEm(_ inv: GlyphInventory) -> (CGFloat, CGFloat, CGFloat) {
+            let em = Double(inv.unitsPerEm)
+            return (CGFloat(inv.ascent / em), CGFloat(inv.descent / em), CGFloat(inv.capHeight / em))
+        }
+        let (a, d, c) = perEm(arial)
+        let arialBox = GlyphCellRenderer.referenceBox(ascent: a, descent: d, capHeight: c)
+        #expect(abs(arialBox.above - a) < 0.001 && abs(arialBox.below - d) < 0.001)
+        let zapfino = try #require(GlyphInventory.load(fileURL: URL(fileURLWithPath: Self.zapfino), faceIndex: 0))
+        let (za, zd, zc) = perEm(zapfino)
+        let naive = 64 * GlyphCellRenderer.fill / (za + zd)
+        #expect(GlyphCellRenderer.pointSize(cellHeight: 64, ascent: za, descent: zd, capHeight: zc) > naive * 1.3)
     }
 }
