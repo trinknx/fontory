@@ -188,18 +188,25 @@ extension FontStore {
         }
     }
 
-    /// The exclusions of one location: their relative paths and fingerprints.
-    func exclusions(locationID: Int64) throws -> (paths: Set<String>, fingerprints: Set<String>) {
+    /// The exclusions of one location: excluded relative path -> the fingerprint the file had.
+    func exclusions(locationID: Int64) throws -> [String: String] {
         try reader.withLock {
             let s = try reader.prepare("SELECT relative_path, fingerprint FROM excluded_files WHERE location_id = ?")
             defer { s.reset() }
             try s.bind([.int(locationID)])
-            var paths = Set<String>(), fingerprints = Set<String>()
-            while try s.step() {
-                paths.insert(s.text(0))
-                fingerprints.insert(s.text(1))
+            var out: [String: String] = [:]
+            while try s.step() { out[s.text(0)] = s.text(1) }
+            return out
+        }
+    }
+
+    /// Drops stale exclusions of a location (a path now holding an indexed file), in one transaction.
+    func deleteExclusions(locationID: Int64, relativePaths: [String]) throws {
+        guard !relativePaths.isEmpty else { return }
+        try database.withLock {
+            try database.transaction {
+                for path in relativePaths { try includeAgain(locationID: locationID, relativePath: path) }
             }
-            return (paths, fingerprints)
         }
     }
 

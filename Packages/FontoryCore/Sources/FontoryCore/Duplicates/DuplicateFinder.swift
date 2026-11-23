@@ -48,14 +48,18 @@ public final class DuplicateFinder: Sendable {
         var hasher = SHA256()
         while true {
             if isCancelled() { return nil }
-            let chunk: Data
-            do {
-                guard let data = try handle.read(upToCount: chunkSize), !data.isEmpty else { break }
-                chunk = data
-            } catch {
-                return nil
+            // Drained per chunk, so a long run does not pile up autoreleased buffers.
+            let more: Bool? = autoreleasepool {
+                do {
+                    guard let data = try handle.read(upToCount: chunkSize), !data.isEmpty else { return false }
+                    hasher.update(data: data)
+                    return true
+                } catch {
+                    return nil
+                }
             }
-            hasher.update(data: chunk)
+            guard let more else { return nil }
+            if !more { break }
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }

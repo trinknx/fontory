@@ -59,10 +59,11 @@ public struct ScanProgress: Sendable, Equatable {
 /// whole tree was enumerated without error, the listing is plausible, and the root still exists immediately
 /// before the removals run. Any doubt aborts the scan and removes nothing.
 ///
-/// Exclusions (`FontStore.removeFromLibrary`): a file at an excluded relative path of the location is ignored as if it
-/// were not there (so an indexed file moved onto that path drops out of the index), and a new file whose fingerprint
-/// equals an excluded fingerprint of the location (an excluded file renamed or moved within it) is not indexed.
-/// Indexed files are still matched as moves first: an exact copy that was kept keeps its record when it is renamed.
+/// Exclusions (`FontStore.removeFromLibrary`) apply to new files only, after the diff on the full listing, so an indexed
+/// file's move always wins (it keeps its identity and user data). A new file is not indexed when its fingerprint equals
+/// an excluded fingerprint of the location: the excluded file itself, at its path or renamed/moved within the location
+/// (also when its fingerprint cannot be read but its path is excluded). An exclusion whose path now holds another file
+/// (an indexed file moved there, or a new file with another fingerprint) is stale and deleted; that file is indexed.
 public actor LibraryScanner {
     private static let batchSize = 500
     private static let progressInterval: Duration = .milliseconds(100)
@@ -179,9 +180,12 @@ public actor LibraryScanner {
             // A mounted-but-empty directory (e.g. a volume's mount point) must not wipe a populated index.
             if found.isEmpty && !indexed.isEmpty { throw Abort(reason: "root is empty but the index is not") }
 
-            // Excluded paths are not part of the listing (checked above on the full listing, so they still count as present).
-            let exclusions = try store.exclusions(locationID: locationID)
-            if !exclusions.paths.isEmpty { found.removeAll { exclusions.paths.contains($0.relativePath) } }
+            let exclusions = try store.exclusions(locationID: locationID)  // path -> fingerprint
+            // Moves are matched in listing order: list excluded paths last, so a moved indexed file is matched to its
+            // new path rather than to an excluded copy with the same fingerprint still lying at its old path.
+            if !exclusions.isEmpty {
+                found = found.filter { exclusions[$0.relativePath] == nil } + found.filter { exclusions[$0.relativePath] != nil }
+            }
 
             var fingerprints: [String: String] = [:]
             var unfingerprintable: [String] = []
@@ -194,13 +198,23 @@ public actor LibraryScanner {
                 return "unreadable:\(file.relativePath)"  // never equals a real fingerprint
             }
 
-            // New files: skip excluded fingerprints and, when asked, fingerprints indexed in another location.
-            if !diff.added.isEmpty && (!exclusions.fingerprints.isEmpty || skipFingerprintDuplicates) {
+            // An indexed file moved onto an excluded path: the move wins, the exclusion is stale.
+            var staleExclusions = diff.moved.map(\.1.relativePath).filter { exclusions[$0] != nil }
+            // New files: skip excluded files and, when asked, fingerprints indexed in another location.
+            if !diff.added.isEmpty && (!exclusions.isEmpty || skipFingerprintDuplicates) {
                 for file in diff.added where fingerprints[file.relativePath] == nil {
                     // An unreadable file is left to the parser, which fails it.
                     if let fp = try? Fingerprint.compute(url: file.url, size: file.size) { fingerprints[file.relativePath] = fp }
                 }
-                diff.added.removeAll { fingerprints[$0.relativePath].map(exclusions.fingerprints.contains) == true }
+                let excludedFingerprints = Set(exclusions.values)
+                diff.added.removeAll { file in
+                    let fp = fingerprints[file.relativePath]
+                    if let fp, excludedFingerprints.contains(fp) { return true }
+                    guard exclusions[file.relativePath] != nil else { return false }
+                    if fp == nil { return true }  // can't tell whether it is the excluded file: keep it out
+                    staleExclusions.append(file.relativePath)  // another file at that path
+                    return false
+                }
                 if skipFingerprintDuplicates {
                     let elsewhere = try store.fingerprintsIndexed(diff.added.compactMap { fingerprints[$0.relativePath] }, outside: locationID)
                     let before = diff.added.count
@@ -224,6 +238,7 @@ public actor LibraryScanner {
                 for f in try store.activeFiles(states: [.on, .temporary], locationIDs: [locationID]) { activeURLs[f.fileID] = f.url }
             }
             try applyMoves(diff.moved, locationID: locationID)
+            try store.deleteExclusions(locationID: locationID, relativePaths: staleExclusions)
             progress.movedActiveFiles = diff.moved.compactMap { record, file in
                 activeURLs[record.id].map { MovedFile(fileID: record.id, oldURL: $0, newURL: file.url) }
             }

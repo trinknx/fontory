@@ -1,18 +1,20 @@
 import Foundation
 
-/// Which copy of an exact duplicate group "Select Copies to Remove" keeps. Rules, in order:
-/// 1. the copy with a face active in Fontory (on or temporary);
+/// Which copy of an exact duplicate group "Select Copies to Remove" keeps. A protected copy (in a system or
+/// user-installed location, or active outside Fontory) can never be removed, so it is preferred as the keeper.
+/// Then, in order:
+/// 1. the active copy (a face on or temporary in Fontory, or the file active outside Fontory);
 /// 2. format OTF > TTF > TTC/OTC > WOFF2 > WOFF > others;
 /// 3. the location the user ranks higher (`locationRank`, first is highest; unranked locations last);
 /// 4. the newer version (numeric parts of the version string; an unparsable or missing version compares lowest);
 /// 5. the earliest added (then the lowest file id).
-/// System files and files active outside Fontory are never selected, whichever copy is kept.
+/// Protected files are never selected, whichever copy is kept.
 public struct KeepPolicy: Sendable, Hashable, Codable {
     public var locationRank: [Int64]  // higher first
 
     public init(locationRank: [Int64] = []) { self.locationRank = locationRank }
 
-    /// Files to remove from an exact group: every file but the kept one, minus system and externally active files.
+    /// Files to remove from an exact group: every file but the kept one, minus protected files.
     /// Same-font groups are never auto-selected (empty). `rows` holds at least one face per file of the group.
     public func filesToRemove(in group: DuplicateGroup, rows: [Int64: FaceRow], files: [Int64: FileRecord]) -> Set<Int64> {
         guard group.kind == .exact, group.fileIDs.count > 1 else { return [] }
@@ -67,8 +69,8 @@ public struct KeepPolicy: Sendable, Hashable, Codable {
 
         init(fileID: Int64, faces: [FaceRow], file: FileRecord?, policy: KeepPolicy) {
             self.fileID = fileID
-            active = faces.contains { $0.activation != .off }
-            isProtected = faces.contains { $0.locationKind == .system || $0.externalActive }
+            active = faces.contains { $0.activation != .off || $0.externalActive }
+            isProtected = faces.contains { $0.locationKind.isReadOnly || $0.externalActive }
             format = KeepPolicy.formatRank(file?.format ?? faces.first?.format ?? "")
             let locationID = file?.locationID ?? faces.first?.locationID
             location = locationID.flatMap { policy.locationRank.firstIndex(of: $0) } ?? policy.locationRank.count
@@ -78,6 +80,7 @@ public struct KeepPolicy: Sendable, Hashable, Codable {
         }
 
         func isBetter(than other: Candidate) -> Bool {
+            if isProtected != other.isProtected { return isProtected }
             if active != other.active { return active }
             if format != other.format { return format < other.format }
             if location != other.location { return location < other.location }

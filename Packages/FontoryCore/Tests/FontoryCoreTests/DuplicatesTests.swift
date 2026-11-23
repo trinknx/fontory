@@ -167,15 +167,27 @@ import Testing
         // Earlier rules win over later ones: format beats version.
         #expect(removed([(row(11, file: 1, format: "ttf", version: "9.0"), file(1, format: "ttf")),
                          (row(12, file: 2, format: "otf", version: "1.0"), file(2, format: "otf"))]) == [1])
-        // Never system or externally active files, whatever their rank.
+        // Never system, user-installed or externally active files; one of them is kept (it can't be removed anyway).
         let protected = removed([
             (row(11, file: 1, format: "woff", kind: .system), file(1, format: "woff")),
             (row(12, file: 2, format: "woff", external: true), file(2, format: "woff")),
             (row(13, file: 3, format: "ttf"), file(3, format: "ttf")),
             (row(14, file: 4, format: "otf"), file(4, format: "otf")),
+            (row(15, file: 5, format: "woff", kind: .userInstalled), file(5, format: "woff")),
         ])
-        #expect(protected == [3])
+        #expect(protected == [3, 4])
         #expect(removed([(row(11, file: 1, kind: .system), file(1)), (row(12, file: 2, kind: .system), file(2))]).isEmpty)
+    }
+
+    @Test func protectedCopyIsKept() {
+        // External-active counts as active for rule 1 and beats a better format.
+        #expect(removed([(row(11, file: 1, format: "woff", external: true), file(1, format: "woff")),
+                         (row(12, file: 2, format: "otf"), file(2, format: "otf"))]) == [2])
+        // A system copy is kept over a better, Fontory-active copy: it can never be removed.
+        #expect(removed([(row(11, file: 1, format: "ttc", kind: .system), file(1, format: "ttc")),
+                         (row(12, file: 2, format: "otf", activation: .on), file(2, format: "otf"))]) == [2])
+        #expect(removed([(row(11, file: 1, format: "ttc", kind: .userInstalled), file(1, format: "ttc")),
+                         (row(12, file: 2, format: "otf"), file(2, format: "otf"))]) == [2])
     }
 
     @Test func sameFontNeverAutoSelected() {
@@ -225,17 +237,65 @@ import Testing
         last = await scan(scanner, loc.id)
         #expect(last?.phase == .done)
         #expect(try store.files(in: loc.id).map(\.relativePath) == ["s.ttf"])
-        // Another file landing on the excluded path stays out too.
-        try t.copy(TempFonts.newYork, as: "a.ttf")
-        last = await scan(scanner, loc.id)
-        #expect(try store.files(in: loc.id).map(\.relativePath) == ["s.ttf"])
 
         // Include again + rescan: the path and the fingerprint are allowed again.
         try store.includeAgain(locationID: loc.id, relativePath: "a.ttf")
         #expect(try store.excludedFiles().isEmpty)
         last = await scan(scanner, loc.id)
         #expect(last?.phase == .done)
-        #expect(try store.files(in: loc.id).map(\.relativePath) == ["a.ttf", "renamed.ttf", "s.ttf"])
+        #expect(try store.files(in: loc.id).map(\.relativePath) == ["renamed.ttf", "s.ttf"])
+    }
+
+    @Test func differentFileAtExcludedPathIsIndexed() async throws {
+        let t = try TempFonts(); defer { t.cleanup() }
+        try t.copy(TempFonts.arialBold, as: "a.ttf")
+        try t.copy(TempFonts.sfns, as: "s.ttf")
+        let store = try memoryStore()
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "F", displayName: "F", lastKnownPath: t.root.path)
+        let root = t.root
+        let scanner = LibraryScanner(store: store, rootURL: { _ in root })
+        _ = await scan(scanner, loc.id)
+        let arial = try #require(try store.files(in: loc.id).first { $0.relativePath == "a.ttf" })
+        try store.removeFromLibrary(fileIDs: [arial.id])
+        // Another font saved at the excluded path: indexed, and the stale exclusion is dropped.
+        try FileManager.default.removeItem(at: root.appendingPathComponent("a.ttf"))
+        try t.copy(TempFonts.newYork, as: "a.ttf")
+        let last = await scan(scanner, loc.id)
+        #expect(last?.phase == .done)
+        #expect(try store.files(in: loc.id).map(\.relativePath) == ["a.ttf", "s.ttf"])
+        #expect(try store.files(in: loc.id).first?.fingerprint != arial.fingerprint)
+        #expect(try store.excludedFiles().isEmpty)
+    }
+
+    @Test func moveOntoExcludedPathKeepsUserData() async throws {
+        // Exact copies a and b; b removed from the library and deleted; the kept copy a is then moved onto b's path.
+        let t = try TempFonts(); defer { t.cleanup() }
+        try t.copy(TempFonts.arialBold, as: "a.ttf")
+        try t.copy(TempFonts.arialBold, as: "b.ttf")
+        let store = try memoryStore()
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "F", displayName: "F", lastKnownPath: t.root.path)
+        let root = t.root
+        let scanner = LibraryScanner(store: store, rootURL: { _ in root })
+        _ = await scan(scanner, loc.id)
+        let files = try store.files(in: loc.id)
+        let a = try #require(files.first { $0.relativePath == "a.ttf" }), b = try #require(files.first { $0.relativePath == "b.ttf" })
+        let face = try #require(try store.faceIDs(for: LibraryQuery()).first { try store.rows(ids: [$0])[$0]?.fileID == a.id })
+        try store.setNote("keep me", faceID: face)
+        let tag = try store.createTag(name: "T", parentID: nil)
+        try store.addTag(tag, toFaces: [face])
+        try store.removeFromLibrary(fileIDs: [b.id])
+        try FileManager.default.removeItem(at: root.appendingPathComponent("b.ttf"))
+        try FileManager.default.moveItem(at: root.appendingPathComponent("a.ttf"), to: root.appendingPathComponent("b.ttf"))
+
+        let last = await scan(scanner, loc.id)
+        #expect(last?.phase == .done)
+        #expect(last?.removedWithUserData == 0)
+        let after = try store.files(in: loc.id)
+        #expect(after.map(\.relativePath) == ["b.ttf"])
+        #expect(after.first?.id == a.id)
+        #expect(try store.faceInfo(id: face)?.note == "keep me")
+        #expect(try store.tagIDs(forFaces: [face])[face] == [tag])
+        #expect(try store.excludedFiles().isEmpty)
     }
 
     @Test func excludedIndexedFileMovesNormally() async throws {
