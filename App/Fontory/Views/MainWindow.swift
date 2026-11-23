@@ -13,7 +13,14 @@ struct MainWindow: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 190, ideal: 240, max: 380)
         } detail: {
-            BrowserPlaceholder()
+            switch model.viewMode {
+            case .grid:
+                FontGridView(model: model, faceIDs: model.faceIDs, rowsVersion: model.rowsVersion,
+                             zoom: model.zoom[.grid] ?? AppModel.defaultZoom, preview: model.preview,
+                             selection: model.selection)
+            case .list:
+                BrowserPlaceholder()
+            }
         }
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search fonts")
         .toolbar { BrowserToolbar(model: model) }
@@ -32,7 +39,7 @@ struct MainWindow: View {
     }
 }
 
-/// Stand-in for the grid (Task 11) and list (Task 12): a count and a plain list of the first matches.
+/// Stand-in for the list view (Task 12): a count and a plain list of the first matches.
 private struct BrowserPlaceholder: View {
     @Environment(AppModel.self) private var model
     private static let limit = 300

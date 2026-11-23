@@ -122,6 +122,10 @@ final class AppModel {
     @ObservationIgnored private var backend: LibraryBackend?
     @ObservationIgnored private var presetStore: PresetStore?
     @ObservationIgnored private let rowCache = LRUCache<Int64, FaceRow>(limit: 4000)
+    /// Ids whose rows are being fetched by `prefetchRows`.
+    @ObservationIgnored private var pendingRowIDs: Set<Int64> = []
+    /// Shared by every preview in the app; it caches parsed fonts.
+    @ObservationIgnored let previewRenderer = PreviewRenderer()
     @ObservationIgnored private var indexByID: [Int64: Int] = [:]
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var refreshGeneration = 0
@@ -284,9 +288,73 @@ final class AppModel {
         return rows[id]
     }
 
+    /// Posted on the main actor after `prefetchRows` stored rows; `userInfo[rowIDsKey]` holds their `[Int64]` ids.
+    nonisolated static let rowsLoadedNotification = Notification.Name("FontoryRowsLoaded")
+    nonisolated static let rowIDsKey = "ids"
+
+    /// The cached row for a face, without touching the database. Nil until `prefetchRows` has loaded it.
+    func cachedRow(_ id: Int64) -> FaceRow? {
+        rowCache[id]
+    }
+
+    /// Loads the rows for `ids` that are neither cached nor already loading, in one batch on the read
+    /// connection off the main actor, then posts `rowsLoadedNotification`. Results that arrive after the rows
+    /// were invalidated are dropped (the caller asks again for what it still shows).
+    func prefetchRows(_ ids: some Sequence<Int64>) {
+        guard let backend else { return }
+        let missing = ids.filter { rowCache[$0] == nil && !pendingRowIDs.contains($0) }
+        guard !missing.isEmpty else { return }
+        pendingRowIDs.formUnion(missing)
+        let version = rowsVersion
+        Task { [weak self] in
+            let rows = await Task.detached(priority: .userInitiated) { try? backend.store.rows(ids: missing) }.value
+            guard let self else { return }
+            self.pendingRowIDs.subtract(missing)
+            guard version == self.rowsVersion, let rows, !rows.isEmpty else { return }
+            for (key, value) in rows { self.rowCache[key] = value }
+            NotificationCenter.default.post(name: Self.rowsLoadedNotification, object: self,
+                                            userInfo: [Self.rowIDsKey: Array(rows.keys)])
+        }
+    }
+
+    /// Index in `faceIDs` of the first face whose family starts with `prefix` (case-insensitive), searched off
+    /// the main actor: a binary search when the list is sorted by family ascending, otherwise a linear scan.
+    func firstIndex(familyPrefix prefix: String) async -> Int? {
+        guard let backend, !prefix.isEmpty else { return nil }
+        let ids = faceIDs
+        let sortedByFamily = query.sort == .family && query.ascending
+        let needle = prefix.lowercased()
+        return await Task.detached(priority: .userInitiated) { () -> Int? in
+            func family(_ i: Int) -> String? { (try? backend.store.rows(ids: [ids[i]]))?[ids[i]]?.family.lowercased() }
+            if sortedByFamily {
+                var lo = 0, hi = ids.count
+                while lo < hi {
+                    let mid = (lo + hi) / 2
+                    guard let f = family(mid) else { break }
+                    if f < needle { lo = mid + 1 } else { hi = mid }
+                }
+                // SQLite's NOCASE order can differ from Swift's for non-ASCII names; verify, else scan.
+                if lo < ids.count, family(lo)?.hasPrefix(needle) == true { return lo }
+            }
+            var start = 0
+            while start < ids.count {
+                let end = min(start + 2000, ids.count)
+                let chunk = Array(ids[start..<end])
+                guard let rows = try? backend.store.rows(ids: chunk) else { return nil }
+                for (offset, id) in chunk.enumerated() where rows[id]?.family.lowercased().hasPrefix(needle) == true {
+                    return start + offset
+                }
+                start = end
+            }
+            return nil
+        }.value
+    }
+
     private func invalidateRows() {
         rowCache.removeAll()
         rowsVersion &+= 1
+        // Files may have been replaced by a rescan: let faces that failed to load try again.
+        previewRenderer.forgetFailures()
     }
 
     // MARK: Locations
@@ -599,6 +667,30 @@ final class AppModel {
         guard !text.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// Makes the face the one shown for its family in the list view.
+    func setFamilyRepresentative(_ id: Int64) {
+        guard let backend, let row = row(id) else { return }
+        let key = row.family.lowercased()
+        Task {
+            await runBackground({ try backend.store.setRepresentative(familyKey: key, faceID: id) },
+                                failureTitle: "The family representative could not be set")
+            if viewMode == .list { scheduleRefresh(delay: .zero) }
+        }
+    }
+
+    // MARK: Zoom
+
+    static let defaultZoom = 0.25
+
+    func adjustZoom(by delta: Double) {
+        let current = zoom[viewMode] ?? Self.defaultZoom
+        zoom[viewMode] = min(1, max(0, ((current + delta) * 100).rounded() / 100))
+    }
+
+    func resetZoom() {
+        zoom[viewMode] = Self.defaultZoom
     }
 
     // MARK: Presets

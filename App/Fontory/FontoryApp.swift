@@ -22,6 +22,13 @@ struct FontoryApp: App {
                 Button("as List") { model.viewMode = .list }
                     .keyboardShortcut("3")
                 Divider()
+                Button("Zoom In") { model.adjustZoom(by: 0.1) }
+                    .keyboardShortcut("+")
+                Button("Zoom Out") { model.adjustZoom(by: -0.1) }
+                    .keyboardShortcut("-")
+                Button("Actual Size") { model.resetZoom() }
+                    .keyboardShortcut("0")
+                Divider()
             }
             CommandMenu("Fonts") {
                 Button("Clear Temporary Fonts") { Task { await model.clearTemporary() } }
