@@ -61,20 +61,22 @@ public enum PreviewSamples {
 
     /// What Latin faces show in Dynamic mode; faces without Latin show a phrase in a script they cover.
     public enum DynamicStyle: String, CaseIterable, Sendable, Codable {
-        case automatic, pangram, accented
+        /// Automatic (the default) shows the classic pangram. `short` keeps the raw value "pangram"
+        /// so settings saved before the default changed still decode.
+        case automatic, short = "pangram", accented
 
         public var title: String {
             switch self {
-            case .automatic: "Automatic"
-            case .pangram: "Pangram"
+            case .automatic: "Automatic (Pangram)"
+            case .short: "Short (AaBbGg)"
             case .accented: "Accented"
             }
         }
 
         public var latinText: String {
             switch self {
-            case .automatic: "AaBbGg"
-            case .pangram: "The quick brown fox jumps over the lazy dog"
+            case .automatic: "The quick brown fox jumps over the lazy dog"
+            case .short: "AaBbGg"
             case .accented: "Àà Ćć Ëë Ğğ Ịị Ñń Ơơ Şş Ưư Žž"
             }
         }

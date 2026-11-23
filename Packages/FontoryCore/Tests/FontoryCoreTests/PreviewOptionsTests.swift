@@ -292,8 +292,11 @@ import Testing
         let latin: Int64 = 1
         let cyrillic = Int64(1) << 3
         #expect(PreviewSamples.dynamicText(scriptsBitmask: latin, style: .automatic) == PreviewSamples.DynamicStyle.automatic.latinText)
-        #expect(PreviewSamples.dynamicText(scriptsBitmask: latin, style: .pangram) == "The quick brown fox jumps over the lazy dog")
-        let cyr = PreviewSamples.dynamicText(scriptsBitmask: cyrillic, style: .pangram)
+        #expect(PreviewSamples.dynamicText(scriptsBitmask: latin, style: .automatic) == "The quick brown fox jumps over the lazy dog")
+        #expect(PreviewSamples.dynamicText(scriptsBitmask: latin, style: .short) == "AaBbGg")
+        // Settings saved before the default changed ("pangram") still decode.
+        #expect(PreviewSamples.DynamicStyle(rawValue: "pangram") == .short)
+        let cyr = PreviewSamples.dynamicText(scriptsBitmask: cyrillic, style: .short)
         #expect(cyr.unicodeScalars.contains { (0x0400...0x04FF).contains($0.value) })
         #expect(PreviewSamples.dynamicText(scriptsBitmask: 0, style: .automatic) == PreviewSamples.DynamicStyle.automatic.latinText)
     }
