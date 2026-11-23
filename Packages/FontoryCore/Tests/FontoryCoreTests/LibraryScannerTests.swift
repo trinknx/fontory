@@ -77,6 +77,24 @@ import Testing
         let row = try #require(try e.store.rows(ids: ids)[faceID])
         #expect(row.activation == .on)
         #expect(try e.store.files(in: e.loc.id).map(\.relativePath) == ["moved/Arial Bold.ttf"])
+        let moved = try #require(events.last?.movedActiveFiles)
+        #expect(moved.count == 1)
+        #expect(moved.first?.fileID == row.fileID)
+        #expect(moved.first?.oldURL.standardizedFileURL.path == root.appendingPathComponent("Arial Bold.ttf").standardizedFileURL.path)
+        #expect(moved.first?.newURL.standardizedFileURL.path == root.appendingPathComponent("moved/Arial Bold.ttf").standardizedFileURL.path)
+        #expect(events.last?.removedActiveFileURLs.isEmpty == true)
+    }
+
+    @Test func movedInactiveFileIsNotReported() async throws {
+        let e = try makeEnv({ try $0.copy(TempFonts.arialBold, as: "Arial Bold.ttf") }); defer { e.t.cleanup() }
+        let root = e.t.root
+        let scanner = LibraryScanner(store: e.store, rootURL: { _ in root })
+        _ = await run(scanner, e.loc.id)
+        try FileManager.default.moveItem(at: root.appendingPathComponent("Arial Bold.ttf"), to: root.appendingPathComponent("Renamed.ttf"))
+        let events = await run(scanner, e.loc.id)
+        #expect(events.last?.phase == .done)
+        #expect(try e.store.files(in: e.loc.id).map(\.relativePath) == ["Renamed.ttf"])
+        #expect(events.last?.movedActiveFiles.isEmpty == true)
     }
 
     @Test func genuinelyRemovedFileIsDeletedAndCountsUserData() async throws {
@@ -93,6 +111,8 @@ import Testing
         #expect(last.phase == .done)
         #expect(last.removedWithUserData == 1)
         #expect(try e.store.files(in: e.loc.id).map(\.relativePath) == ["SFNS.ttf"])
+        #expect(last.removedActiveFileURLs.map(\.standardizedFileURL.path) == [root.appendingPathComponent("Arial Bold.ttf").standardizedFileURL.path])
+        #expect(last.movedActiveFiles.isEmpty)
     }
 
     @Test func changedFileKeepsFaceIdentity() async throws {

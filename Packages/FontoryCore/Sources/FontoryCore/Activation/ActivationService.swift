@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public struct ActivationReport: Sendable {
     public var changedFaceIDs: [Int64] = []
@@ -34,6 +35,7 @@ private struct ConflictCheck {
 }
 
 public actor ActivationService {
+    private static let log = Logger(subsystem: "local.fontory.core", category: "activation")
     private let store: FontStore
     private let registrar: FontRegistrar
     private let now: @Sendable () -> Date
@@ -159,9 +161,44 @@ public actor ActivationService {
 
     public func prepareForQuit() async { _ = await clearTemporary() }
 
+    /// After a rescan moved files that had active faces: unregisters each old URL, then registers the files that are
+    /// still on or temporary (and online) at their current URL. DB state is kept; failures are reported per face.
+    public func filesMoved(_ moves: [MovedFile]) async -> ActivationReport {
+        var report = ActivationReport()
+        guard !moves.isEmpty else { return report }
+        _ = await registrar.unregister(moves.map(\.oldURL))
+        do {
+            let moved = Set(moves.map(\.fileID))
+            let files = try store.activeFiles(states: [.on, .temporary]).filter { moved.contains($0.fileID) && $0.online }
+            let outcomes = await registrar.register(files.map(\.url))
+            for f in files {
+                if case .failed(let message) = outcomes[f.url] ?? .ok {
+                    for id in f.faceIDs { report.failures[id] = message }
+                } else {
+                    report.changedFaceIDs.append(contentsOf: f.faceIDs)
+                }
+            }
+        } catch {
+            report.failures[-1] = "\(error)"
+        }
+        return report
+    }
+
+    /// After a rescan removed files that had active faces: unregisters them (their index rows are already gone).
+    public func filesRemoved(_ urls: [URL]) async {
+        guard !urls.isEmpty else { return }
+        _ = await registrar.unregister(urls)
+    }
+
     /// Idempotent: unregistering an unregistered file is treated as success. DB state is kept.
     public func volumeUnmounted(locationIDs: [Int64]) async {
-        guard let files = try? store.activeFiles(states: [.on, .temporary], locationIDs: locationIDs) else { return }
+        let files: [ActiveFile]
+        do {
+            files = try store.activeFiles(states: [.on, .temporary], locationIDs: locationIDs)
+        } catch {
+            Self.log.error("volumeUnmounted: active files of locations \(locationIDs, privacy: .public) could not be read: \(String(describing: error), privacy: .public)")
+            return
+        }
         _ = await registrar.unregister(files.map(\.url))
     }
 

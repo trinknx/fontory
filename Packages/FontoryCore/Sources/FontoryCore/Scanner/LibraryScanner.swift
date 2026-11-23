@@ -1,5 +1,18 @@
 import Foundation
 
+/// A file the scanner moved in the index while it had a face on or temporary. Its old URL may still be registered.
+public struct MovedFile: Sendable, Hashable {
+    public var fileID: Int64
+    public var oldURL: URL
+    public var newURL: URL
+
+    public init(fileID: Int64, oldURL: URL, newURL: URL) {
+        self.fileID = fileID
+        self.oldURL = oldURL
+        self.newURL = newURL
+    }
+}
+
 public struct ScanProgress: Sendable, Equatable {
     public enum Phase: Sendable, Equatable {
         case enumerating, parsing, applying, done
@@ -17,6 +30,11 @@ public struct ScanProgress: Sendable, Equatable {
     public var unreadableCount: Int
     /// Records that were not removed this run because part of the tree was unreadable.
     public var skippedRemovals: Int
+    /// Moved files that had a face on or temporary. Set once the moves are applied, so an aborted scan reports them too:
+    /// the caller re-registers them (`ActivationService.filesMoved`).
+    public var movedActiveFiles: [MovedFile] = []
+    /// URLs of removed files that had a face on or temporary; the caller unregisters them (`ActivationService.filesRemoved`).
+    public var removedActiveFileURLs: [URL] = []
 
     public init(locationID: Int64, phase: Phase, total: Int = 0, processed: Int = 0, failed: Int = 0, removedWithUserData: Int = 0,
                 unreadablePaths: [String] = [], unreadableCount: Int = 0, skippedRemovals: Int = 0) {
@@ -165,7 +183,15 @@ public actor LibraryScanner {
             progress.processed = 0
             emit(.parsing, force: true)
 
+            // URLs of the active files as registered (built like the activation service builds them), keyed by file id.
+            var activeURLs: [Int64: URL] = [:]
+            if !diff.moved.isEmpty || !diff.removed.isEmpty {
+                for f in try store.activeFiles(states: [.on, .temporary], locationIDs: [locationID]) { activeURLs[f.fileID] = f.url }
+            }
             try applyMoves(diff.moved, locationID: locationID)
+            progress.movedActiveFiles = diff.moved.compactMap { record, file in
+                activeURLs[record.id].map { MovedFile(fileID: record.id, oldURL: $0, newURL: file.url) }
+            }
             try await parseAndApply(jobs: jobs, locationID: locationID) { failed in
                 progress.processed += 1
                 if failed { progress.failed += 1 }
@@ -190,6 +216,7 @@ public actor LibraryScanner {
             let removedIDs = diff.removed.map(\.id)
             progress.removedWithUserData = try store.userDataFaceCount(fileIDs: removedIDs)
             try store.deleteFiles(removedIDs)
+            progress.removedActiveFileURLs = diff.removed.compactMap { activeURLs[$0.id] }
             try store.markScanned(locationID, at: Date())
             emit(.done, force: true)
         } catch let a as Abort {

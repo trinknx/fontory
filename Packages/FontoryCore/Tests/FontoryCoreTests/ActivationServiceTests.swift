@@ -240,6 +240,56 @@ final class FakeRegistrar: FontRegistrar, @unchecked Sendable {
         #expect(fake.unregisterCalls.last?.isEmpty == true)
     }
 
+    @Test func filesMovedReregistersStillActiveFilesAtTheirNewURL() async throws {
+        let f = try Fixture.make()
+        let fake = FakeRegistrar()
+        let svc = service(f, fake)
+        let on = f.faceIDs["Alpha-Regular"]!, off = f.faceIDs["Alpha-Bold"]!
+        _ = await svc.set([on], to: .on)
+        let onFile = f.fileIDs["Alpha-Regular.otf"]!, offFile = f.fileIDs["Alpha-Bold.otf"]!
+        let oldOn = URL(fileURLWithPath: "/Volumes/A/Fonts/Alpha-Regular.otf")
+        try f.store.moveFile(fileID: onFile, toRelativePath: "sub/Alpha-Regular.otf", mtime: fixed)
+        // A file that went off between the scan and the call is only unregistered.
+        let oldOff = URL(fileURLWithPath: "/Volumes/A/Fonts/Alpha-Bold.otf")
+        try f.store.moveFile(fileID: offFile, toRelativePath: "sub/Alpha-Bold.otf", mtime: fixed)
+        let report = await svc.filesMoved([
+            MovedFile(fileID: onFile, oldURL: oldOn, newURL: URL(fileURLWithPath: "/Volumes/A/Fonts/sub/Alpha-Regular.otf")),
+            MovedFile(fileID: offFile, oldURL: oldOff, newURL: URL(fileURLWithPath: "/Volumes/A/Fonts/sub/Alpha-Bold.otf")),
+        ])
+        #expect(report.failures.isEmpty)
+        #expect(report.changedFaceIDs == [on])
+        #expect(fake.unregisterCalls.last == [oldOn, oldOff])
+        #expect(fake.registerCalls.last?.map(\.path) == ["/Volumes/A/Fonts/sub/Alpha-Regular.otf"])
+        #expect(try f.store.rows(ids: [on, off])[on]?.activation == .on)
+        #expect(try f.store.rows(ids: [on, off])[off]?.activation == .off)
+    }
+
+    @Test func filesMovedReportsRegistrationFailures() async throws {
+        let f = try Fixture.make()
+        let fake = FakeRegistrar()
+        let svc = service(f, fake)
+        let on = f.faceIDs["Alpha-Regular"]!
+        _ = await svc.set([on], to: .on)
+        let file = f.fileIDs["Alpha-Regular.otf"]!
+        try f.store.moveFile(fileID: file, toRelativePath: "new.otf", mtime: fixed)
+        let newURL = URL(fileURLWithPath: "/Volumes/A/Fonts/new.otf")
+        fake.setOutcome(.failed("boom"), for: newURL)
+        let report = await svc.filesMoved([MovedFile(fileID: file, oldURL: URL(fileURLWithPath: "/Volumes/A/Fonts/Alpha-Regular.otf"), newURL: newURL)])
+        #expect(report.failures == [on: "boom"])
+        #expect(await svc.filesMoved([]).changedFaceIDs.isEmpty)
+    }
+
+    @Test func filesRemovedUnregisters() async throws {
+        let f = try Fixture.make()
+        let fake = FakeRegistrar()
+        let svc = service(f, fake)
+        let url = URL(fileURLWithPath: "/Volumes/A/Fonts/Gone.otf")
+        await svc.filesRemoved([url])
+        #expect(fake.unregisterCalls == [[url]])
+        await svc.filesRemoved([])
+        #expect(fake.unregisterCalls.count == 1)
+    }
+
     @Test func batchActivationIsOneCall() async throws {
         let f = try Fixture.make()
         let batch = try f.store.nextImportBatch()

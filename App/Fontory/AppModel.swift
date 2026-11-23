@@ -458,8 +458,10 @@ final class AppModel {
         scanTasks[id] = Task { [weak self] in
             let stream = await backend.scanner.scan(locationID: id)
             var lastRefresh = ContinuousClock.now
+            var last: ScanProgress?
             for await progress in stream {
                 guard let self else { return }
+                last = progress
                 self.scanProgress[id] = progress
                 // Let the counts and the browser grow while a large import runs.
                 if ContinuousClock.now - lastRefresh > .seconds(1) {
@@ -468,9 +470,20 @@ final class AppModel {
                     self.scheduleRefresh()
                 }
             }
+            // Registrations follow the files even when the scan was cancelled or aborted after applying moves.
+            if let last { await self?.updateRegistrations(after: last) }
             guard let self, !Task.isCancelled else { return }
             await self.scanFinished()
         }
+    }
+
+    /// Moves the CoreText registration of moved active files to their new URL and drops removed ones, so app font
+    /// menus do not keep a stale entry for the old path.
+    private func updateRegistrations(after progress: ScanProgress) async {
+        guard let backend, !progress.movedActiveFiles.isEmpty || !progress.removedActiveFileURLs.isEmpty else { return }
+        await backend.activation.filesRemoved(progress.removedActiveFileURLs)
+        let report = await backend.activation.filesMoved(progress.movedActiveFiles)
+        present(report, state: .on, context: "Re-activating moved fonts")
     }
 
     private func scanFinished() async {
