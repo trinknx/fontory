@@ -109,6 +109,10 @@ final class FontGridItem: NSCollectionViewItem {
         if self.faceID != faceID { previewLayer.contents = nil }
         self.faceID = faceID
         view.layer?.backgroundColor = background
+        // The name and the dot sit on the preview background, not the window's: give them the light or dark
+        // appearance that reads on it (a white card in dark mode needs dark text).
+        let appearance = NSAppearance(named: Self.isLight(background) ? .aqua : .darkAqua)
+        if view.appearance?.name != appearance?.name { view.appearance = appearance }
         updateSelection()
         guard let row else {
             label.stringValue = ""
@@ -124,6 +128,13 @@ final class FontGridItem: NSCollectionViewItem {
         dot.isOffline = !row.online
         offlineBadge.isHidden = row.online
         previewLayer.opacity = row.online ? 1 : 0.4
+    }
+
+    /// Whether `color` is light enough to need dark text (relative luminance above 0.5).
+    static func isLight(_ color: CGColor) -> Bool {
+        guard let rgb = color.converted(to: CGColorSpace(name: CGColorSpace.sRGB)!, intent: .defaultIntent, options: nil),
+              let c = rgb.components, c.count >= 3 else { return true }
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] > 0.5
     }
 
     /// Sets the preview image. It may come from another size: the layer scales it to fit.
