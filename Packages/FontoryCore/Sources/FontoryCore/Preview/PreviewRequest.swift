@@ -2,6 +2,23 @@ import CoreGraphics
 import CoreText
 import Foundation
 
+/// OpenType features a preview can switch. `standard` (ligatures only) is the font's default behavior.
+public struct PreviewFeatures: OptionSet, Sendable, Hashable {
+    public let rawValue: Int
+    public init(rawValue: Int) { self.rawValue = rawValue }
+
+    /// `liga` (and `clig`); on by default, so turning it off is what changes rendering.
+    public static let ligatures = PreviewFeatures(rawValue: 1 << 0)
+    /// `dlig`.
+    public static let discretionaryLigatures = PreviewFeatures(rawValue: 1 << 1)
+    /// `salt` + `swsh`.
+    public static let alternates = PreviewFeatures(rawValue: 1 << 2)
+    /// `smcp`, plus `c2sc` when the text is all capitals.
+    public static let smallCaps = PreviewFeatures(rawValue: 1 << 3)
+
+    public static let standard: PreviewFeatures = [.ligatures]
+}
+
 /// Everything that determines a rendered preview bitmap. Hashable so callers can use it as (part of) a cache key;
 /// colors are compared by their sRGB components, not object identity.
 public struct PreviewRequest: Sendable, Hashable {
@@ -12,6 +29,14 @@ public struct PreviewRequest: Sendable, Hashable {
     public var background: CGColor { didSet { backgroundComponents = Self.components(background) } }
     public var alignment: CTTextAlignment = .left
     public var smoothing: Bool = true
+    /// Dashed baseline, x-height, cap-height, ascender and descender lines behind the text.
+    public var showGuides = false
+    /// Characters the face lacks are drawn as a dotted-circle placeholder instead of a fallback font.
+    public var showMissingGlyphs = false
+    /// Glyphs are stroked, not filled.
+    public var outline = false
+    public var underline = false
+    public var features: PreviewFeatures = .standard
     public var size: CGSize          // in points; pixel size = size * scale
     public var scale: CGFloat
     /// sRGB components, computed once when a color is set so == and hash never convert colors.
@@ -43,6 +68,8 @@ public struct PreviewRequest: Sendable, Hashable {
             && a.backgroundComponents == b.backgroundComponents
             && a.alignment == b.alignment && a.smoothing == b.smoothing
             && a.size == b.size && a.scale == b.scale
+            && a.showGuides == b.showGuides && a.showMissingGlyphs == b.showMissingGlyphs
+            && a.outline == b.outline && a.underline == b.underline && a.features == b.features
     }
 
     public func hash(into h: inout Hasher) {
@@ -50,5 +77,7 @@ public struct PreviewRequest: Sendable, Hashable {
         h.combine(foregroundComponents); h.combine(backgroundComponents)
         h.combine(alignment.rawValue); h.combine(smoothing)
         h.combine(size.width); h.combine(size.height); h.combine(scale)
+        h.combine(showGuides); h.combine(showMissingGlyphs); h.combine(outline); h.combine(underline)
+        h.combine(features.rawValue)
     }
 }
