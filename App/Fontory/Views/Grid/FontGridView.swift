@@ -334,12 +334,8 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
     /// The template request for the current settings and size; per-face text is filled in by `key(for:)`.
     private func currentBaseRequest() -> PreviewRequest {
         if let baseRequest { return baseRequest }
-        let request = PreviewRequest(
-            text: preview.text,
-            pointSize: preview.pointSizeOverride.map { CGFloat($0) } ?? metrics.previewPointSize,
-            tracking: CGFloat(preview.tracking),
-            foreground: preview.foreground, background: preview.background,
-            alignment: preview.alignment.ctAlignment, smoothing: preview.smoothing,
+        let request = preview.request(
+            pointSize: metrics.previewPointSize,
             size: FontGridItem.previewSize(itemSize: layout.itemSize),
             scale: collectionView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2)
         baseRequest = request

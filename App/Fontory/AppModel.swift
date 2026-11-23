@@ -19,6 +19,14 @@ enum PreviewAlignment: String, CaseIterable, Sendable {
         }
     }
 
+    var title: String {
+        switch self {
+        case .left: "Align Left"
+        case .center: "Align Center"
+        case .right: "Align Right"
+        }
+    }
+
     var symbol: String {
         switch self {
         case .left: "text.alignleft"
@@ -28,27 +36,156 @@ enum PreviewAlignment: String, CaseIterable, Sendable {
     }
 }
 
+/// Everything the preview popover controls, shared by the grid and the list. Persisted in UserDefaults as JSON.
 struct PreviewSettings: Equatable {
-    static let defaultText = "The quick brown fox jumps over the lazy dog"
-
-    var text = PreviewSettings.defaultText
+    /// Custom preview text. Empty means Dynamic: each face shows a sample in a script it covers.
+    var text = ""
+    var dynamicStyle: PreviewSamples.DynamicStyle = .automatic
+    /// Each face previews its own family name (the "Font Names" preset); typing text turns it off.
+    var showsFontNames = false
     /// nil: the size follows the zoom level.
     var pointSizeOverride: Double?
     var tracking: Double = 0
-    var foreground = CGColor(gray: 0, alpha: 1)
-    var background = CGColor(gray: 1, alpha: 1)
+    var foreground = PreviewSettings.defaultForeground
+    var background = PreviewSettings.defaultBackground
     var alignment: PreviewAlignment = .left
     var smoothing = true
     var autoSize = false
+    var showGuides = false
+    var showMissingGlyphs = false
+    var outline = false
+    var underline = false
+    var ligatures = true
+    var discretionaryLigatures = false
+    var alternates = false
+    var smallCaps = false
 
-    /// The text a face previews. Text the user typed always wins, for every face. Without it (the default sample, or
-    /// an empty field, which means "show names"), a face that does not cover Latin shows a phrase in a script it
-    /// covers, so it does not preview as missing glyphs; other faces show the default sample or their full name.
+    static let defaultForeground = CGColor(gray: 0, alpha: 1)
+    static let defaultBackground = CGColor(gray: 1, alpha: 1)
+
+    var hasDefaultColors: Bool {
+        PreviewRequest.components(foreground) == PreviewRequest.components(Self.defaultForeground)
+            && PreviewRequest.components(background) == PreviewRequest.components(Self.defaultBackground)
+    }
+
+    var isDynamic: Bool { !showsFontNames && text.isEmpty }
+
+    var features: PreviewFeatures {
+        var f: PreviewFeatures = []
+        if ligatures { f.insert(.ligatures) }
+        if discretionaryLigatures { f.insert(.discretionaryLigatures) }
+        if alternates { f.insert(.alternates) }
+        if smallCaps { f.insert(.smallCaps) }
+        return f
+    }
+
+    /// The text a face previews: its family name with Font Names, the typed text when there is any, otherwise
+    /// the dynamic sample for the scripts it covers.
     func text(for row: FaceRow) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty { return PreviewRenderer.sampleText(for: row.scriptsBitmask, fallback: row.fullName) }
-        if text == Self.defaultText { return PreviewRenderer.sampleText(for: row.scriptsBitmask, fallback: text) }
+        if showsFontNames { return row.family.isEmpty ? row.fullName : row.family }
+        if text.isEmpty { return PreviewSamples.dynamicText(scriptsBitmask: row.scriptsBitmask, style: dynamicStyle) }
         return text
+    }
+
+    /// The template request for a preview of `size`; per-face text is filled in by the views.
+    func request(pointSize: CGFloat, size: CGSize, scale: CGFloat) -> PreviewRequest {
+        var request = PreviewRequest(
+            text: text,
+            pointSize: pointSizeOverride.map { CGFloat($0) } ?? pointSize,
+            tracking: CGFloat(tracking),
+            foreground: foreground, background: background,
+            alignment: alignment.ctAlignment, smoothing: smoothing,
+            size: size, scale: scale)
+        request.showGuides = showGuides
+        request.showMissingGlyphs = showMissingGlyphs
+        request.outline = outline
+        request.underline = underline
+        request.features = features
+        return request
+    }
+}
+
+extension PreviewSettings: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case text, dynamicStyle, showsFontNames, pointSizeOverride, tracking, foreground, background, alignment
+        case smoothing, autoSize, showGuides, showMissingGlyphs, outline, underline, ligatures
+        case discretionaryLigatures, alternates, smallCaps
+    }
+
+    /// Missing or unreadable keys keep their defaults, so settings written by other versions still load.
+    init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func read<T: Decodable>(_ key: CodingKeys, into value: inout T) {
+            if let v = try? c.decodeIfPresent(T.self, forKey: key) { value = v }
+        }
+        read(.text, into: &text)
+        read(.dynamicStyle, into: &dynamicStyle)
+        read(.showsFontNames, into: &showsFontNames)
+        pointSizeOverride = (try? c.decodeIfPresent(Double.self, forKey: .pointSizeOverride)) ?? nil
+        read(.tracking, into: &tracking)
+        if let rgba = try? c.decodeIfPresent([CGFloat].self, forKey: .foreground), rgba.count == 4 {
+            foreground = CGColor(srgbRed: rgba[0], green: rgba[1], blue: rgba[2], alpha: rgba[3])
+        }
+        if let rgba = try? c.decodeIfPresent([CGFloat].self, forKey: .background), rgba.count == 4 {
+            background = CGColor(srgbRed: rgba[0], green: rgba[1], blue: rgba[2], alpha: rgba[3])
+        }
+        if let raw = try? c.decodeIfPresent(String.self, forKey: .alignment), let a = PreviewAlignment(rawValue: raw) {
+            alignment = a
+        }
+        read(.smoothing, into: &smoothing)
+        read(.autoSize, into: &autoSize)
+        read(.showGuides, into: &showGuides)
+        read(.showMissingGlyphs, into: &showMissingGlyphs)
+        read(.outline, into: &outline)
+        read(.underline, into: &underline)
+        read(.ligatures, into: &ligatures)
+        read(.discretionaryLigatures, into: &discretionaryLigatures)
+        read(.alternates, into: &alternates)
+        read(.smallCaps, into: &smallCaps)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(text, forKey: .text)
+        try c.encode(dynamicStyle, forKey: .dynamicStyle)
+        try c.encode(showsFontNames, forKey: .showsFontNames)
+        try c.encodeIfPresent(pointSizeOverride, forKey: .pointSizeOverride)
+        try c.encode(tracking, forKey: .tracking)
+        try c.encode(Self.rgba(foreground), forKey: .foreground)
+        try c.encode(Self.rgba(background), forKey: .background)
+        try c.encode(alignment.rawValue, forKey: .alignment)
+        try c.encode(smoothing, forKey: .smoothing)
+        try c.encode(autoSize, forKey: .autoSize)
+        try c.encode(showGuides, forKey: .showGuides)
+        try c.encode(showMissingGlyphs, forKey: .showMissingGlyphs)
+        try c.encode(outline, forKey: .outline)
+        try c.encode(underline, forKey: .underline)
+        try c.encode(ligatures, forKey: .ligatures)
+        try c.encode(discretionaryLigatures, forKey: .discretionaryLigatures)
+        try c.encode(alternates, forKey: .alternates)
+        try c.encode(smallCaps, forKey: .smallCaps)
+    }
+
+    private static func rgba(_ color: CGColor) -> [CGFloat] {
+        let c = PreviewRequest.components(color)
+        switch c.count {
+        case 4: return c
+        case 2: return [c[0], c[0], c[0], c[1]]   // gray + alpha
+        default: return [0, 0, 0, 1]
+        }
+    }
+
+    static let defaultsKey = "previewSettings"
+
+    static func load(from defaults: UserDefaults = .standard) -> PreviewSettings {
+        guard let data = defaults.data(forKey: defaultsKey),
+              let settings = try? JSONDecoder().decode(PreviewSettings.self, from: data) else { return PreviewSettings() }
+        return settings
+    }
+
+    func save(to defaults: UserDefaults = .standard) {
+        if let data = try? JSONEncoder().encode(self) { defaults.set(data, forKey: Self.defaultsKey) }
     }
 }
 
@@ -113,7 +250,9 @@ final class AppModel {
     var zoom: [ViewMode: Double] {
         didSet { for mode in ViewMode.allCases { UserDefaults.standard.set(zoom[mode], forKey: "zoom.\(mode.rawValue)") } }
     }
-    var preview = PreviewSettings()
+    var preview = PreviewSettings() { didSet { if preview != oldValue { preview.save() } } }
+    /// Drives the preview popover (toolbar button and View ▸ Preview Options).
+    var isShowingPreviewOptions = false
     private(set) var presets: [Preset] = []
     /// Drives the "save preset" name prompt.
     var isNamingPreset = false
@@ -180,6 +319,7 @@ final class AppModel {
         query = LibraryQuery(includeSystem: defaults.bool(forKey: SettingsKey.showSystemFonts))
         zoom = [.grid: defaults.double(forKey: "zoom.grid"), .list: defaults.double(forKey: "zoom.list")]
         viewMode = defaults.string(forKey: "viewMode").flatMap(ViewMode.init(rawValue:)) ?? .grid
+        preview = PreviewSettings.load(from: defaults)
     }
 
     // MARK: Startup

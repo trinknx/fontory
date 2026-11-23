@@ -57,7 +57,8 @@ public struct PreviewRequest: Sendable, Hashable {
 
     static let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
 
-    static func components(_ color: CGColor) -> [CGFloat] {
+    /// sRGB components of a color (gray colors are converted).
+    public static func components(_ color: CGColor) -> [CGFloat] {
         let c = color.converted(to: sRGB, intent: .defaultIntent, options: nil) ?? color
         return (c.components ?? []).map { $0 + 0 }   // +0 folds -0 into 0
     }

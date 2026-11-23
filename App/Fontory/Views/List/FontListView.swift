@@ -517,12 +517,8 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         let height = outlineView.rowHeight
         let width = outlineView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(ListColumn.preview.rawValue))?.width
             ?? ListColumn.preview.defaultWidth
-        let request = PreviewRequest(
-            text: preview.text,
-            pointSize: preview.pointSizeOverride.map { CGFloat($0) } ?? height * Self.previewSizeRatio,
-            tracking: CGFloat(preview.tracking),
-            foreground: preview.foreground, background: preview.background,
-            alignment: preview.alignment.ctAlignment, smoothing: preview.smoothing,
+        let request = preview.request(
+            pointSize: height * Self.previewSizeRatio,
             size: ListPreviewCell.previewSize(cellSize: CGSize(width: width, height: height)),
             scale: outlineView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2)
         baseRequest = request
