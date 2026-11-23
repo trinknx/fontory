@@ -74,7 +74,8 @@ final class PreviewPipeline {
             guard let image else { return }
             self.images.setValue(image, forKey: key, cost: image.bytesPerRow * image.height)
             self.latestKeyByFace[key.faceID] = key
-            for observer in self.observers where observer.owner != nil { observer.handler(key, image) }
+            self.observers.removeAll { $0.owner == nil }
+            for observer in self.observers { observer.handler(key, image) }
         }
         operations[key.faceID] = op
         queue.addOperation(op)

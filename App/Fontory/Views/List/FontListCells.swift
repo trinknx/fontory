@@ -63,6 +63,50 @@ enum ListColumn: String, CaseIterable {
     static let defaultHidden: Set<ListColumn> = [.version, .glyphs, .location]
 }
 
+extension ListColumn {
+    private static let dateFormat = Date.FormatStyle(date: .abbreviated, time: .shortened)
+
+    /// The text a face shows in this column. `locationName` names the face's location (used when it is offline).
+    func text(for row: FaceRow, locationName: String?) -> String {
+        switch self {
+        case .preview, .status: return ""
+        case .name: return row.fullName
+        case .family: return row.family
+        case .style: return row.style
+        case .weight: return row.isVariable ? "Variable" : String(Int(row.weight.rounded()))
+        case .format: return row.format.uppercased()
+        case .foundry: return row.vendor ?? ""
+        case .version: return row.version ?? ""
+        case .glyphs: return row.glyphCount.formatted()
+        case .lastActivated: return row.lastActivated?.formatted(Self.dateFormat) ?? ""
+        case .location:
+            if let url = row.fileURL { return url.deletingLastPathComponent().path }
+            return locationName.map { "\($0) (offline)" } ?? "Offline"
+        }
+    }
+
+    /// The in-memory sort key of a face in this column. Pure: safe off the main actor.
+    func sortKey(_ row: FaceRow, locked: Bool, locationName: String?) -> FamilySortKey {
+        switch self {
+        case .glyphs:
+            return .number(Double(row.glyphCount))
+        case .status:
+            // Active, temporary, off, system, offline.
+            let rank: Int
+            if locked { rank = 3 } else if !row.online { rank = 4 } else {
+                switch row.activation {
+                case .on: rank = 0
+                case .temporary: rank = 1
+                case .off: rank = 2
+                }
+            }
+            return .number(Double(rank))
+        default:
+            return .text(text(for: row, locationName: locationName))
+        }
+    }
+}
+
 /// A text column cell: one vertically centered, truncating label.
 final class ListTextCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("ListTextCell")

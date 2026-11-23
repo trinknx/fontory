@@ -108,6 +108,8 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
     /// A header sort on a column the query cannot sort by.
     private var localSort: (column: ListColumn, ascending: Bool)?
     private var sortGeneration = 0
+    /// The displayed order is stale (a column sort was dropped): apply the next family list even if unchanged.
+    private var needsReapply = false
 
     private var rowsVersion = 0
     private var preview = PreviewSettings()
@@ -213,12 +215,20 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
     func update(query new: LibraryQuery) {
         if let query, query != new { queryChanged = true }
         let sortChanged = query?.sort != new.sort || query?.ascending != new.ascending
+        // A sort chosen elsewhere (the toolbar, or a header click mapped to the query) replaces a column sort.
+        if query != nil, sortChanged, localSort != nil {
+            localSort = nil
+            sortGeneration += 1
+            // Show the query's order even if the next family list happens to be unchanged.
+            needsReapply = true
+        }
         query = new
         if sortChanged { updateSortIndicators() }
     }
 
     func update(families new: [FamilyGroup]) {
-        guard new != sourceFamilies || !hasLoaded else { return }
+        guard new != sourceFamilies || !hasLoaded || needsReapply else { return }
+        needsReapply = false
         sourceFamilies = new
         applySorted()
     }
@@ -269,59 +279,24 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
         }
         let generation = sortGeneration
         let source = sourceFamilies
+        // Everything the keys need from the main actor is captured here; the keys and the sort run off it.
+        let lockedLocations = Set(model.systemLocations.map(\.id))
+        let locationNames = Dictionary(model.locations.map { ($0.id, $0.displayName) }, uniquingKeysWith: { a, _ in a })
         Task { [weak self] in
             guard let self else { return }
             let rows = await self.model.rowsForAction(source.flatMap(\.faceIDs))
             guard generation == self.sortGeneration else { return }
-            let byID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-            self.apply(self.sorted(source, rows: byID, by: localSort.column, ascending: localSort.ascending))
-        }
-    }
-
-    /// Sorts the faces of every family by `column`, then the families by their first face (stable).
-    private func sorted(_ groups: [FamilyGroup], rows: [Int64: FaceRow], by column: ListColumn, ascending: Bool) -> [FamilyNode] {
-        func ordered(_ a: Int64, _ b: Int64) -> Bool {
-            guard let ra = rows[a] else { return false }
-            guard let rb = rows[b] else { return true }
-            let r = compare(ra, rb, by: column)
-            return ascending ? r == .orderedAscending : r == .orderedDescending
-        }
-        let sortedGroups: [(Int, FamilyGroup)] = groups.enumerated().map { i, g in
-            var g = g
-            // Stable: ties keep their order.
-            g.faceIDs = g.faceIDs.enumerated().sorted { x, y in
-                ordered(x.element, y.element) || (!ordered(y.element, x.element) && x.offset < y.offset)
-            }.map(\.element)
-            return (i, g)
-        }
-        return sortedGroups.sorted { x, y in
-            guard let a = x.1.faceIDs.first, let b = y.1.faceIDs.first else { return x.0 < y.0 }
-            return ordered(a, b) || (!ordered(b, a) && x.0 < y.0)
-        }.map { FamilyNode($0.1) }
-    }
-
-    private func compare(_ a: FaceRow, _ b: FaceRow, by column: ListColumn) -> ComparisonResult {
-        switch column {
-        case .glyphs:
-            return a.glyphCount == b.glyphCount ? .orderedSame : (a.glyphCount < b.glyphCount ? .orderedAscending : .orderedDescending)
-        case .status:
-            let ra = statusRank(a), rb = statusRank(b)
-            return ra == rb ? .orderedSame : (ra < rb ? .orderedAscending : .orderedDescending)
-        default:
-            // Empty values sort last.
-            let ta = text(for: column, row: a), tb = text(for: column, row: b)
-            if ta.isEmpty != tb.isEmpty { return ta.isEmpty ? .orderedDescending : .orderedAscending }
-            return ta.localizedStandardCompare(tb)
-        }
-    }
-
-    private func statusRank(_ row: FaceRow) -> Int {
-        if model.isActivationLocked(row) { return 3 }
-        if !row.online { return 4 }
-        switch row.activation {
-        case .on: return 0
-        case .temporary: return 1
-        case .off: return 2
+            let sorted = await Task.detached(priority: .userInitiated) { () -> [FamilyGroup] in
+                var keys: [Int64: FamilySortKey] = [:]
+                keys.reserveCapacity(rows.count)
+                for row in rows {
+                    keys[row.id] = localSort.column.sortKey(row, locked: lockedLocations.contains(row.locationID),
+                                                            locationName: locationNames[row.locationID])
+                }
+                return FamilyListSorter.sorted(source, keys: keys, ascending: localSort.ascending)
+            }.value
+            guard generation == self.sortGeneration else { return }
+            self.apply(sorted.map(FamilyNode.init))
         }
     }
 
@@ -350,6 +325,9 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
 
         if let anchor, let row = row(for: anchor.target) {
             restore(anchor, row: row)
+        } else if let anchor, outlineView.numberOfRows > 0 {
+            // The anchored family is gone (not a query change): stay at about the same place.
+            restore(anchor, row: min(anchor.row, outlineView.numberOfRows - 1))
         } else if firstLoad, let first = outlineView.selectedRowIndexes.first {
             // Coming from the grid: bring the shared selection into view.
             outlineView.scrollRowToVisible(first)
@@ -628,29 +606,8 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
             }
             return
         }
-        label.stringValue = row.map { text(for: column, row: $0) } ?? ""
+        label.stringValue = row.map { column.text(for: $0, locationName: model.location($0.locationID)?.displayName) } ?? ""
         label.toolTip = column == .location ? label.stringValue : nil
-    }
-
-    private static let dateFormat = Date.FormatStyle(date: .abbreviated, time: .shortened)
-
-    /// The text a face shows in `column` (also the in-memory sort key of text columns).
-    private func text(for column: ListColumn, row: FaceRow) -> String {
-        switch column {
-        case .preview, .status: return ""
-        case .name: return row.fullName
-        case .family: return row.family
-        case .style: return row.style
-        case .weight: return row.isVariable ? "Variable" : String(Int(row.weight.rounded()))
-        case .format: return row.format.uppercased()
-        case .foundry: return row.vendor ?? ""
-        case .version: return row.version ?? ""
-        case .glyphs: return row.glyphCount.formatted()
-        case .lastActivated: return row.lastActivated?.formatted(Self.dateFormat) ?? ""
-        case .location:
-            if let url = row.fileURL { return url.deletingLastPathComponent().path }
-            return model.location(row.locationID).map { "\($0.displayName) (offline)" } ?? "Offline"
-        }
     }
 
     static func statusText(_ row: FaceRow, locked: Bool) -> String {
@@ -842,8 +799,20 @@ final class FontListController: NSObject, NSOutlineViewDataSource, NSOutlineView
     }
 
     /// Selects the rows that show `selection`: a face's own row when its family is expanded, else the family row.
+    /// A family with only some of its faces selected is expanded first, so the selection is shown (and pushed
+    /// back) exactly: a family row always stands for all of its faces.
     private func applySelectionToOutline() {
         guard hasLoaded else { return }
+        var selectedPerFamily: [ObjectIdentifier: (family: FamilyNode, count: Int)] = [:]
+        for id in selection {
+            guard let family = familyOfFace[id] else { continue }
+            selectedPerFamily[ObjectIdentifier(family), default: (family, 0)].count += 1
+        }
+        applyingSelection = true
+        for (family, count) in selectedPerFamily.values where count < family.faceIDs.count && !outlineView.isItemExpanded(family) {
+            outlineView.expandItem(family)
+        }
+        applyingSelection = false
         var rows = IndexSet()
         for id in selection {
             guard let family = familyOfFace[id] else { continue }
