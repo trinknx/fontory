@@ -88,7 +88,8 @@ final class AppModel {
         didSet {
             guard viewMode != oldValue else { return }
             UserDefaults.standard.set(viewMode.rawValue, forKey: "viewMode")
-            if viewMode == .list { scheduleRefresh(delay: .zero) }
+            // Families are computed only for the list; drop them when it closes so a reopened list starts fresh.
+            if viewMode == .list { scheduleRefresh(delay: .zero) } else { families = [] }
         }
     }
     var zoom: [ViewMode: Double] {
@@ -125,7 +126,11 @@ final class AppModel {
     /// Ids whose rows are being fetched by `prefetchRows`.
     @ObservationIgnored private var pendingRowIDs: Set<Int64> = []
     /// Shared by every preview in the app; it caches parsed fonts.
-    @ObservationIgnored let previewRenderer = PreviewRenderer()
+    @ObservationIgnored let previewRenderer: PreviewRenderer
+    /// The render queue and image cache shared by the grid and the list.
+    @ObservationIgnored let previewPipeline: PreviewPipeline
+    /// The main browser window, recorded by `MainWindow`; app-wide shortcuts act only while it is key.
+    @ObservationIgnored weak var browserWindow: NSWindow?
     @ObservationIgnored private var indexByID: [Int64: Int] = [:]
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var refreshGeneration = 0
@@ -138,6 +143,9 @@ final class AppModel {
 
     init() {
         SettingsKey.register()
+        let renderer = PreviewRenderer()
+        previewRenderer = renderer
+        previewPipeline = PreviewPipeline(renderer: renderer)
         let defaults = UserDefaults.standard
         query = LibraryQuery(includeSystem: defaults.bool(forKey: SettingsKey.showSystemFonts))
         zoom = [.grid: defaults.double(forKey: "zoom.grid"), .list: defaults.double(forKey: "zoom.list")]
@@ -254,7 +262,7 @@ final class AppModel {
             // it is dropped only when activation changes or a scan finishes.
             indexByID = index
             if ids != faceIDs { faceIDs = ids }
-            if wantFamilies { self.families = families }
+            if wantFamilies, families != self.families { self.families = families }
             let kept = selection.filter { index[$0] != nil }
             if kept.count != selection.count { selection = kept }
         case .failure(let error):
@@ -598,11 +606,20 @@ final class AppModel {
 
     func setActivation(_ ids: [Int64], _ state: ActivationState, force: Bool = false) async {
         guard let backend else { return }
-        let allowed = ids.filter { id in row(id).map { !isActivationLocked($0) } ?? false }
+        let allowed = await rowsForAction(ids).filter { !isActivationLocked($0) }.map(\.id)
         guard !allowed.isEmpty else { return }
         let report = await backend.activation.set(allowed, to: state, force: force)
         afterActivationChange()
         present(report, state: state, context: nil)
+    }
+
+    /// Activates the unlocked faces among `ids`, or deactivates them when none is off. Rows that are not cached
+    /// are fetched off the main actor.
+    func toggleActivation(_ ids: [Int64]) async {
+        let rows = await rowsForAction(ids).filter { !isActivationLocked($0) }
+        guard !rows.isEmpty else { return }
+        let state: ActivationState = rows.contains { $0.activation == .off } ? .on : .off
+        await setActivation(rows.map(\.id), state)
     }
 
     func clearTemporary() async {
@@ -659,7 +676,7 @@ final class AppModel {
     // MARK: Actions on faces
 
     /// Rows for a user action on `ids`, in order: cached ones directly, the rest fetched off the main actor.
-    private func rowsForAction(_ ids: [Int64]) async -> [FaceRow] {
+    func rowsForAction(_ ids: [Int64]) async -> [FaceRow] {
         var rows: [Int64: FaceRow] = [:]
         var missing: [Int64] = []
         for id in ids {
@@ -693,9 +710,10 @@ final class AppModel {
 
     /// Makes the face the one shown for its family in the list view.
     func setFamilyRepresentative(_ id: Int64) {
-        guard let backend, let row = row(id) else { return }
-        let key = row.family.lowercased()
+        guard let backend else { return }
         Task {
+            guard let row = await rowsForAction([id]).first else { return }
+            let key = row.family.lowercased()
             await runBackground({ try backend.store.setRepresentative(familyKey: key, faceID: id) },
                                 failureTitle: "The family representative could not be set")
             if viewMode == .list { scheduleRefresh(delay: .zero) }
@@ -707,7 +725,7 @@ final class AppModel {
     static let defaultZoom = 0.25
 
     /// True when the latest zoom change came from the keyboard, so the grid anchors it on the pointer
-    /// (slider and menu clicks anchor on the selection or the first visible item). The grid resets it.
+    /// (slider and menu clicks anchor on the selection or the first visible item). The showing view resets it.
     @ObservationIgnored var zoomAnchorsOnPointer = false
 
     func adjustZoom(by delta: Double) {

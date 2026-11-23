@@ -1,7 +1,8 @@
 import AppKit
 import FontoryCore
 
-/// Renders grid previews off the main thread and caches them.
+/// Renders previews off the main thread and caches them. One instance (`AppModel.previewPipeline`) is shared by
+/// the grid and the list, so both draw from the same cache.
 ///
 /// Requests run on a concurrent queue (at most 6 at once) keyed by face and request; finished images go into an
 /// LRU cache bounded by pixel memory (384 MB), and the key of the newest image of every face is remembered so a cell
@@ -28,9 +29,12 @@ final class PreviewPipeline {
     /// Ink height per point of size, per face and text. Linear in the point size, so measured once.
     private let inkPerPoint = LRUCache<InkKey, CGFloat>(limit: 4000)
     private var operations: [Int64: RenderOperation] = [:]
+    private var observers: [RenderObserver] = []
 
-    /// Called on the main actor when the image for `key` is ready.
-    var onRendered: ((Key, CGImage) -> Void)?
+    private struct RenderObserver {
+        weak var owner: AnyObject?
+        let handler: @MainActor (Key, CGImage) -> Void
+    }
 
     init(renderer: PreviewRenderer) {
         self.renderer = renderer
@@ -38,6 +42,12 @@ final class PreviewPipeline {
         queue.name = "Fontory previews"
         queue.maxConcurrentOperationCount = 6
         queue.qualityOfService = .userInitiated
+    }
+
+    /// Calls `handler` on the main actor whenever an image is ready, for as long as `owner` lives.
+    func addRenderObserver(_ owner: AnyObject, handler: @escaping @MainActor (Key, CGImage) -> Void) {
+        observers.removeAll { $0.owner == nil }
+        observers.append(RenderObserver(owner: owner, handler: handler))
     }
 
     func image(for key: Key) -> CGImage? {
@@ -64,7 +74,7 @@ final class PreviewPipeline {
             guard let image else { return }
             self.images.setValue(image, forKey: key, cost: image.bytesPerRow * image.height)
             self.latestKeyByFace[key.faceID] = key
-            self.onRendered?(key, image)
+            for observer in self.observers where observer.owner != nil { observer.handler(key, image) }
         }
         operations[key.faceID] = op
         queue.addOperation(op)

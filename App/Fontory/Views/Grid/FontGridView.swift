@@ -34,7 +34,7 @@ struct FontGridView: NSViewRepresentable {
     }
 }
 
-/// Data source, delegate and prefetcher of the grid; owns the preview pipeline.
+/// Data source, delegate and prefetcher of the grid. Previews come from the app-wide `PreviewPipeline`.
 @MainActor
 final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollectionViewDelegate, NSCollectionViewPrefetching {
     private static let log = Logger(subsystem: "local.fontory.app", category: "grid")
@@ -83,9 +83,9 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
 
     init(model: AppModel) {
         self.model = model
-        pipeline = PreviewPipeline(renderer: model.previewRenderer)
+        pipeline = model.previewPipeline
         super.init()
-        pipeline.onRendered = { [weak self] key, image in self?.rendered(key, image) }
+        pipeline.addRenderObserver(self) { [weak self] key, image in self?.rendered(key, image) }
     }
 
     deinit {
@@ -212,11 +212,12 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
     }
 
     func update(zoom new: Double) {
-        guard abs(new - zoom) > 1e-9 else { return }
-        zoom = new
         // Keyboard zoom anchors on the pointer; the slider and menu clicks on the selection or first visible item.
+        // The flag is consumed even when the value did not change (zooming past the limits), so it cannot leak.
         let usePointer = model.zoomAnchorsOnPointer
         model.zoomAnchorsOnPointer = false
+        guard abs(new - zoom) > 1e-9 else { return }
+        zoom = new
         applyLayout(anchorPoint: usePointer ? mouseLocation() : nil)
     }
 
