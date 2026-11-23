@@ -4,10 +4,10 @@ import Testing
 
 struct StyleClassifierTests {
     private static func input(
-        cls: Int? = nil, panose: [UInt8]? = nil, mono: Bool = false, symbolCmap: Bool = false, latin: Bool = true,
+        cls: Int? = nil, mask: Int? = nil, panose: [UInt8]? = nil, mono: Bool = false, symbolCmap: Bool = false, latin: Bool = true,
         names: [String] = ["Test", "Test Regular", "Regular"]
     ) -> StyleClassifier.Input {
-        .init(familyClass: cls, familySubclass: 0, panose: panose, isMonospace: mono, hasSymbolCmap: symbolCmap,
+        .init(familyClass: cls, familySubclass: 0, classMask: mask, panose: panose, isMonospace: mono, hasSymbolCmap: symbolCmap,
               coversLatin: latin, names: names)
     }
 
@@ -56,6 +56,18 @@ struct StyleClassifierTests {
         (StyleClassifierTests.input(panose: StyleClassifierTests.panose(family: 2, serif: 2)), .serif),
         (StyleClassifierTests.input(panose: StyleClassifierTests.panose(family: 2, serif: 10)), .serif),
         (StyleClassifierTests.input(names: ["Noto Serif", "Noto Serif Bold", "Bold"]), .serif),
+        // CoreText class mask as the second source (sFamilyClass 0, empty PANOSE)
+        (StyleClassifierTests.input(mask: 12), .symbol),
+        (StyleClassifierTests.input(mask: 10), .script),
+        (StyleClassifierTests.input(mask: 4), .slab),
+        (StyleClassifierTests.input(mask: 5), .slab),
+        (StyleClassifierTests.input(cls: 0, mask: 8), .sans),
+        (StyleClassifierTests.input(mask: 1), .serif),
+        (StyleClassifierTests.input(mask: 3), .serif),
+        (StyleClassifierTests.input(mask: 7), .serif),
+        (StyleClassifierTests.input(mask: 9), .display),
+        (StyleClassifierTests.input(mask: 8, mono: true), .mono),
+        (StyleClassifierTests.input(mask: 8, names: ["Fancy Script", "Fancy Script", "Regular"]), .script),
         // 7 display
         (StyleClassifierTests.input(cls: 9), .display),
         (StyleClassifierTests.input(panose: StyleClassifierTests.panose(family: 4)), .display),
@@ -82,19 +94,22 @@ struct StyleClassifierTests {
 
     @Test func fixtureFontsClassify() throws {
         let expected: [(String, StyleClass)] = [
-            (TempFonts.arialBold, .sans), (TempFonts.avenirNext, .sans), (TempFonts.hoeflerText, .serif),
+            (TempFonts.arialBold, .sans), (TempFonts.avenirNext, .sans), (TempFonts.hoeflerText, .serif), (TempFonts.newYork, .serif), (TempFonts.sfns, .sans),
+            ("/System/Library/Fonts/Helvetica.ttc", .sans), ("/System/Library/Fonts/HelveticaNeue.ttc", .sans),
+            ("/System/Library/Fonts/Palatino.ttc", .serif), ("/System/Library/Fonts/Supplemental/Times New Roman.ttf", .serif),
             ("/System/Library/Fonts/Menlo.ttc", .mono), ("/System/Library/Fonts/Monaco.ttf", .mono),
         ]
         for (path, want) in expected {
+            guard FileManager.default.fileExists(atPath: path) else {
+                Issue.record("fixture not installed, skipped: \(path)", severity: .warning)
+                continue
+            }
             let faces = try FontParser.parse(url: URL(fileURLWithPath: path))
-            #expect(faces.first?.styleClass == want, "\(path): \(String(describing: faces.first?.styleClass))")
+            #expect(faces.allSatisfy { $0.styleClass == want }, "\(path): \(faces.map(\.styleClass.title))")
         }
-        // No OS/2 class, no PANOSE, Latin: falls through to display.
-        let sf = try FontParser.parse(url: URL(fileURLWithPath: TempFonts.sfns))
-        #expect(sf.allSatisfy { $0.styleClass != .unknown })
-        // No Latin coverage and no signal: stays unknown.
+        // No Latin coverage, but CoreText's class mask says symbol.
         let emoji = try FontParser.parse(url: URL(fileURLWithPath: TempFonts.emoji))
-        #expect(emoji.allSatisfy { $0.styleClass == .unknown })
+        #expect(emoji.allSatisfy { $0.styleClass == .symbol })
     }
 
     @Test func parsedClassIsStored() throws {

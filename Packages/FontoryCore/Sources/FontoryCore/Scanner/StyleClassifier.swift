@@ -9,16 +9,18 @@ public enum StyleClassifier {
     public struct Input: Sendable, Hashable {
         public var familyClass: Int?      // sFamilyClass high byte
         public var familySubclass: Int?
+        public var classMask: Int?        // CoreText symbolic-trait class (top 4 bits), same numbering as sFamilyClass
         public var panose: [UInt8]?       // 10 bytes
         public var isMonospace: Bool
         public var hasSymbolCmap: Bool
         public var coversLatin: Bool
         public var names: [String]        // family, full name, style
 
-        public init(familyClass: Int? = nil, familySubclass: Int? = nil, panose: [UInt8]? = nil, isMonospace: Bool = false,
+        public init(familyClass: Int? = nil, familySubclass: Int? = nil, classMask: Int? = nil, panose: [UInt8]? = nil, isMonospace: Bool = false,
                     hasSymbolCmap: Bool = false, coversLatin: Bool = true, names: [String] = []) {
             self.familyClass = familyClass
             self.familySubclass = familySubclass
+            self.classMask = classMask
             self.panose = panose
             self.isMonospace = isMonospace
             self.hasSymbolCmap = hasSymbolCmap
@@ -28,7 +30,9 @@ public enum StyleClassifier {
     }
 
     public static func classify(_ input: Input) -> StyleClass {
-        let cls = input.familyClass ?? 0
+        // OS/2 sFamilyClass is often 0 and PANOSE empty; CoreText's class mask is the second source for the same numbers.
+        let classes = Set([input.familyClass ?? 0, input.classMask ?? 0])
+        func cls(_ n: Int...) -> Bool { n.contains { classes.contains($0) } }
         let panose = input.panose.flatMap { $0.count >= 10 ? $0 : nil }
         let family = panose.map { Int($0[0]) }       // bFamilyType
         let serifStyle = panose.map { Int($0[1]) }   // bSerifStyle (meaningful for family 2, Latin text)
@@ -37,19 +41,19 @@ public enum StyleClassifier {
         func named(_ words: String...) -> Bool { words.contains { name.contains($0) } }
 
         // 1. Symbol. The cmap test stands in for "pictographic glyphs": a (3,0) subtable marks a symbol encoding.
-        if cls == 12 || family == 5 || input.hasSymbolCmap { return .symbol }
+        if cls(12) || family == 5 || input.hasSymbolCmap { return .symbol }
         // 2. Mono
         if input.isMonospace || proportion == 9 { return .mono }
         // 3. Script
-        if cls == 10 || family == 3 || named("script", "hand", "brush", "calligraph") { return .script }
+        if cls(10) || family == 3 || named("script", "hand", "brush", "calligraph") { return .script }
         // 4. Slab
-        if cls == 4 || cls == 5 || named("slab") { return .slab }
+        if cls(4, 5) || named("slab") { return .slab }
         // 5. Sans
-        if cls == 8 || (family == 2 && (11...13).contains(serifStyle ?? 0)) || named("sans", "grotesk", "gothic") { return .sans }
+        if cls(8) || (family == 2 && (11...13).contains(serifStyle ?? 0)) || named("sans", "grotesk", "gothic") { return .sans }
         // 6. Serif
-        if (1...3).contains(cls) || cls == 7 || (family == 2 && (2...10).contains(serifStyle ?? 0)) || named("serif") { return .serif }
+        if cls(1, 2, 3, 7) || (family == 2 && (2...10).contains(serifStyle ?? 0)) || named("serif") { return .serif }
         // 7. Display
-        if cls == 9 || family == 4 || input.coversLatin { return .display }
+        if cls(9) || family == 4 || input.coversLatin { return .display }
         return .unknown
     }
 }

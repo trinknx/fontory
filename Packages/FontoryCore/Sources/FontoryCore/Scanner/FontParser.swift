@@ -74,7 +74,7 @@ public enum FontParser {
             hasGSUB: tables.contains(tag("GSUB")),
             hasGPOS: tables.contains(tag("GPOS")),
             styleClass: classify(font: font, family: family, fullName: fullName, style: style,
-                                 monospace: symbolic.contains(.traitMonoSpace), tables: tables))
+                                 monospace: symbolic.contains(.traitMonoSpace), classMask: Int(symbolic.rawValue >> 28), tables: tables))
     }
 
     /// Style class of one face, read from its descriptor. Used by the background backfill.
@@ -88,12 +88,13 @@ public enum FontParser {
         let traits = CTFontCopyTraits(font) as NSDictionary
         let symbolic = CTFontSymbolicTraits(rawValue: (traits[kCTFontSymbolicTrait as String] as? NSNumber)?.uint32Value ?? 0)
         return classify(font: font, family: family, fullName: fullName, style: style,
-                        monospace: symbolic.contains(.traitMonoSpace), tables: availableTables(font))
+                        monospace: symbolic.contains(.traitMonoSpace), classMask: Int(symbolic.rawValue >> 28),
+                        tables: availableTables(font))
     }
 
     private static func classify(font: CTFont, family: String, fullName: String, style: String,
-                                 monospace: Bool, tables: Set<UInt32>) -> StyleClass {
-        var input = StyleClassifier.Input(isMonospace: monospace, coversLatin: ScriptCoverage.bitmask(for: font) & 1 != 0,
+                                 monospace: Bool, classMask: Int, tables: Set<UInt32>) -> StyleClass {
+        var input = StyleClassifier.Input(classMask: classMask, isMonospace: monospace, coversLatin: ScriptCoverage.bitmask(for: font) & 1 != 0,
                                           names: [family, fullName, style])
         if let os2 = SfntReader.table("OS/2", of: font) {
             if let fc = os2.u16(30) {
