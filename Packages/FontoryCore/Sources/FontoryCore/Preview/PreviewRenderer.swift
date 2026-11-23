@@ -10,17 +10,34 @@ public final class PreviewRenderer: Sendable {
     }
 
     private let fonts: LRUCache<FontKey, CTFont>
+    /// Faces whose file could not be loaded (junk, missing, wrong index): not re-parsed on every request.
+    private let failed: LRUCache<FontKey, Bool>
+    private let attempts = AttemptCounter()
 
     public init(fontCacheLimit: Int = 400) {
         fonts = LRUCache(limit: fontCacheLimit)
+        failed = LRUCache(limit: 4096)
+    }
+
+    /// How many times a font file was actually loaded (cache misses). For tests.
+    var fontLoadAttempts: Int { attempts.value }
+
+    /// Lets previously failed faces be loaded again, e.g. after a rescan replaced their files.
+    public func forgetFailures() {
+        failed.removeAll()
     }
 
     /// Base font (size 1) for a face, created from the file's descriptors without registering it.
     private func baseFont(_ url: URL, _ faceIndex: Int) -> CTFont? {
         let key = FontKey(url: url, faceIndex: faceIndex)
         if let cached = fonts[key] { return cached }
+        if failed[key] != nil { return nil }
+        attempts.increment()
         guard let descs = CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor],
-              descs.indices.contains(faceIndex) else { return nil }
+              descs.indices.contains(faceIndex) else {
+            failed[key] = true
+            return nil
+        }
         let font = CTFontCreateWithFontDescriptor(descs[faceIndex], 1, nil)
         fonts[key] = font
         return font
@@ -100,4 +117,12 @@ public final class PreviewRenderer: Sendable {
         for entry in sampleBits where scriptsBitmask & entry.bit != 0 { return entry.text }
         return fallback
     }
+}
+
+private final class AttemptCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
 }

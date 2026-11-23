@@ -8,12 +8,15 @@ public struct PreviewRequest: Sendable, Hashable {
     public var text: String
     public var pointSize: CGFloat
     public var tracking: CGFloat = 0
-    public var foreground: CGColor
-    public var background: CGColor
+    public var foreground: CGColor { didSet { foregroundComponents = Self.components(foreground) } }
+    public var background: CGColor { didSet { backgroundComponents = Self.components(background) } }
     public var alignment: CTTextAlignment = .left
     public var smoothing: Bool = true
     public var size: CGSize          // in points; pixel size = size * scale
     public var scale: CGFloat
+    /// sRGB components, computed once when a color is set so == and hash never convert colors.
+    private var foregroundComponents: [CGFloat]
+    private var backgroundComponents: [CGFloat]
 
     public init(text: String, pointSize: CGFloat, tracking: CGFloat = 0,
                 foreground: CGColor, background: CGColor,
@@ -23,6 +26,8 @@ public struct PreviewRequest: Sendable, Hashable {
         self.foreground = foreground; self.background = background
         self.alignment = alignment; self.smoothing = smoothing
         self.size = size; self.scale = scale
+        foregroundComponents = Self.components(foreground)
+        backgroundComponents = Self.components(background)
     }
 
     static let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
@@ -34,15 +39,15 @@ public struct PreviewRequest: Sendable, Hashable {
 
     public static func == (a: PreviewRequest, b: PreviewRequest) -> Bool {
         a.text == b.text && a.pointSize == b.pointSize && a.tracking == b.tracking
-            && components(a.foreground) == components(b.foreground)
-            && components(a.background) == components(b.background)
+            && a.foregroundComponents == b.foregroundComponents
+            && a.backgroundComponents == b.backgroundComponents
             && a.alignment == b.alignment && a.smoothing == b.smoothing
             && a.size == b.size && a.scale == b.scale
     }
 
     public func hash(into h: inout Hasher) {
         h.combine(text); h.combine(pointSize); h.combine(tracking)
-        h.combine(Self.components(foreground)); h.combine(Self.components(background))
+        h.combine(foregroundComponents); h.combine(backgroundComponents)
         h.combine(alignment.rawValue); h.combine(smoothing)
         h.combine(size.width); h.combine(size.height); h.combine(scale)
     }

@@ -15,7 +15,18 @@ public final class FontStore: Sendable {
             reader = database
         } else {
             reader = try Database(path: path, readOnly: true)
+            // A checkpoint or schema change can briefly lock the file; wait instead of failing a browse query.
+            try reader.execute("PRAGMA busy_timeout = 2000")
         }
+    }
+
+    /// The read connection's busy timeout in milliseconds. For tests.
+    var readerBusyTimeout: Int64 {
+        (try? reader.withLock {
+            let s = try reader.prepare("PRAGMA busy_timeout")
+            defer { s.reset() }
+            return try s.step() ? s.int64(0) : 0
+        }) ?? 0
     }
 
     // MARK: Locations

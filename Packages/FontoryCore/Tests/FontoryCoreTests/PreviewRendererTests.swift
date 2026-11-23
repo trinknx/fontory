@@ -54,6 +54,31 @@ import Testing
         #expect(PreviewRenderer().render(fileURL: url.appendingPathExtension("missing"), faceIndex: 0, request: request("Hello")) == nil)
     }
 
+    @Test func failedLoadsAreNegativelyCached() throws {
+        let t = try TempFonts(); defer { t.cleanup() }
+        let junk = try t.junk()
+        let missing = junk.appendingPathExtension("missing")
+        let r = PreviewRenderer()
+        for _ in 0..<3 {
+            #expect(r.render(fileURL: junk, faceIndex: 0, request: request("Hello")) == nil)
+            #expect(r.render(fileURL: missing, faceIndex: 0, request: request("Hello")) == nil)
+            #expect(r.inkHeight(fileURL: junk, faceIndex: 0, text: "H", pointSize: 12) == 0)
+        }
+        #expect(r.fontLoadAttempts == 2)
+        r.forgetFailures()
+        #expect(r.render(fileURL: junk, faceIndex: 0, request: request("Hello")) == nil)
+        #expect(r.fontLoadAttempts == 3)
+    }
+
+    @Test func successfulLoadIsAttemptedOnce() throws {
+        let t = try TempFonts(); defer { t.cleanup() }
+        let url = try t.copy(TempFonts.arialBold)
+        let r = PreviewRenderer()
+        _ = r.render(fileURL: url, faceIndex: 0, request: request("A"))
+        _ = r.render(fileURL: url, faceIndex: 0, request: request("B"))
+        #expect(r.fontLoadAttempts == 1)
+    }
+
     @Test func requestHashesByColorComponents() {
         let a = request("x")
         var b = request("x")
@@ -61,6 +86,10 @@ import Testing
         #expect(a == b && a.hashValue == b.hashValue)
         b.foreground = CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
         #expect(a != b)
+        // A gray color equals the same color expressed in sRGB.
+        var c = request("x")
+        c.background = CGColor(gray: 1, alpha: 1)
+        #expect(c == a && c.hashValue == a.hashValue)
     }
 
     @Test func inkHeightScalesLinearly() throws {

@@ -62,6 +62,13 @@ import Testing
         try await Self.hammer(store)
     }
 
+    @Test func readerWaitsForBriefLocks() throws {
+        let path = Self.tempPath()
+        defer { Self.removeDatabase(path) }
+        let store = try FontStore(database: Database(path: path))
+        #expect(store.readerBusyTimeout == 2000)
+    }
+
     @Test func readsAreNotBlockedByAnOpenWriteTransaction() throws {
         let path = Self.tempPath()
         defer { Self.removeDatabase(path) }
