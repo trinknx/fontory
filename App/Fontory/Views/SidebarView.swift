@@ -32,11 +32,19 @@ struct SidebarView: View {
             }
 
             Section("Installed Fonts") {
-                Toggle(isOn: $model.query.includeSystem) {
-                    Label("Show System Fonts", systemImage: "eye")
+                // The eye is the switch: open when system fonts are shown, slashed when hidden. No checkbox.
+                Button {
+                    model.query.includeSystem.toggle()
+                } label: {
+                    Label(model.query.includeSystem ? "System Fonts Shown" : "System Fonts Hidden",
+                          systemImage: model.query.includeSystem ? "eye" : "eye.slash")
+                        .foregroundStyle(model.query.includeSystem ? .primary : .secondary)
+                        .contentShape(Rectangle())
                 }
-                .toggleStyle(.checkbox)
+                .buttonStyle(.plain)
                 .selectionDisabled()
+                .help(model.query.includeSystem ? "Click to hide system fonts" : "Click to show system fonts")
+                .accessibilityValue(model.query.includeSystem ? "Shown" : "Hidden")
                 ForEach(model.installedLocations) { LocationNode(location: $0) }
             }
         }
