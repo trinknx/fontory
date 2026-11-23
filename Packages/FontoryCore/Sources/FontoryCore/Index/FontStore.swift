@@ -157,8 +157,11 @@ public final class FontStore: Sendable {
     private static let faceColumns = """
     file_id, face_index, postscript_name, family, style, full_name, weight, width, slant, is_italic, is_variable,
     axes_json, vendor, designer, version, glyph_count, scripts_bitmask, units_per_em, ascender, descender,
-    cap_height, x_height, fs_type, outline_type, is_color, is_bitmap, has_gsub, has_gpos, style_class, class_version
+    cap_height, x_height, fs_type, outline_type, is_color, is_bitmap, has_gsub, has_gpos, style_class, class_version,
+    features, figure_style, meta_version
     """
+
+    private static let faceColumnCount = faceColumns.split(separator: ",").count
 
     private func faceValues(_ f: ParsedFace, fileID: Int64) -> [SQLValue] {
         func opt(_ s: String?) -> SQLValue { s.map { .text($0) } ?? .null }
@@ -171,16 +174,35 @@ public final class FontStore: Sendable {
             .double(f.metrics.capHeight), .double(f.metrics.xHeight), f.fsType.map { .int(Int64($0)) } ?? .null,
             .text(f.outlineType.rawValue), flag(f.isColor), flag(f.isBitmap), flag(f.hasGSUB), flag(f.hasGPOS),
             .int(Int64(f.styleClass.rawValue)), .int(Int64(StyleClassifier.version)),
+            // Unread metadata (nil) stays at version 0, so the backfill fills it in.
+            .text(FaceMetadata.featuresText(f.metadata?.features ?? [])), .int(Int64(f.metadata?.figureStyle.rawValue ?? 0)),
+            .int(f.metadata == nil ? 0 : Int64(FaceMetadata.version)),
         ]
+    }
+
+    /// The face's coverage row: written when its metadata was read, removed when not.
+    func writeCoverage(faceID: Int64, _ metadata: FaceMetadata?) throws {
+        if let metadata {
+            let s = try database.prepare("INSERT OR REPLACE INTO face_coverage(face_id, ranges) VALUES(?, ?)")
+            defer { s.reset() }
+            try s.bind([.int(faceID), .blob(metadata.coverage.blob)])
+            _ = try s.step()
+        } else {
+            let s = try database.prepare("DELETE FROM face_coverage WHERE face_id = ?")
+            defer { s.reset() }
+            try s.bind([.int(faceID)])
+            _ = try s.step()
+        }
     }
 
     private func insertFace(_ f: ParsedFace, fileID: Int64) throws {
         try database.withLock {
-            let marks = Array(repeating: "?", count: 30).joined(separator: ",")
+            let marks = Array(repeating: "?", count: Self.faceColumnCount).joined(separator: ",")
             let s = try database.prepare("INSERT INTO faces(\(Self.faceColumns)) VALUES(\(marks))")
             defer { s.reset() }
             try s.bind(faceValues(f, fileID: fileID))
             _ = try s.step()
+            try writeCoverage(faceID: database.lastInsertRowID, f.metadata)
         }
     }
 
@@ -230,6 +252,7 @@ public final class FontStore: Sendable {
                     defer { u.reset() }
                     try u.bind(faceValues(face, fileID: fileID) + [.int(id)])
                     _ = try u.step()
+                    try writeCoverage(faceID: id, face.metadata)
                 }
                 for face in fresh { try insertFace(face, fileID: fileID) }
             }

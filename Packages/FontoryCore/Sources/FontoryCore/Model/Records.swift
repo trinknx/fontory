@@ -100,6 +100,8 @@ public struct ParsedFace: Sendable, Hashable {
     public var hasGSUB: Bool
     public var hasGPOS: Bool
     public var styleClass: StyleClass
+    /// Coverage, features and figures, as read at parse time; nil when unread (the backfill fills it in).
+    public var metadata: FaceMetadata?
 
     public init(
         faceIndex: Int = 0, postScriptName: String, family: String, style: String, fullName: String,
@@ -109,7 +111,7 @@ public struct ParsedFace: Sendable, Hashable {
         metrics: FaceMetrics = FaceMetrics(unitsPerEm: 1000, ascender: 800, descender: -200, capHeight: 700, xHeight: 500),
         fsType: Int? = nil, outlineType: OutlineType = .truetype,
         isColor: Bool = false, isBitmap: Bool = false, hasGSUB: Bool = false, hasGPOS: Bool = false,
-        styleClass: StyleClass = .unknown
+        styleClass: StyleClass = .unknown, metadata: FaceMetadata? = nil
     ) {
         self.faceIndex = faceIndex
         self.postScriptName = postScriptName
@@ -135,6 +137,7 @@ public struct ParsedFace: Sendable, Hashable {
         self.hasGSUB = hasGSUB
         self.hasGPOS = hasGPOS
         self.styleClass = styleClass
+        self.metadata = metadata
     }
 }
 

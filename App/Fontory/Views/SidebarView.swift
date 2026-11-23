@@ -31,8 +31,8 @@ struct SidebarView: View {
                         Button("Clear…") { model.confirmClearQuickCollection() }
                             .disabled(model.quickCollectionIDs.isEmpty)
                     }
-                if let progress = model.styleBackfillProgress, progress.total > 0 {
-                    StyleBackfillRow(progress: progress)
+                if let progress = model.faceBackfillProgress, progress.total > 0 {
+                    FaceBackfillRow(progress: progress)
                 }
             }
 
@@ -92,13 +92,17 @@ struct SidebarView: View {
     }
 }
 
-/// "Classifying styles… N of M" with a small bar, under Library while the style backfill runs.
-private struct StyleBackfillRow: View {
+/// "Updating font details… N of M" with a small bar, under Library while the face backfill runs.
+struct FaceBackfillRow: View {
     let progress: BackfillProgress
+
+    static func label(_ progress: BackfillProgress) -> String {
+        "Updating font details… \(progress.done.formatted()) of \(progress.total.formatted())"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("Classifying styles… \(progress.done.formatted()) of \(progress.total.formatted())")
+            Text(Self.label(progress))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             ProgressView(value: Double(min(progress.done, progress.total)), total: Double(progress.total))

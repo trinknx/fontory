@@ -74,11 +74,12 @@ public enum FontParser {
             hasGSUB: tables.contains(tag("GSUB")),
             hasGPOS: tables.contains(tag("GPOS")),
             styleClass: classify(font: font, family: family, fullName: fullName, style: style,
-                                 monospace: symbolic.contains(.traitMonoSpace), classMask: Int(symbolic.rawValue >> 28), tables: tables))
+                                 monospace: symbolic.contains(.traitMonoSpace), classMask: Int(symbolic.rawValue >> 28), tables: tables),
+            metadata: FaceMetadata.read(font, tables: tables))
     }
 
-    /// Style class of one face, read from its descriptor. Used by the background backfill.
-    static func styleClass(descriptor: CTFontDescriptor, fallbackName: String) -> StyleClass {
+    /// Style class and metadata of one face, from one font made from its descriptor. Used by the background backfill.
+    static func backfill(descriptor: CTFontDescriptor, fallbackName: String) -> (styleClass: StyleClass, metadata: FaceMetadata) {
         let font = CTFontCreateWithFontDescriptor(descriptor, size, nil)
         var family = CTFontCopyFamilyName(font) as String
         var fullName = CTFontCopyFullName(font) as String
@@ -87,9 +88,10 @@ public enum FontParser {
         let style = (CTFontCopyName(font, kCTFontStyleNameKey) as String?) ?? ""
         let traits = CTFontCopyTraits(font) as NSDictionary
         let symbolic = CTFontSymbolicTraits(rawValue: (traits[kCTFontSymbolicTrait as String] as? NSNumber)?.uint32Value ?? 0)
-        return classify(font: font, family: family, fullName: fullName, style: style,
-                        monospace: symbolic.contains(.traitMonoSpace), classMask: Int(symbolic.rawValue >> 28),
-                        tables: availableTables(font))
+        let tables = availableTables(font)
+        let styleClass = classify(font: font, family: family, fullName: fullName, style: style,
+                                  monospace: symbolic.contains(.traitMonoSpace), classMask: Int(symbolic.rawValue >> 28), tables: tables)
+        return (styleClass, FaceMetadata.read(font, tables: tables))
     }
 
     private static func classify(font: CTFont, family: String, fullName: String, style: String,
@@ -116,7 +118,7 @@ public enum FontParser {
 
     // MARK: - Helpers
 
-    private static func tag(_ s: String) -> UInt32 {
+    static func tag(_ s: String) -> UInt32 {
         s.utf8.reduce(0) { $0 << 8 | UInt32($1) }
     }
 
@@ -126,7 +128,7 @@ public enum FontParser {
         return String(decoding: bytes, as: UTF8.self)
     }
 
-    private static func availableTables(_ font: CTFont) -> Set<UInt32> {
+    static func availableTables(_ font: CTFont) -> Set<UInt32> {
         guard let array = CTFontCopyAvailableTables(font, []) else { return [] }
         var out = Set<UInt32>()
         for i in 0..<CFArrayGetCount(array) {

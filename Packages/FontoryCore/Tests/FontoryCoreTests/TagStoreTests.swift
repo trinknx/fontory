@@ -27,7 +27,7 @@ import Testing
         while try cols.step() { faceCols.insert(cols.text(1)) }
         cols.reset()
         #expect(faceCols.isSuperset(of: ["style_class", "class_version"]))
-        #expect(Schema.currentVersion == 3)
+        #expect(Schema.currentVersion >= 3)
     }
 
     @Test func createRenameMoveDelete() throws {

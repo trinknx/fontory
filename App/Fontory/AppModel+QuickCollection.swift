@@ -106,58 +106,59 @@ extension AppModel {
         if query.scope == .quickCollection { scheduleRefresh() }
     }
 
-    // MARK: Style backfill
+    // MARK: Face backfill
 
-    /// Classifies faces indexed under an older classifier version, in the background. Runs after launch, every
+    /// Fills in the style class and metadata (coverage, features, figures) of faces indexed under older versions, in
+    /// the background. Runs after launch, every
     /// mount and every scan. Never two at once: a start while one runs makes it run once more when it ends.
-    func startStyleBackfill() {
-        guard let backend, !styleBackfillStopped else { return }
+    func startFaceBackfill() {
+        guard let backend, !faceBackfillStopped else { return }
         // During an unmount the handler starts it afterwards.
         if unmountsInProgress > 0 { return }
-        if styleBackfillTask != nil {
-            styleBackfillRerun = true
+        if faceBackfillTask != nil {
+            faceBackfillRerun = true
             return
         }
-        styleBackfillRerun = false
-        styleBackfillRuns += 1
-        styleBackfillRunning += 1
-        styleBackfillMaxRunning = max(styleBackfillMaxRunning, styleBackfillRunning)
+        faceBackfillRerun = false
+        faceBackfillRuns += 1
+        faceBackfillRunning += 1
+        faceBackfillMaxRunning = max(faceBackfillMaxRunning, faceBackfillRunning)
         let store = backend.store
-        styleBackfillTask = Task { [weak self] in
-            // Each batch reads its files in a detached utility task (StyleBackfill), never on the main actor;
+        faceBackfillTask = Task { [weak self] in
+            // Each batch reads its files in a detached utility task (FaceBackfill), never on the main actor;
             // this loop only publishes progress, and ends only when no work of the run is left in flight.
-            for await progress in StyleBackfill(store: store).run() {
-                self?.styleBackfillProgressed(progress)
+            for await progress in FaceBackfill(store: store).run() {
+                self?.faceBackfillProgressed(progress)
             }
-            self?.styleBackfillEnded()
+            self?.faceBackfillEnded()
         }
     }
 
     /// Stops the running backfill (between two faces) without a rerun; on unmount, before the volume's
     /// locations are marked offline. The caller starts it again afterwards.
-    func cancelStyleBackfill() {
-        styleBackfillRerun = false
-        styleBackfillTask?.cancel()
+    func cancelFaceBackfill() {
+        faceBackfillRerun = false
+        faceBackfillTask?.cancel()
     }
 
     /// Quitting: stops the backfill and waits for it.
-    func stopStyleBackfill() async {
-        styleBackfillStopped = true
-        cancelStyleBackfill()
-        await styleBackfillTask?.value
+    func stopFaceBackfill() async {
+        faceBackfillStopped = true
+        cancelFaceBackfill()
+        await faceBackfillTask?.value
     }
 
-    private func styleBackfillProgressed(_ progress: BackfillProgress) {
+    private func faceBackfillProgressed(_ progress: BackfillProgress) {
         let shown: BackfillProgress? = progress.total > 0 && progress.done < progress.total ? progress : nil
-        if shown != styleBackfillProgress { styleBackfillProgress = shown }
+        if shown != faceBackfillProgress { faceBackfillProgress = shown }
         if progress.done > 0 { scheduleStyleCountsReload() }
     }
 
-    private func styleBackfillEnded() {
-        styleBackfillTask = nil
-        styleBackfillRunning -= 1
-        styleBackfillProgress = nil
-        if styleBackfillRerun { startStyleBackfill() }
+    private func faceBackfillEnded() {
+        faceBackfillTask = nil
+        faceBackfillRunning -= 1
+        faceBackfillProgress = nil
+        if faceBackfillRerun { startFaceBackfill() }
     }
 
     static let styleCountsInterval: Duration = .seconds(1)
@@ -186,8 +187,8 @@ extension AppModel {
     }
 
     /// Smoke hook: waits until no backfill runs and none is pending.
-    func waitForStyleBackfillForSmoke() async {
-        while let task = styleBackfillTask { await task.value }
+    func waitForFaceBackfillForSmoke() async {
+        while let task = faceBackfillTask { await task.value }
         await styleCountsReloadTask?.value
     }
     #endif

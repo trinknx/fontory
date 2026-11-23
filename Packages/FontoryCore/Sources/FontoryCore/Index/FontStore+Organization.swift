@@ -356,3 +356,64 @@ extension FontStore {
         }
     }
 }
+
+// MARK: Face backfill
+
+extension FontStore {
+    private static let backfillWhere = "(faces.class_version < ? OR faces.meta_version < ?) AND locations.online = 1"
+
+    private var backfillVersions: [SQLValue] { [.int(Int64(StyleClassifier.version)), .int(Int64(FaceMetadata.version))] }
+
+    /// Online faces whose style class or metadata is older than the current version (or missing), oldest id first,
+    /// with ids above `afterID`. Faces on an offline location wait until it comes back.
+    public func facesNeedingBackfill(limit: Int, afterID: Int64) throws -> [(faceID: Int64, url: URL, faceIndex: Int)] {
+        try reader.withLock {
+            let s = try reader.prepare("""
+            SELECT faces.id, locations.last_known_path, files.relative_path, faces.face_index
+            FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
+            WHERE \(Self.backfillWhere) AND faces.id > ? ORDER BY faces.id LIMIT ?
+            """)
+            defer { s.reset() }
+            try s.bind(backfillVersions + [.int(afterID), .int(Int64(limit))])
+            var out: [(faceID: Int64, url: URL, faceIndex: Int)] = []
+            while try s.step() {
+                let base = URL(fileURLWithPath: s.text(1))
+                let rel = s.text(2)
+                out.append((s.int64(0), rel.isEmpty ? base : base.appendingPathComponent(rel), Int(s.int64(3))))
+            }
+            return out
+        }
+    }
+
+    public func countFacesNeedingBackfill() throws -> Int {
+        try reader.withLock {
+            let s = try reader.prepare("""
+            SELECT COUNT(*) FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
+            WHERE \(Self.backfillWhere)
+            """)
+            defer { s.reset() }
+            try s.bind(backfillVersions)
+            return try s.step() ? Int(s.int64(0)) : 0
+        }
+    }
+
+    /// Writes each face's style class and metadata, stamped with the current versions, in one transaction.
+    public func setBackfillResults(_ results: [(faceID: Int64, styleClass: StyleClass, metadata: FaceMetadata)]) throws {
+        try database.withLock {
+            try database.transaction {
+                let s = try database.prepare("""
+                UPDATE faces SET style_class = ?, class_version = ?, features = ?, figure_style = ?, meta_version = ? WHERE id = ?
+                """)
+                defer { s.reset() }
+                for item in results {
+                    try s.bind([.int(Int64(item.styleClass.rawValue)), .int(Int64(StyleClassifier.version)),
+                                .text(FaceMetadata.featuresText(item.metadata.features)), .int(Int64(item.metadata.figureStyle.rawValue)),
+                                .int(Int64(FaceMetadata.version)), .int(item.faceID)])
+                    _ = try s.step()
+                    s.reset()
+                    try writeCoverage(faceID: item.faceID, item.metadata)
+                }
+            }
+        }
+    }
+}

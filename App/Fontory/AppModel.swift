@@ -568,20 +568,20 @@ final class AppModel {
     /// Writes started and not yet confirmed (smoke hook).
     @ObservationIgnored var quickCollectionWritesPending = 0
     /// The running style backfill's progress; nil when none runs or it has nothing to do.
-    var styleBackfillProgress: BackfillProgress?
+    var faceBackfillProgress: BackfillProgress?
     /// The running backfill (at most one); it clears itself when it ends.
-    @ObservationIgnored var styleBackfillTask: Task<Void, Never>?
+    @ObservationIgnored var faceBackfillTask: Task<Void, Never>?
     /// A start was asked for while a run was going: run again once it ends.
-    @ObservationIgnored var styleBackfillRerun = false
+    @ObservationIgnored var faceBackfillRerun = false
     /// Unmounts being handled (from the first event until their locations are marked offline): no run starts
     /// meanwhile, the store still lists the volume online. The handler starts it when the last one is done.
     @ObservationIgnored var unmountsInProgress = 0
     /// Set when quitting: no new runs.
-    @ObservationIgnored var styleBackfillStopped = false
+    @ObservationIgnored var faceBackfillStopped = false
     /// Runs started, and the most that ever ran at once (smoke checks of the coalescing).
-    @ObservationIgnored var styleBackfillRuns = 0
-    @ObservationIgnored var styleBackfillRunning = 0
-    @ObservationIgnored var styleBackfillMaxRunning = 0
+    @ObservationIgnored var faceBackfillRuns = 0
+    @ObservationIgnored var faceBackfillRunning = 0
+    @ObservationIgnored var faceBackfillMaxRunning = 0
     /// Throttle of the Style counts reload while a backfill runs.
     @ObservationIgnored var styleCountsReloadTask: Task<Void, Never>?
     @ObservationIgnored var lastStyleCountsReload: ContinuousClock.Instant?
@@ -715,14 +715,14 @@ final class AppModel {
         scheduleRefresh()
         await loadQuickCollection()
         // 8. Classify faces indexed by an older classifier (runs again after every mount and scan).
-        startStyleBackfill()
+        startFaceBackfill()
     }
 
     func prepareForQuit() async {
         flushPreviewSave()
         await flushNotes()
         await quickCollectionWriteChain?.value
-        await stopStyleBackfill()
+        await stopFaceBackfill()
         await backend?.activation.prepareForQuit()
     }
 
@@ -1129,7 +1129,7 @@ final class AppModel {
         // Faces whose files are gone left the Quick Collection with them.
         await loadQuickCollection()
         // Moved files keep their face rows (and their old class version).
-        startStyleBackfill()
+        startFaceBackfill()
     }
 
     func relink(_ id: Int64, to url: URL) async {
@@ -1239,7 +1239,7 @@ final class AppModel {
             refreshCounts()
             scheduleRefresh()
             // Faces on the volume that waited while it was unplugged.
-            startStyleBackfill()
+            startFaceBackfill()
 
         case .unmounted(let volumeURL):
             // Sent twice per unmount (will + did): the first event marks the locations offline locally,
@@ -1253,7 +1253,7 @@ final class AppModel {
             glyphPipeline.cancelAll()
             // The backfill may be reading from the volume; no run starts until the locations are offline.
             unmountsInProgress += 1
-            cancelStyleBackfill()
+            cancelFaceBackfill()
             previewRenderer.forgetFonts(under: volumeURL)
             for id in ids { forgetPreviewFonts(of: id) }
             for i in locations.indices where ids.contains(locations[i].id) { locations[i].online = false }
@@ -1266,7 +1266,7 @@ final class AppModel {
             await backend.activation.volumeUnmounted(locationIDs: ids)
             _ = await runBackground { try backend.markOffline(ids) }
             unmountsInProgress -= 1
-            startStyleBackfill()
+            startFaceBackfill()
             await reloadLocations()
             invalidateRows()
             refreshCounts()

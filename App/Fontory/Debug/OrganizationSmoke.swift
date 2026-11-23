@@ -462,7 +462,8 @@ enum OrganizationSmoke {
         model.query.scope = .all
     }
 
-    /// A real font file plus the synthetic faces, all marked as classified by an old version, then the backfill.
+    /// A real font file plus the synthetic faces, all marked as classified by an old version and without metadata,
+    /// then the backfill.
     private static func backfillSteps(_ model: AppModel, backend: LibraryBackend, folder: URL) async {
         let store = backend.store
         let before: Int
@@ -481,8 +482,12 @@ enum OrganizationSmoke {
                                      faces: try FontParser.parse(url: url), importBatch: try store.nextImportBatch())
             let ids = try store.faceIDs(for: LibraryQuery())
             try store.setStyleClasses(ids.map { ($0, StyleClass.unknown) }, version: StyleClassifier.version - 1)
-            before = try store.countFacesNeedingClassification()
-            check(before == ids.count && before == 4, "backfill: 4 faces marked with an old class version", "\(before)")
+            try store.database.withLock {
+                try store.database.execute("UPDATE faces SET meta_version = 0, features = '', figure_style = 0")
+                try store.database.execute("DELETE FROM face_coverage")
+            }
+            before = try store.countFacesNeedingBackfill()
+            check(before == ids.count && before == 4, "backfill: 4 faces marked with an old class version and no metadata", "\(before)")
         } catch {
             check(false, "backfill setup", "\(error)")
             return
@@ -490,39 +495,56 @@ enum OrganizationSmoke {
 
         // During an unmount nothing starts (the handler starts it once the volume is offline).
         model.unmountsInProgress = 1
-        let idleRuns = model.styleBackfillRuns
-        model.startStyleBackfill()
-        check(model.styleBackfillRuns == idleRuns && model.styleBackfillTask == nil, "backfill: no start while an unmount is handled")
+        let idleRuns = model.faceBackfillRuns
+        model.startFaceBackfill()
+        check(model.faceBackfillRuns == idleRuns && model.faceBackfillTask == nil, "backfill: no start while an unmount is handled")
         model.unmountsInProgress = 0
 
         // Coalescing: starting while a run goes only asks for one more run, never a second at once.
-        let runs = model.styleBackfillRuns
-        model.startStyleBackfill()
-        model.startStyleBackfill()
-        model.startStyleBackfill()
-        check(model.styleBackfillRuns == runs + 1, "backfill: starting again while it runs does not start a second run")
-        await model.waitForStyleBackfillForSmoke()
-        check(model.styleBackfillRuns == runs + 2 && model.styleBackfillMaxRunning == 1,
+        let runs = model.faceBackfillRuns
+        model.startFaceBackfill()
+        model.startFaceBackfill()
+        model.startFaceBackfill()
+        check(model.faceBackfillRuns == runs + 1, "backfill: starting again while it runs does not start a second run")
+        await model.waitForFaceBackfillForSmoke()
+        check(model.faceBackfillRuns == runs + 2 && model.faceBackfillMaxRunning == 1,
               "backfill: the pending start ran once more afterwards, never two at once",
-              "runs \(model.styleBackfillRuns - runs), max at once \(model.styleBackfillMaxRunning)")
-        let remaining = await model.runBackground { try store.countFacesNeedingClassification() }
-        check(remaining == 0, "backfill: every face has the current class_version", "\(String(describing: remaining))")
-        check(model.styleBackfillProgress == nil, "backfill: progress hidden when done")
+              "runs \(model.faceBackfillRuns - runs), max at once \(model.faceBackfillMaxRunning)")
+        let remaining = await model.runBackground { try store.countFacesNeedingBackfill() }
+        check(remaining == 0, "backfill: every face has the current class_version and meta_version", "\(String(describing: remaining))")
+        let arial = await model.runBackground { () throws -> (features: String, figures: Int, covers: Bool) in
+            try store.database.withLock {
+                let s = try store.database.prepare("""
+                SELECT faces.features, faces.figure_style, face_coverage.ranges FROM faces
+                LEFT JOIN face_coverage ON face_coverage.face_id = faces.id WHERE faces.postscript_name = 'Arial-BoldMT'
+                """)
+                defer { s.reset() }
+                guard try s.step() else { return ("", 0, false) }
+                let covers = s.isNull(2) ? false : CoverageRanges(blob: s.blob(2))?.contains(0x41) == true
+                return (s.text(0), Int(s.int64(1)), covers)
+            }
+        }
+        check(arial.map { $0.features.contains(" kern ") && $0.figures == FigureStyle.lining.rawValue && $0.covers } == true,
+              "backfill: Arial Bold gets its features, lining figures and coverage", "\(String(describing: arial))")
+        let label = FaceBackfillRow.label(BackfillProgress(done: 200, total: 1500))
+        check(label.hasPrefix("Updating font details… 200 of 1") && label.hasSuffix("500"),
+              "backfill: progress reads \"Updating font details… N of M\"", label)
+        check(model.faceBackfillProgress == nil, "backfill: progress hidden when done")
         await model.reloadOrganization()
         check(model.organizationCounts.perStyle[.sans] == 1 && model.organizationCounts.perStyle[.unknown] == 3,
               "backfill: Arial Bold reclassified as Sans, the unparsable files unknown", "\(model.organizationCounts.perStyle)")
 
         // Nothing to do: no progress shown.
-        model.startStyleBackfill()
-        check(model.styleBackfillProgress == nil, "backfill: no progress row when there is nothing to classify")
-        await model.waitForStyleBackfillForSmoke()
-        check(model.styleBackfillProgress == nil && model.styleBackfillMaxRunning == 1, "backfill: an empty run ends quietly")
+        model.startFaceBackfill()
+        check(model.faceBackfillProgress == nil, "backfill: no progress row when there is nothing to classify")
+        await model.waitForFaceBackfillForSmoke()
+        check(model.faceBackfillProgress == nil && model.faceBackfillMaxRunning == 1, "backfill: an empty run ends quietly")
 
         // Quitting stops it and refuses new runs.
-        await model.stopStyleBackfill()
-        let stoppedRuns = model.styleBackfillRuns
-        model.startStyleBackfill()
-        check(model.styleBackfillRuns == stoppedRuns && model.styleBackfillTask == nil, "backfill: no run after quit")
+        await model.stopFaceBackfill()
+        let stoppedRuns = model.faceBackfillRuns
+        model.startFaceBackfill()
+        check(model.faceBackfillRuns == stoppedRuns && model.faceBackfillTask == nil, "backfill: no run after quit")
     }
 
     /// The grid's drag source on the 3 seeded faces (payload on one item, one URL per file), then a 20,000-face

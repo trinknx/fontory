@@ -3,7 +3,7 @@ import Foundation
 /// Assigns a coarse `StyleClass` from OS/2 `sFamilyClass`, PANOSE, CoreText's monospace trait, the cmap and the names.
 /// The decision order is spec section 17, "Style classification", steps 1 to 7. Pure and stateless.
 public enum StyleClassifier {
-    /// Bump to reclassify every face in the background (see `StyleBackfill`). 2: version 1 was briefly computed
+    /// Bump to reclassify every face in the background (see `FaceBackfill`). 2: version 1 was briefly computed
     /// without CoreText's class mask, so faces marked 1 may hold wrong classes. 3: a stray (3,0) cmap beside a
     /// Unicode one no longer makes a face Symbol.
     public static let version = 3

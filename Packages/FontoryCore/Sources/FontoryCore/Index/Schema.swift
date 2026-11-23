@@ -1,9 +1,9 @@
 import Foundation
 
 public enum Schema {
-    public static let currentVersion: Int32 = 3
+    public static let currentVersion: Int32 = 4
 
-    private static let steps: [(version: Int32, sql: String)] = [(1, v1), (2, v2), (3, v3)]
+    private static let steps: [(version: Int32, sql: String)] = [(1, v1), (2, v2), (3, v3), (4, v4)]
 
     /// Runs each step whose version is greater than the database's `user_version`.
     public static func migrate(_ db: Database) throws {
@@ -18,6 +18,19 @@ public enum Schema {
             }
         }
     }
+
+    /// Wave 3A: per-face coverage (little-endian UInt32 `[start, end]` pairs, inclusive, sorted, non-overlapping),
+    /// feature tags (`" liga smcp "`), default figure style (0 unknown, 1 lining, 2 oldstyle) and the version of that
+    /// metadata (`FaceMetadata.version`; the backfill fills rows below it), plus the files the user removed from the
+    /// library. Only constant-default columns and new tables: the cost does not depend on the row count.
+    static let v4 = """
+    CREATE TABLE face_coverage(face_id INTEGER PRIMARY KEY REFERENCES faces(id) ON DELETE CASCADE, ranges BLOB NOT NULL);
+    ALTER TABLE faces ADD COLUMN features TEXT NOT NULL DEFAULT '';
+    ALTER TABLE faces ADD COLUMN figure_style INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE faces ADD COLUMN meta_version INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE excluded_files(location_id INTEGER NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+      relative_path TEXT NOT NULL, fingerprint TEXT NOT NULL, PRIMARY KEY(location_id, relative_path));
+    """
 
     /// Activation views follow the Mac's real state. Locations: kind 3 (user-installed, read-only) for every
     /// former system location outside /System, plus `auto_indexed` for folders the inventory indexes on its own.

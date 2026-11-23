@@ -176,7 +176,7 @@ struct StyleClassifierTests {
         let total = try store.countFacesNeedingClassification()
         #expect(total > 3)
         var last: BackfillProgress?
-        for await p in StyleBackfill(store: store).run() { last = p }
+        for await p in FaceBackfill(store: store).run() { last = p }
         #expect(last == BackfillProgress(done: total, total: total))
         #expect(try versions(store).allSatisfy { $0 == StyleClassifier.version })
         #expect(try classes(store).allSatisfy { $0 != .unknown })
@@ -187,10 +187,10 @@ struct StyleClassifierTests {
         let temp = try TempFonts(); defer { temp.cleanup() }
         let (store, loc) = try libraryOfFonts([(TempFonts.arialBold, "a.ttf")], temp: temp)
         try store.setLocationOnline(loc.id, online: false, lastKnownPath: nil)
-        for await _ in StyleBackfill(store: store).run() {}
+        for await _ in FaceBackfill(store: store).run() {}
         #expect(try versions(store) == [0])
         try store.setLocationOnline(loc.id, online: true, lastKnownPath: nil)
-        for await _ in StyleBackfill(store: store).run() {}
+        for await _ in FaceBackfill(store: store).run() {}
         #expect(try versions(store) == [StyleClassifier.version])
         #expect(try classes(store) == [.sans])
     }
@@ -200,7 +200,7 @@ struct StyleClassifierTests {
         let (store, _) = try libraryOfFonts([(TempFonts.arialBold, "a.ttf"), (TempFonts.hoeflerText, "h.ttc")], temp: temp)
         // Present but not a font any more.
         try Data(repeating: 0x5A, count: 512).write(to: temp.root.appendingPathComponent("a.ttf"))
-        for await _ in StyleBackfill(store: store).run() {}
+        for await _ in FaceBackfill(store: store).run() {}
         #expect(try versions(store).allSatisfy { $0 == StyleClassifier.version })
         let got = try classes(store)
         #expect(got.first == .unknown)
@@ -220,7 +220,7 @@ struct StyleClassifierTests {
                                  faces: faces, importBatch: batch)
         try store.database.withLock { try store.database.execute("UPDATE faces SET class_version = 0") }
         var seen: [Int] = []
-        for await p in StyleBackfill(store: store).run() { seen.append(p.done) }
+        for await p in FaceBackfill(store: store).run() { seen.append(p.done) }
         #expect(seen == [0, 200, 400, 450])
     }
 
@@ -234,7 +234,7 @@ struct StyleClassifierTests {
         _ = try store.insertFile(FileRecord(locationID: loc.id, relativePath: "big.ttc", size: 1, mtime: Date(), format: "ttc", fingerprint: "big"),
                                  faces: faces, importBatch: batch)
         try store.database.withLock { try store.database.execute("UPDATE faces SET class_version = 0") }
-        for await p in StyleBackfill(store: store).run() where p.done >= 200 { break }  // stop consuming
+        for await p in FaceBackfill(store: store).run() where p.done >= 200 { break }  // stop consuming
         try await Task.sleep(for: .milliseconds(300))
         let remaining = try store.countFacesNeedingClassification()
         #expect(remaining < 450)
@@ -246,9 +246,9 @@ struct StyleClassifierTests {
         let url = try temp.copy(TempFonts.arialBold, as: "a.ttf")
         let batch = (0..<5).map { (faceID: Int64($0), url: url, faceIndex: 0) }
         var asked = 0
-        let stopped = StyleBackfill.classify(batch, isCancelled: { asked += 1; return asked > 2 })
+        let stopped = FaceBackfill.read(batch, isCancelled: { asked += 1; return asked > 2 })
         #expect(stopped == nil && asked == 3)
-        let all = StyleBackfill.classify(batch, isCancelled: { false })
+        let all = FaceBackfill.read(batch, isCancelled: { false })
         #expect(all?.count == 5 && all?.allSatisfy { $0.styleClass == .sans } == true)
     }
 
@@ -262,7 +262,7 @@ struct StyleClassifierTests {
         _ = try store.insertFile(FileRecord(locationID: loc.id, relativePath: "big.ttc", size: 1, mtime: Date(), format: "ttc", fingerprint: "big"),
                                  faces: faces, importBatch: batch)
         try store.database.withLock { try store.database.execute("UPDATE faces SET class_version = 0") }
-        let backfill = StyleBackfill(store: store)
+        let backfill = FaceBackfill(store: store)
         let task = Task {
             for await p in backfill.run() where p.done >= 200 { withUnsafeCurrentTask { $0?.cancel() } }
         }
@@ -281,14 +281,14 @@ struct StyleClassifierTests {
         let moved = temp.root.appendingPathComponent("a.moved")
         try FileManager.default.moveItem(at: temp.root.appendingPathComponent("a.ttf"), to: moved)
         var last: BackfillProgress?
-        for await p in StyleBackfill(store: store).run() { last = p }
+        for await p in FaceBackfill(store: store).run() { last = p }
         let stamped = try versions(store)
         #expect(stamped.first == 0 && stamped.dropFirst().allSatisfy { $0 == StyleClassifier.version })
         #expect(last?.done == last?.total)
         #expect(try store.countFacesNeedingClassification() == 1)
         // Back: classified by the next run.
         try FileManager.default.moveItem(at: moved, to: temp.root.appendingPathComponent("a.ttf"))
-        for await _ in StyleBackfill(store: store).run() {}
+        for await _ in FaceBackfill(store: store).run() {}
         #expect(try versions(store).allSatisfy { $0 == StyleClassifier.version })
         #expect(try classes(store).first == .sans)
     }
