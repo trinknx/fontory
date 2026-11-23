@@ -29,6 +29,9 @@ struct FontoryApp: App {
                 Button("Actual Size") { model.resetZoom() }
                     .keyboardShortcut("0")
                 Divider()
+                Button("Preview Options…") { model.isShowingPreviewOptions.toggle() }
+                    .keyboardShortcut("p", modifiers: [.option, .command])
+                Divider()
             }
         }
 

@@ -9,40 +9,12 @@ struct BrowserToolbar: ToolbarContent {
             SearchScopeMenu(model: model)
         }
 
-        ToolbarItemGroup(placement: .principal) {
-            HStack(spacing: 4) {
-                TextField("Preview text", text: $model.preview.text)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 140, idealWidth: 220, maxWidth: 280)
-                PresetMenu(model: model)
-            }
-        }
-
         ToolbarItemGroup {
+            PreviewOptionsButton(model: model)
             Slider(value: pointSize, in: 0...288) { Text("Size") }
                 .frame(width: 90)
                 .help(model.preview.pointSizeOverride.map { "Preview size: \(Int($0)) pt (drag fully left to follow zoom)" }
                       ?? "Preview size follows the zoom")
-            Slider(value: $model.preview.tracking, in: -5...20) { Text("Tracking") }
-                .frame(width: 70)
-                .help("Tracking: \(model.preview.tracking.formatted(.number.precision(.fractionLength(1)))) pt")
-            ColorPicker("Text Color", selection: $model.preview.foreground, supportsOpacity: false)
-                .labelsHidden()
-                .help("Text color")
-            ColorPicker("Background Color", selection: $model.preview.background, supportsOpacity: false)
-                .labelsHidden()
-                .help("Background color")
-            Picker("Alignment", selection: $model.preview.alignment) {
-                ForEach(PreviewAlignment.allCases, id: \.self) { Image(systemName: $0.symbol).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .help("Alignment")
-            Toggle(isOn: $model.preview.smoothing) { Image(systemName: "circle.lefthalf.filled") }
-                .toggleStyle(.button)
-                .help("Font smoothing")
-            Toggle(isOn: $model.preview.autoSize) { Image(systemName: "textformat.size") }
-                .toggleStyle(.button)
-                .help("Auto size: match the visible height of every font")
         }
 
         ToolbarItemGroup {
@@ -104,33 +76,6 @@ private struct SearchScopeMenu: View {
         case .designer: "Designer"
         case .notes: "Notes"
         }
-    }
-}
-
-private struct PresetMenu: View {
-    @Bindable var model: AppModel
-
-    var body: some View {
-        Menu {
-            ForEach(model.presets) { preset in
-                Button(preset.name) { model.preview.text = preset.text }
-            }
-            if !model.presets.isEmpty { Divider() }
-            Button("Save Current Text…") { model.isNamingPreset = true }
-                .disabled(model.preview.text.isEmpty)
-            if !model.presets.isEmpty {
-                Menu("Delete Preset") {
-                    ForEach(model.presets) { preset in
-                        Button(preset.name) { model.deletePreset(preset) }
-                    }
-                }
-            }
-        } label: {
-            Label("Presets", systemImage: "text.badge.star")
-        }
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Preview text presets")
     }
 }
 
