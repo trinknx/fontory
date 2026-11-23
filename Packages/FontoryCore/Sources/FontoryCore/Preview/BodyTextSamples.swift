@@ -32,7 +32,7 @@ public enum BodyTextSamples {
         Người đọc hiếm khi để ý điều đó. Họ chỉ thấy câu chuyện, lập luận, hay công thức làm bánh cần 500 gam bột và \
         2 thìa muối. Kiểu chữ đã làm tròn bổn phận khi nó biến mất, như một ô cửa sổ tốt cho ta thấy khu vườn chứ \
         không phải tấm kính.
-        Tiếng Việt đòi hỏi nhiều hơn thế. Chữ “ữ” mang cả móc lẫn dấu ngã; chữ “ệ” chồng dấu mũ lên dấu nặng. Các dấu \
+        Tiếng Việt đòi hỏi nhiều hơn thế. Chữ “ữ” mang cả móc lẫn dấu ngã; chữ “ệ” vừa có dấu mũ vừa có dấu nặng. Các dấu \
         phải đủ rõ để phân biệt “ma, má, mà, mả, mã, mạ”, nhưng cũng đủ nhẹ để dòng chữ không trở nên rối mắt.
         Con số cũng cần được chăm chút. Những chữ số thẳng hàng như 1.234,56 giúp người kế toán; những chữ số lên \
         xuống theo chữ thường lại hợp hơn khi nằm giữa câu văn về năm 1945 hay một căn phòng có 12 ô cửa. Dấu câu \

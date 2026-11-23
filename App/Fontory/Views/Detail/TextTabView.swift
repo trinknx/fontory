@@ -132,7 +132,8 @@ struct TextTabView: View {
             Label(isEditing ? "Done" : "Edit", systemImage: isEditing ? "checkmark" : "pencil")
         }
         .toggleStyle(.button)
-        .help(isEditing ? "Finish editing (Esc)" : "Edit the text (or double-click it)")
+        .help(isEditing ? "Finish editing (Esc)"
+              : "Edit the text, up to \(AppModel.maxTextLength.formatted()) characters (or double-click it)")
         .disabled(face == nil || (failure != nil && loadedID == faceID))
         Button("Reset Text") { model.textCustom = nil }
             .disabled(model.textCustom == nil)
@@ -171,11 +172,11 @@ struct TextTabView: View {
         Menu {
             ForEach(TextSample.allCases, id: \.self) { sample in
                 Toggle(sample.title, isOn: Binding(
-                    get: { model.textCustom == nil && model.textSample == sample },
+                    get: { model.textSample == sample },
                     set: { _ in model.chooseTextSample(sample) }))
             }
         } label: {
-            Text(model.textCustom == nil ? model.textSample.title : "Edited Text")
+            Text(model.textCustom == nil ? model.textSample.title : "\(model.textSample.title) (Edited)")
         }
         .fixedSize()
         .help("Sample text")
@@ -271,8 +272,11 @@ struct BodyTextSpecimen: NSViewRepresentable {
     }
 }
 
-/// Shows the specimen as rendered strips in a scroll view, re-rendered off the main actor when the settings change
-/// and 150 ms after the width settles; or, while editing, a text view set in the same font (one column).
+/// Shows the specimen in a scroll view, or, while editing, a text view set in the same font (one column).
+///
+/// The text is laid out once per settings/width change, off the main actor (width changes wait 150 ms to settle).
+/// Only the strips in or next to the viewport are drawn, also off the main actor, and at most
+/// `BodyTextStripCache.limit` are kept, so memory follows the window, not the length of the text.
 ///
 /// The editor uses the face's `CTFont` directly (toll-free bridged to `NSFont`), so nothing is registered with the
 /// font manager.
@@ -281,14 +285,12 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
     var onRequestEditing: () -> Void = {}
     var onFinishEditing: () -> Void = {}
 
+    static let stripHeight: CGFloat = 512
+    static let stripLimit = 6
+
     private let renderer: PreviewRenderer
     private let scrollView = NSScrollView()
     private let documentView = SpecimenDocumentView()
-    private var stripViews: [SpecimenStripView] = []
-    private var editorScroll: NSScrollView?
-    private var textView: SpecimenTextView?
-    /// The config the editor's attributes were set from, text left out: typing does not restyle the whole text.
-    private var editorStyleKey: SpecimenConfig?
 
     private var config: SpecimenConfig?
     private var isEditing = false
@@ -299,11 +301,41 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         let scale: CGFloat
     }
 
-    /// The key of the strips on screen, and of the render in flight.
+    // Layout
+    /// The key of the layout on screen, and of the layout in flight.
     private var shownKey: RenderKey?
     private var pendingKey: RenderKey?
-    private var work: Task<(CGSize, [BodyTextStrip])?, Never>?
+    private var work: Task<BodyTextLayout?, Never>?
     private var resizeTask: Task<Void, Never>?
+    private var shownLayout: BodyTextLayout?
+
+    // Strips of the shown layout
+    private var cache: BodyTextStripCache?
+    private var stripViews: [Int: SpecimenStripView] = [:]
+    /// The previous layout's strips, kept until the new layout's visible strips are drawn (no blank flash).
+    private var staleViews: [SpecimenStripView] = []
+    private var inFlight: Set<Int> = []
+    private var layoutGeneration = 0
+    nonisolated(unsafe) private var scrollObserver: NSObjectProtocol?
+
+    // Editor
+    private var editorScroll: NSScrollView?
+    private var textView: SpecimenTextView?
+    /// The config the editor's attributes were set from, text left out: typing does not restyle the whole text.
+    private var editorStyleKey: SpecimenConfig?
+    /// The editor's own undo history, cleared when the text is replaced (sample menu, Reset Text).
+    private var editorUndo = UndoManager()
+
+    private struct FontKey: Equatable {
+        let face: SpecimenFace
+        let pointSize: CGFloat
+        let features: PreviewFeatures
+    }
+
+    /// The editor's font, loaded off the main actor.
+    private var editorFont: (key: FontKey, font: CTFont)?
+    private var editorFontTask: Task<Void, Never>?
+    private var editorFontLoading: FontKey?
 
     init(renderer: PreviewRenderer) {
         self.renderer = renderer
@@ -312,12 +344,21 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = true
         scrollView.documentView = documentView
+        scrollView.contentView.postsBoundsChangedNotifications = true
         documentView.onDoubleClick = { [weak self] in self?.onRequestEditing() }
         addSubview(scrollView)
+        scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateVisibleStrips() }
+        }
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
+    }
+
+    deinit {
+        if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
     }
 
     func update(config new: SpecimenConfig, editing: Bool) {
@@ -345,6 +386,7 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         if documentView.frame.width != width {
             documentView.setFrameSize(NSSize(width: width, height: max(documentView.frame.height, 1)))
         }
+        updateVisibleStrips()
         guard !isEditing, let shownKey, shownKey.width != width.rounded(.down) else {
             if shownKey == nil { render() }
             return
@@ -363,7 +405,7 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         render()
     }
 
-    // MARK: Rendering
+    // MARK: Layout
 
     private func render() {
         guard let config, !isEditing, window != nil else { return }
@@ -377,47 +419,95 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         var style = config.style
         style.width = width
         let renderer = self.renderer, face = config.face, features = config.features
-        let task = Task.detached(priority: .userInitiated) { () -> (CGSize, [BodyTextStrip])? in
+        let task = Task.detached(priority: .userInitiated) { () -> BodyTextLayout? in
             guard let font = renderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: style.pointSize,
                                            features: features) else { return nil }
             let layout = BodyTextRenderer.layout(font: font, style: style)
-            guard !Task.isCancelled else { return nil }
-            let strips = BodyTextRenderer.render(layout, scale: scale, isCancelled: { Task.isCancelled })
-            return Task.isCancelled ? nil : (layout.size, strips)
+            return Task.isCancelled ? nil : layout
         }
         work = task
         Task { [weak self] in
-            let result = await task.value
-            guard let self, self.pendingKey == key, let result else { return }
+            let layout = await task.value
+            guard let self, self.pendingKey == key else { return }
+            // Also on failure, so the same settings can be tried again later.
             self.pendingKey = nil
-            self.install(result.1, size: result.0, key: key)
+            guard let layout else { return }
+            self.install(layout, key: key)
         }
     }
 
-    private func install(_ strips: [BodyTextStrip], size: CGSize, key: RenderKey) {
+    private func install(_ layout: BodyTextLayout, key: RenderKey) {
         // Keep the reading position: the same fraction of the text stays at the top.
         let clip = scrollView.contentView
         let oldHeight = documentView.frame.height
         let fraction = oldHeight > 1 ? clip.bounds.minY / oldHeight : 0
-        clearStrips()
-        documentView.setFrameSize(NSSize(width: scrollView.contentSize.width, height: size.height))
-        for strip in strips {
-            let view = SpecimenStripView(image: strip.image, frame: strip.rect)
-            documentView.addSubview(view)
-            stripViews.append(view)
-        }
+        staleViews += stripViews.values
+        stripViews.removeAll()
+        inFlight.removeAll()
+        layoutGeneration &+= 1
+        shownLayout = layout
         shownKey = key
+        cache = BodyTextStripCache(layoutSize: layout.size, stripHeight: Self.stripHeight, limit: Self.stripLimit)
+        documentView.setFrameSize(NSSize(width: scrollView.contentSize.width, height: layout.size.height))
         if fraction > 0 {
-            let maxY = max(0, size.height - clip.bounds.height)
-            clip.scroll(to: NSPoint(x: 0, y: min(maxY, (fraction * size.height).rounded())))
+            let maxY = max(0, layout.size.height - clip.bounds.height)
+            clip.scroll(to: NSPoint(x: 0, y: min(maxY, (fraction * layout.size.height).rounded())))
             scrollView.reflectScrolledClipView(clip)
         }
+        updateVisibleStrips()
     }
 
-    private func clearStrips() {
-        for view in stripViews { view.removeFromSuperview() }
-        stripViews.removeAll()
-        shownKey = nil
+    // MARK: Strips
+
+    private var wantedStrips: [Int] {
+        cache?.indices(near: scrollView.contentView.bounds) ?? []
+    }
+
+    /// Shows the cached strips near the viewport and draws the missing ones.
+    private func updateVisibleStrips() {
+        guard let cache, let layout = shownLayout, let key = shownKey, !isEditing else { return }
+        for i in wantedStrips {
+            if let image = cache.image(at: i) {
+                if stripViews[i] == nil { addStripView(i, image) }
+            } else if !inFlight.contains(i) {
+                inFlight.insert(i)
+                let generation = layoutGeneration, rect = cache.rect(at: i), scale = key.scale
+                Task { [weak self] in
+                    let image = await Task.detached(priority: .userInitiated) {
+                        BodyTextRenderer.render(layout, scale: scale, rect: rect)
+                    }.value
+                    guard let self, generation == self.layoutGeneration else { return }
+                    self.inFlight.remove(i)
+                    guard let image else { return }
+                    self.stripArrived(i, image)
+                }
+            }
+        }
+        dropStaleViewsIfCovered()
+    }
+
+    private func stripArrived(_ i: Int, _ image: CGImage) {
+        guard let cache else { return }
+        let wanted = wantedStrips
+        for dropped in cache.insert(image, at: i, keeping: Set(wanted)) {
+            stripViews.removeValue(forKey: dropped)?.removeFromSuperview()
+        }
+        if cache.image(at: i) != nil, stripViews[i] == nil { addStripView(i, image) }
+        dropStaleViewsIfCovered()
+    }
+
+    private func addStripView(_ i: Int, _ image: CGImage) {
+        guard let cache else { return }
+        let view = SpecimenStripView(image: image, frame: cache.rect(at: i))
+        documentView.addSubview(view)
+        stripViews[i] = view
+    }
+
+    /// The previous layout's strips go once every visible strip of the new one is drawn.
+    private func dropStaleViewsIfCovered() {
+        guard !staleViews.isEmpty, wantedStrips.allSatisfy({ stripViews[$0] != nil }) else { return }
+        for view in staleViews { view.removeFromSuperview() }
+        staleViews.removeAll()
     }
 
     // MARK: Editing
@@ -425,6 +515,7 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
     private func beginEditing() {
         work?.cancel()
         pendingKey = nil
+        editorUndo = UndoManager()
         let scroll = NSScrollView(frame: bounds)
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -462,8 +553,40 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         editorScroll = nil
         textView = nil
         editorStyleKey = nil
+        editorFontTask?.cancel()
+        editorFontLoading = nil
+        editorUndo.removeAllActions()
         scrollView.isHidden = false
         render()
+    }
+
+    /// The editor's font for `config`: the cached one, the shown layout's when it matches, else nil while it loads
+    /// off the main actor (the editor is restyled when it arrives).
+    private func editorFont(for config: SpecimenConfig) -> CTFont? {
+        let key = FontKey(face: config.face, pointSize: config.style.pointSize, features: config.features)
+        if let editorFont, editorFont.key == key { return editorFont.font }
+        if let layout = shownLayout, let shown = shownKey,
+           FontKey(face: shown.config.face, pointSize: shown.config.style.pointSize, features: shown.config.features) == key {
+            editorFont = (key, layout.font)
+            return layout.font
+        }
+        guard editorFontLoading != key else { return nil }
+        editorFontTask?.cancel()
+        editorFontLoading = key
+        let renderer = self.renderer
+        editorFontTask = Task { [weak self] in
+            let box = await Task.detached(priority: .userInitiated) {
+                renderer.font(fileURL: key.face.fileURL, faceIndex: key.face.faceIndex, pointSize: key.pointSize,
+                              features: key.features).map(FontBox.init)
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            self.editorFontLoading = nil
+            guard let font = box?.font else { return }
+            self.editorFont = (key, font)
+            self.editorStyleKey = nil   // restyle with the new font
+            self.applyEditorStyle()
+        }
+        return nil
     }
 
     /// Sets the editor's font, colors, spacing and alignment from the config; replaces its text only when the text
@@ -476,12 +599,15 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         var styleKey = config
         styleKey.style.text = ""
         let textReplaced = textView.string != style.text
-        if textReplaced { textView.string = style.text }
+        if textReplaced {
+            textView.string = style.text
+            editorUndo.removeAllActions()   // undoing into the replaced text would be confusing
+        }
         guard textReplaced || styleKey != editorStyleKey else { return }
-        editorStyleKey = styleKey
-        let font: NSFont = renderer.font(fileURL: config.face.fileURL, faceIndex: config.face.faceIndex,
-                                         pointSize: style.pointSize, features: config.features)
-            .map { $0 as NSFont } ?? .systemFont(ofSize: style.pointSize)
+        let loaded = editorFont(for: config)
+        // Until the face loads, keep the editor's current font (no system-font flash).
+        let font: NSFont = loaded.map { $0 as NSFont } ?? textView.font ?? .systemFont(ofSize: style.pointSize)
+        if loaded != nil { editorStyleKey = styleKey }
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = config.alignment.nsAlignment
         paragraph.minimumLineHeight = style.lineSpacing
@@ -506,6 +632,24 @@ final class BodyTextSpecimenView: NSView, NSTextViewDelegate {
         guard let textView else { return }
         onEdit(textView.string)
     }
+
+    func undoManager(for view: NSTextView) -> UndoManager? {
+        editorUndo
+    }
+
+    /// The text is capped at `AppModel.maxTextLength` UTF-16 units; a change past it beeps (shortening is allowed).
+    func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+        let current = (textView.string as NSString).length
+        let next = current - range.length + (replacementString.map { ($0 as NSString).length } ?? 0)
+        guard next > AppModel.maxTextLength, next > current else { return true }
+        NSSound.beep()
+        return false
+    }
+}
+
+/// A CTFont crossing actors: CoreText fonts are immutable and thread-safe.
+private struct FontBox: @unchecked Sendable {
+    let font: CTFont
 }
 
 /// The scroll view's document: flipped, so the specimen starts at the top. Double-click starts editing.

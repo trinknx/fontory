@@ -108,7 +108,7 @@ import Testing
         let layout = BodyTextRenderer.layout(font: f, style: style(BodyTextSamples.vietnamese.text))
         #expect(layout.isComplete)
         #expect(layout.size.height > 100)
-        let strips = BodyTextRenderer.render(layout, scale: 2)
+        let strips = BodyTextRenderer.renderAll(layout, scale: 2)
         #expect(!strips.isEmpty)
         #expect(strips.contains { hasInk($0.image) })
     }
@@ -128,7 +128,7 @@ import Testing
         var s = style(BodyTextSamples.english.text + "\n" + BodyTextSamples.english.text)
         s.showGuides = true
         let layout = BodyTextRenderer.layout(font: f, style: s)
-        let strips = BodyTextRenderer.render(layout, scale: 2, stripHeight: 256)
+        let strips = BodyTextRenderer.renderAll(layout, scale: 2, stripHeight: 256)
         #expect(strips.count > 1)
         #expect(strips.first?.rect.minY == 0)
         #expect(abs((strips.last?.rect.maxY ?? 0) - layout.size.height) < 0.001)
@@ -142,9 +142,9 @@ import Testing
         let f = try font()
         let empty = BodyTextRenderer.layout(font: f, style: style(""))
         #expect(empty.size.height > 0)
-        _ = BodyTextRenderer.render(empty, scale: 2)
+        _ = BodyTextRenderer.renderAll(empty, scale: 2)
         let tiny = BodyTextRenderer.layout(font: f, style: style(width: 4, columns: 3))
-        _ = BodyTextRenderer.render(tiny, scale: 1)
+        _ = BodyTextRenderer.renderAll(tiny, scale: 1)
     }
 
     @Test func styleEqualityComparesColorsByValue() {
@@ -154,5 +154,67 @@ import Testing
         #expect(a == b)
         b.columns = 2
         #expect(a != b)
+    }
+
+    @Test func rendersOneStripForAYRange() throws {
+        let f = try font()
+        let layout = BodyTextRenderer.layout(font: f, style: style())
+        let rect = CGRect(x: 0, y: 200, width: layout.size.width, height: 100)
+        let image = try #require(BodyTextRenderer.render(layout, scale: 2, rect: rect))
+        #expect(image.width == Int(layout.size.width * 2) && image.height == 200)
+        #expect(hasInk(image))
+        // Opaque background: no alpha channel kept.
+        #expect(image.alphaInfo == .noneSkipLast)
+    }
+
+    @Test func stripCacheRetainsABoundedNumberOfStrips() throws {
+        let f = try font()
+        func maxRetained(copies: Int) -> (count: Int, bytes: Int, strips: Int) {
+            let text = Array(repeating: BodyTextSamples.english.text, count: copies).joined(separator: "\n")
+            let layout = BodyTextRenderer.layout(font: f, style: style(text))
+            let cache = BodyTextStripCache(layoutSize: layout.size, stripHeight: 256, limit: 6)
+            var maxCount = 0, maxBytes = 0
+            // Scroll top to bottom through a 600 pt viewport, rendering what is wanted, as the view does.
+            var y: CGFloat = 0
+            while y < layout.size.height {
+                let wanted = cache.indices(near: CGRect(x: 0, y: y, width: layout.size.width, height: 600))
+                #expect(wanted.count <= cache.limit)
+                for i in wanted where cache.image(at: i) == nil {
+                    let image = try! #require(BodyTextRenderer.render(layout, scale: 2, rect: cache.rect(at: i)))
+                    cache.insert(image, at: i, keeping: Set(wanted))
+                }
+                maxCount = max(maxCount, cache.count)
+                maxBytes = max(maxBytes, cache.retainedBytes)
+                y += 150
+            }
+            return (maxCount, maxBytes, cache.stripCount)
+        }
+        let short = maxRetained(copies: 4)
+        let long = maxRetained(copies: 16)
+        #expect(long.strips > short.strips * 3)
+        #expect(short.count <= 6 && long.count <= 6)
+        #expect(long.bytes == short.bytes, "retained memory does not grow with the document")
+    }
+
+    @Test func stripCacheRectsTileTheLayout() {
+        let cache = BodyTextStripCache(layoutSize: CGSize(width: 300, height: 1000), stripHeight: 256, limit: 6)
+        #expect(cache.stripCount == 4)
+        #expect(cache.rect(at: 0) == CGRect(x: 0, y: 0, width: 300, height: 256))
+        #expect(cache.rect(at: 3) == CGRect(x: 0, y: 768, width: 300, height: 232))
+        #expect(cache.indices(near: CGRect(x: 0, y: 300, width: 300, height: 100)) == [0, 1, 2])
+    }
+
+    @Test func tallScriptInkIsNotClipped() throws {
+        let f = try #require(PreviewRenderer().font(fileURL: URL(fileURLWithPath: "/System/Library/Fonts/Supplemental/Zapfino.ttf"),
+                                                    faceIndex: 0, pointSize: 72, features: .standard))
+        var s = style("Zapfino flourishes\nfly high and low", width: 1600)
+        s.pointSize = 72
+        s.lineHeight = 1.0
+        let layout = BodyTextRenderer.layout(font: f, style: s)
+        for placed in layout.lines {
+            let ink = CTLineGetBoundsWithOptions(placed.line, .useGlyphPathBounds)
+            #expect(placed.origin.y + ink.maxY <= layout.size.height, "ink above the top")
+            #expect(placed.origin.y + ink.minY >= 0, "ink below the bottom")
+        }
     }
 }

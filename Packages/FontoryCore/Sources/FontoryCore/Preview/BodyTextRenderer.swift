@@ -67,8 +67,11 @@ public struct BodyTextLayout: @unchecked Sendable {
     public let columnCount: Int
     /// False when the text could not be fitted (a column narrower than a glyph).
     public let isComplete: Bool
-    let font: CTFont
+    /// The face at its size, with its features: the one the text is set in.
+    public let font: CTFont
     let lines: [PlacedLine]
+    /// How far from its baseline a line's ink can reach: strips draw the lines this close to them.
+    let drawMargin: CGFloat
 
     /// Lines in each column. For tests.
     var lineCountsPerColumn: [Int] {
@@ -206,14 +209,33 @@ public enum BodyTextRenderer {
                 lines.append(.init(line: line, origin: CGPoint(x: x + origin.x, y: inset + origin.y), column: column))
             }
         }
-        let size = CGSize(width: max(1, style.width), height: (height + 2 * inset).rounded(.up))
+        // Tall scripts (Zapfino, stacked marks) can ink above the first line's box or below the last one's: grow the
+        // top and bottom margins by the overshoot, so nothing is clipped. Only lines that can reach an edge are
+        // measured (glyph-path bounds are costly on long text).
+        let box = CTFontGetBoundingBox(font)
+        let reachUp = max(box.maxY, style.lineSpacing * 2), reachDown = max(-box.minY, style.lineSpacing * 2)
+        let frameTop = inset + height, frameBottom = inset
+        var inkTop = frameTop, inkBottom = frameBottom
+        for placed in lines where placed.origin.y + reachUp > frameTop || placed.origin.y - reachDown < frameBottom {
+            let ink = CTLineGetBoundsWithOptions(placed.line, .useGlyphPathBounds)
+            guard !ink.isNull, !ink.isEmpty else { continue }
+            inkTop = max(inkTop, placed.origin.y + ink.maxY)
+            inkBottom = min(inkBottom, placed.origin.y + ink.minY)
+        }
+        let extraTop = (inkTop - frameTop).rounded(.up), extraBottom = (frameBottom - inkBottom).rounded(.up)
+        if extraBottom > 0 {
+            lines = lines.map { .init(line: $0.line, origin: CGPoint(x: $0.origin.x, y: $0.origin.y + extraBottom), column: $0.column) }
+        }
+        let size = CGSize(width: max(1, style.width), height: (height + 2 * inset + extraTop + extraBottom).rounded(.up))
         return BodyTextLayout(style: style, size: size, columnWidth: columnWidth, columnCount: n,
-                              isComplete: best.complete, font: font, lines: lines)
+                              isComplete: best.complete, font: font, lines: lines,
+                              drawMargin: max(reachUp, reachDown, style.pointSize * 2))
     }
 
-    /// Renders `layout` as strips of at most `stripHeight` points, top to bottom.
-    public static func render(_ layout: BodyTextLayout, scale: CGFloat, stripHeight: CGFloat = 1024,
-                              isCancelled: () -> Bool = { false }) -> [BodyTextStrip] {
+    /// Renders the whole of `layout` as strips of at most `stripHeight` points, top to bottom. For tests: views draw
+    /// only the strips near their viewport (`BodyTextStripCache`).
+    static func renderAll(_ layout: BodyTextLayout, scale: CGFloat, stripHeight: CGFloat = 1024,
+                          isCancelled: () -> Bool = { false }) -> [BodyTextStrip] {
         let total = layout.size.height
         let stripHeight = max(16, stripHeight)
         var out: [BodyTextStrip] = []
@@ -231,9 +253,11 @@ public enum BodyTextRenderer {
     public static func render(_ layout: BodyTextLayout, scale: CGFloat, rect: CGRect) -> CGImage? {
         let style = layout.style
         let w = Int((rect.width * scale).rounded()), h = Int((rect.height * scale).rounded())
+        // An opaque background needs no alpha channel to be kept.
+        let alpha: CGImageAlphaInfo = style.background.alpha >= 1 ? .noneSkipLast : .premultipliedLast
         guard w > 0, h > 0,
               let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: PreviewRequest.sRGB, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                                  space: PreviewRequest.sRGB, bitmapInfo: alpha.rawValue)
         else { return nil }
         ctx.setFillColor(style.background)
         ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
@@ -247,7 +271,7 @@ public enum BodyTextRenderer {
         ctx.setShouldAntialias(true)
 
         // Lines whose ink can reach the strip: generous margins for tall accents and deep descenders.
-        let margin = max(style.pointSize * 2, style.lineSpacing * 2)
+        let margin = layout.drawMargin
         let visible = layout.lines.filter { $0.origin.y > bottom - margin && $0.origin.y < bottom + rect.height + margin }
         if style.showGuides {
             for placed in visible {
@@ -260,5 +284,78 @@ public enum BodyTextRenderer {
             CTLineDraw(placed.line, ctx)
         }
         return ctx.makeImage()
+    }
+}
+
+/// The rendered strips of one layout that a view keeps: at most `limit`, least recently used dropped first, so
+/// memory depends on the viewport, not on the length of the text. Strip `i` covers `rect(at: i)`. Not thread-safe:
+/// use it from one actor (the view's); render the strips anywhere with `BodyTextRenderer.render(_:scale:rect:)`.
+public final class BodyTextStripCache {
+    public let size: CGSize
+    public let stripHeight: CGFloat
+    public let limit: Int
+    private var images: [Int: CGImage] = [:]
+    /// Least recently used first.
+    private var order: [Int] = []
+
+    public init(layoutSize: CGSize, stripHeight: CGFloat = 1024, limit: Int = 6) {
+        size = layoutSize
+        self.stripHeight = max(16, stripHeight)
+        self.limit = max(1, limit)
+    }
+
+    public var stripCount: Int { max(0, Int((size.height / stripHeight).rounded(.up))) }
+    public var count: Int { images.count }
+    /// Bytes of the retained bitmaps.
+    public var retainedBytes: Int { images.values.reduce(0) { $0 + $1.bytesPerRow * $1.height } }
+
+    /// Strip `i`, in points from the top of the layout.
+    public func rect(at i: Int) -> CGRect {
+        let top = CGFloat(i) * stripHeight
+        return CGRect(x: 0, y: top, width: size.width, height: max(0, min(stripHeight, size.height - top)))
+    }
+
+    /// The strips that intersect `visible` (points from the top), plus `margin` strips above and below, capped at
+    /// `limit` strips.
+    public func indices(near visible: CGRect, margin: Int = 1) -> [Int] {
+        guard stripCount > 0 else { return [] }
+        let first = Int((max(0, visible.minY) / stripHeight).rounded(.down))
+        let last = Int((max(0, visible.maxY - 0.001) / stripHeight).rounded(.down))
+        let low = max(0, first - margin), high = min(stripCount - 1, last + margin)
+        guard low <= high else { return [] }
+        return Array(Array(low...high).prefix(limit))
+    }
+
+    public func image(at i: Int) -> CGImage? {
+        guard let image = images[i] else { return nil }
+        touch(i)
+        return image
+    }
+
+    /// Stores strip `i`, then drops least recently used strips not in `keeping` while over the limit. Returns the
+    /// dropped indices.
+    @discardableResult
+    public func insert(_ image: CGImage, at i: Int, keeping: Set<Int> = []) -> [Int] {
+        images[i] = image
+        touch(i)
+        var dropped: [Int] = []
+        var candidates = order.filter { !keeping.contains($0) && $0 != i }
+        while images.count > limit, !candidates.isEmpty {
+            let victim = candidates.removeFirst()
+            images[victim] = nil
+            order.removeAll { $0 == victim }
+            dropped.append(victim)
+        }
+        return dropped
+    }
+
+    public func removeAll() {
+        images.removeAll()
+        order.removeAll()
+    }
+
+    private func touch(_ i: Int) {
+        order.removeAll { $0 == i }
+        order.append(i)
     }
 }

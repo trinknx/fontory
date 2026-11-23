@@ -448,6 +448,9 @@ final class AppModel {
     var textLineHeight: Double {
         didSet { if textLineHeight != oldValue { UserDefaults.standard.set(textLineHeight, forKey: SettingsKey.textLineHeight) } }
     }
+    /// Longest specimen text the editor accepts (UTF-16 units): long enough for any specimen, short enough to lay
+    /// out quickly.
+    nonisolated static let maxTextLength = 50_000
     nonisolated static let defaultTextPointSize = 18.0
     nonisolated static let textPointSizeRange: ClosedRange<Double> = 9...72
     nonisolated static let defaultTextLineHeight = 1.4
@@ -464,8 +467,9 @@ final class AppModel {
         }
     }
 
-    /// Chooses a sample; it replaces any edited text.
+    /// Chooses a sample; another sample replaces any edited text, the current one keeps it (Reset Text restores it).
     func chooseTextSample(_ sample: TextSample) {
+        guard sample != textSample else { return }
         textSample = sample
         textCustom = nil
     }
@@ -534,7 +538,7 @@ final class AppModel {
         glyphCellSize = Self.glyphCellSizeRange.contains(cell) ? cell : Self.defaultGlyphCellSize
         glyphOrder = defaults.string(forKey: SettingsKey.glyphOrder).flatMap(GlyphOrder.init(rawValue:)) ?? .unicode
         textSample = defaults.string(forKey: SettingsKey.textSample).flatMap(TextSample.init(rawValue:)) ?? .english
-        textCustom = defaults.string(forKey: SettingsKey.textCustom)
+        textCustom = defaults.string(forKey: SettingsKey.textCustom).map { String($0.prefix(Self.maxTextLength)) }
         textColumns = min(3, max(1, defaults.integer(forKey: SettingsKey.textColumns)))
         textAlignment = defaults.string(forKey: SettingsKey.textAlignment).flatMap(BodyTextAlignment.init(rawValue:)) ?? .left
         let textSize = defaults.double(forKey: SettingsKey.textPointSize)
