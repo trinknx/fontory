@@ -49,6 +49,7 @@ enum OrganizationSmoke {
             await quickCollectionSteps(model, faces: faces)
             await backfillSteps(model, backend: backend, folder: dir)
             await smartEditorSteps(model, backend: backend)
+            await reviewFixSteps(model, backend: backend)
         } catch {
             check(false, "setup", "\(error)")
         }
@@ -810,6 +811,127 @@ enum OrganizationSmoke {
             }
         }
         check(allValid, "every offered field/operator pair compiles to a real condition")
+    }
+
+    // MARK: Final review fixes
+
+    /// Starts organization reloads every millisecond until cancelled (as scans and the backfill do).
+    private static func hammerReloads(_ model: AppModel) -> Task<Void, Never> {
+        Task { @MainActor in
+            while !Task.isCancelled {
+                Task { await model.reloadOrganization() }
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+        }
+    }
+
+    private static func coreIDs(_ store: FontStore, _ rule: SmartRule, includeSystem: Bool) -> Set<Int64> {
+        Set((try? store.faceIDs(for: LibraryQuery(scope: .tags([TagPick(tagID: -1, rule: rule)]), includeSystem: includeSystem))) ?? [])
+    }
+
+    private static func reviewFixSteps(_ model: AppModel, backend: LibraryBackend) async {
+        let store = backend.store
+        let includeSystem = model.query.includeSystem
+
+        // Coalescing: N rapid triggers cost at most two runs (one in flight, one pending).
+        await model.reloadOrganization()
+        let runsBefore = model.organizationReloadRuns
+        let burst = (0..<25).map { _ in Task { @MainActor in await model.reloadOrganization() } }
+        for t in burst { await t.value }
+        let burstRuns = model.organizationReloadRuns - runsBefore
+        check((1...2).contains(burstRuns), "25 rapid organization reloads run at most twice", "\(burstRuns) runs")
+        // The same while one is already in flight.
+        let first = Task { @MainActor in await model.reloadOrganization() }
+        while model.organizationReloadTask == nil { await Task.yield() }
+        let runsMid = model.organizationReloadRuns
+        let more = (0..<25).map { _ in Task { @MainActor in await model.reloadOrganization() } }
+        await first.value
+        for t in more { await t.value }
+        let midRuns = model.organizationReloadRuns - runsMid
+        check(midRuns <= 2, "25 reloads during one in flight add at most one more run", "\(midRuns) runs")
+
+        // A new smart tag is selected, and a shown one edited, while reloads keep firing.
+        var monoRule = SmartRule()
+        monoRule.conditions = [SmartRule.Condition(field: .styleClass, op: .is, value: .int(Int64(StyleClass.mono.rawValue)))]
+        var sansRule = SmartRule()
+        sansRule.conditions = [SmartRule.Condition(field: .styleClass, op: .is, value: .int(Int64(StyleClass.sans.rawValue)))]
+        var hammer = hammerReloads(model)
+        model.newSmartTag()
+        guard let fresh = model.smartTagEditor else { hammer.cancel(); check(false, "editor opens"); return }
+        fresh.name = "Review Mono"
+        fresh.rows = []
+        fresh.addRow()
+        fresh.rows[0].condition = monoRule.conditions[0]
+        await model.saveSmartTag(fresh)
+        let monoID = model.selectedTagPicks.first?.tagID
+        check(model.selectedTagPicks.count == 1 && monoID.flatMap { model.tag($0) }?.name == "Review Mono"
+              && model.selectedTagPicks.first?.rule == monoRule,
+              "busy reloads: a new smart tag is selected at once", "\(model.selectedTagPicks)")
+        guard let monoID else { hammer.cancel(); return }
+
+        model.editSmartTag(monoID)
+        guard let edit = model.smartTagEditor else { hammer.cancel(); check(false, "Edit… opens"); return }
+        edit.rows[0].condition = sansRule.conditions[0]
+        await model.saveSmartTag(edit)
+        check(model.selectedTagPicks.first?.rule == sansRule, "busy reloads: the edited rule is shown at once",
+              "\(String(describing: model.selectedTagPicks.first?.rule))")
+        hammer.cancel()
+        await model.reloadOrganization()
+        let afterEdit = await shown(model)
+        check(model.selectedTagPicks.first?.rule == sansRule && afterEdit == coreIDs(store, sansRule, includeSystem: includeSystem),
+              "edit during an in-flight reload: the browser ends on the new rule", "\(afterEdit.count) shown")
+
+        // ⊕ New Tag while reloads keep firing: the inline rename starts on a row that exists.
+        hammer = hammerReloads(model)
+        await model.newTag()
+        let renaming = model.renamingTagID
+        check(renaming != nil && renaming.flatMap { model.tag($0) } != nil, "busy reloads: New Tag starts its rename on a listed row")
+        hammer.cancel()
+        await model.reloadOrganization()
+        if let renaming { await model.deleteTag(renaming) }
+        model.renamingTagID = nil
+
+        // A rule naming the newest tag keeps matching nothing after the tag is deleted and its id reused.
+        guard let holderID = await model.createTag(name: "Review Holder", parentID: nil, kind: .smart, ruleJSON: "{}"),
+              let newest = await model.createTag(name: "Review Newest", parentID: nil),
+              let serifFace = (try? store.faceIDs(for: LibraryQuery()))?.first else {
+            check(false, "tombstone setup", model.alert?.message ?? ""); return
+        }
+        await model.setTag(newest, onFaces: [serifFace], included: true)
+        model.editSmartTag(holderID)
+        if let h = model.smartTagEditor {
+            h.rows = []
+            h.addRow()
+            h.rows[0].condition = SmartRule.Condition(field: .tag, op: .has, value: .int(newest))
+            await model.saveSmartTag(h)
+        }
+        check(model.smartTagCounts[holderID] == 1, "rule on the newest tag matches its font",
+              "\(String(describing: model.smartTagCounts[holderID]))")
+        await model.deleteTag(newest)
+        let reused = await model.createTag(name: "Review Reused", parentID: nil)
+        if let reused { await model.setTag(reused, onFaces: [serifFace], included: true) }
+        await model.reloadOrganization()
+        let holderRule = model.tag(holderID).flatMap { SmartRule.decode($0.ruleJSON ?? "") }
+        print("  deleted tag id \(newest), new tag id \(String(describing: reused))")
+        check(reused == newest && holderRule?.conditions.first?.value == .int(SmartRule.deletedID)
+              && model.smartTagCounts[holderID] == 0 && coreIDs(store, holderRule ?? SmartRule(), includeSystem: includeSystem).isEmpty,
+              "deleted newest tag, new tag takes its id: the rule holds the tombstone and matches nothing",
+              "rule \(String(describing: holderRule)), count \(String(describing: model.smartTagCounts[holderID]))")
+
+        // A smart tag dropped on a plain tag is refused with an alert; it stays top level.
+        if let reused {
+            model.alert = nil
+            await model.dropTag(holderID, onto: reused)
+            let storedParent = (try? store.tags())?.first { $0.id == holderID }?.parentID
+            check(model.alert?.message == "Smart tags stay at the top level." && model.tag(holderID)?.parentID == nil && storedParent == nil,
+                  "smart tag dropped under a plain tag: refused with an alert", model.alert?.message ?? "no alert")
+            model.alert = nil
+        }
+
+        // The style-only reload refreshes the Style counts.
+        await model.reloadOrganization(.styles)
+        let styles = (try? store.styleCounts(includeSystem: includeSystem)) ?? [:]
+        check(model.organizationCounts.perStyle == styles, "style-only reload refreshes the Style counts")
     }
 }
 #endif
