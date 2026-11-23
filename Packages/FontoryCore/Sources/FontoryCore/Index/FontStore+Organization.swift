@@ -200,11 +200,7 @@ extension FontStore {
             out.untagged = try scalar("NOT EXISTS (SELECT 1 FROM face_tags JOIN tags ON tags.id = face_tags.tag_id WHERE face_tags.face_id = faces.id AND tags.kind = 0)")
             out.quickCollection = try scalar("faces.id IN (SELECT face_id FROM quick_collection)")
 
-            let styles = try reader.prepare("SELECT faces.style_class, COUNT(*) \(join) WHERE \(visible) GROUP BY 1")
-            defer { styles.reset() }
-            while try styles.step() {
-                if let c = StyleClass(rawValue: Int(styles.int64(0))) { out.perStyle[c] = Int(styles.int64(1)) }
-            }
+            out.perStyle = try styleCounts(includeSystem: includeSystem)
 
             // One pass over the visible assignments: each face counts once for every tag it carries or inherits.
             var parent: [Int64: Int64?] = [:]
@@ -221,6 +217,20 @@ extension FontStore {
                     if out.perTag[c] != nil { out.perTag[c]! += 1 }
                     cursor = parent[c] ?? nil
                 }
+            }
+            return out
+        }
+    }
+
+    /// Faces per style class (`OrganizationCounts.perStyle` alone), for reloads that follow the style backfill.
+    public func styleCounts(includeSystem: Bool) throws -> [StyleClass: Int] {
+        let visible = LibraryQuery.publicFaceClause + (includeSystem ? "" : " AND locations.kind != 2")
+        return try reader.withLock {
+            let styles = try reader.prepare("SELECT faces.style_class, COUNT(*) \(LibraryQuery.fromJoin) WHERE \(visible) GROUP BY 1")
+            defer { styles.reset() }
+            var out: [StyleClass: Int] = [:]
+            while try styles.step() {
+                if let c = StyleClass(rawValue: Int(styles.int64(0))) { out[c] = Int(styles.int64(1)) }
             }
             return out
         }

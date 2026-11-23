@@ -149,32 +149,108 @@ extension AppModel {
 
     // MARK: Loading
 
-    /// Reloads the tags and their counts (also run by `refreshCounts`). Results of an older call are dropped.
-    func reloadOrganization() async {
-        guard let backend else { return }
-        organizationGeneration += 1
-        let generation = organizationGeneration
+    /// What an organization reload reads: everything, or only what the style backfill can change (the Style
+    /// counts and the smart tags whose rule tests the style).
+    enum OrganizationReload: Sendable {
+        case full, styles
+
+        func merged(with other: OrganizationReload?) -> OrganizationReload {
+            other == .full || self == .full ? .full : .styles
+        }
+    }
+
+    /// Reloads the tags and their counts (also run by `refreshCounts`), and returns once a reload started after
+    /// this call has been applied. Reloads never overlap: one runs, at most one more is pending, and every request
+    /// made while one runs is folded into the pending one (so N rapid calls cost at most two runs).
+    func reloadOrganization(_ kind: OrganizationReload = .full) async {
+        organizationRequested += 1
+        let request = organizationRequested
+        organizationReloadPending = kind.merged(with: organizationReloadPending)
+        if organizationReloadTask == nil {
+            organizationReloadTask = Task { [weak self] in await self?.drainOrganizationReloads() }
+        }
+        while organizationApplied < request, let task = organizationReloadTask { await task.value }
+    }
+
+    private func drainOrganizationReloads() async {
+        while let kind = organizationReloadPending, let backend {
+            organizationReloadPending = nil
+            let covers = organizationRequested
+            organizationReloadRuns += 1
+            switch kind {
+            case .full: await runFullOrganizationReload(backend)
+            case .styles: await runStyleOrganizationReload(backend)
+            }
+            organizationApplied = covers
+        }
+        organizationReloadPending = nil
+        organizationReloadTask = nil
+    }
+
+    private func runFullOrganizationReload(_ backend: LibraryBackend) async {
         let includeSystem = query.includeSystem
-        guard let org = await runBackground({ try backend.organization(includeSystem: includeSystem) }),
-              generation == organizationGeneration else { return }
-        if org.tags != tags { tags = org.tags }
+        let epoch = tagWriteEpoch
+        guard let org = await runBackground({ try backend.organization(includeSystem: includeSystem) }) else { return }
         if org.counts != organizationCounts { organizationCounts = org.counts }
         if org.smartCounts != smartTagCounts { smartTagCounts = org.smartCounts }
+        // A snapshot read before a tag write made here may lack what that write applied to `tags` at once (a new
+        // tag, a new rule). Every such write reloads again, so the next run brings the tags.
+        guard epoch == tagWriteEpoch else { return }
+        if org.tags != tags { tags = org.tags }
         expandedTagIDs.formIntersection(org.tags.map(\.id))
+        reconcileTagScope()
+    }
+
+    private func runStyleOrganizationReload(_ backend: LibraryBackend) async {
+        let includeSystem = query.includeSystem
+        let styleTags = tags.filter { $0.kind == .smart && Self.ruleTestsStyle($0.ruleJSON) }
+        guard let org = await runBackground({ try backend.styleOrganization(smartTags: styleTags, includeSystem: includeSystem) })
+        else { return }
+        if org.perStyle != organizationCounts.perStyle { organizationCounts.perStyle = org.perStyle }
+        var smart = smartTagCounts
+        for (id, n) in org.smartCounts where tag(id) != nil { smart[id] = n }
+        if smart != smartTagCounts { smartTagCounts = smart }
+    }
+
+    nonisolated static func ruleTestsStyle(_ json: String?) -> Bool {
+        SmartRule.decode(json ?? "")?.conditions.contains { $0.field == .styleClass } ?? false
+    }
+
+    /// Keeps the tag view in step with the tags just applied: smart picks take their stored rule, picks of tags
+    /// that no longer exist are dropped (none left: All). Setting the scope refreshes the browser.
+    private func reconcileTagScope() {
+        guard case .tags(let picks) = query.scope else { return }
+        let fresh = picks.compactMap { tag($0.tagID) == nil ? nil : tagPick($0.tagID, inverted: $0.inverted) }
+        if fresh != picks { query.scope = fresh.isEmpty ? .all : .tags(fresh) }
+    }
+
+    /// Whether the browser's result depends on tags or assignments: a tag view, Untagged, or a `#tag` search.
+    var viewDependsOnTags: Bool {
+        if query.search?.terms.contains(where: { $0.mode == .tag || $0.mode == .notTag }) == true { return true }
+        switch query.scope {
+        case .tags, .untagged: return true
+        default: return false
+        }
+    }
+
+    /// Whether the browser's result depends on style classes: a Style view, a smart pick testing the style, or a
+    /// `#tag` search (which also matches style titles such as `#serif`).
+    var viewDependsOnStyles: Bool {
+        if query.search?.terms.contains(where: { $0.mode == .tag || $0.mode == .notTag }) == true { return true }
+        switch query.scope {
+        case .styleClass: return true
+        case .tags(let picks): return picks.contains { $0.rule?.conditions.contains { $0.field == .styleClass } == true }
+        default: return false
+        }
     }
 
     /// After tags or assignments change: counts, and the browser when it shows something tag-based.
     func afterTagChange() async {
         tagAssignmentVersion += 1
+        let before = query.scope
         await reloadOrganization()
-        switch query.scope {
-        case .tags(let picks):
-            // Keep smart picks' rules in step with the stored ones.
-            let fresh = picks.map { tagPick($0.tagID, inverted: $0.inverted) }
-            if fresh != picks { query.scope = .tags(fresh) } else { scheduleRefresh() }
-        case .untagged: scheduleRefresh()
-        default: break
-        }
+        // The applied reload already re-derived the picks; a changed scope has scheduled its own refresh.
+        if query.scope == before && viewDependsOnTags { scheduleRefresh() }
     }
 
     private func tagFailure(_ error: Error, title: String) {
@@ -188,7 +264,9 @@ extension AppModel {
         let store = backend.store
         let result = await Task.detached(priority: .userInitiated) { Result { try work(store) } }.value
         switch result {
-        case .success(let value): return value
+        case .success(let value):
+            tagWriteEpoch += 1
+            return value
         case .failure(let error):
             tagFailure(error, title: title)
             return nil
@@ -203,7 +281,12 @@ extension AppModel {
         let id = await tagWrite("The tag could not be created") {
             try $0.createTag(name: name, parentID: parentID, kind: kind, ruleJSON: ruleJSON)
         }
-        if id != nil {
+        if let id {
+            // Shown at once; the reload confirms it (a dropped or older one cannot take it away, see `tagWriteEpoch`).
+            if tag(id) == nil {
+                let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                tags.append(TagRecord(id: id, parentID: parentID, name: clean, kind: kind, ruleJSON: ruleJSON, createdAt: Date()))
+            }
             if let parentID { expandedTagIDs.insert(parentID) }
             await afterTagChange()
         }
@@ -274,6 +357,7 @@ extension AppModel {
         defer { editor.isSaving = false }
         let name = editor.name
         let json = editor.rule.encoded()
+        let rule = editor.rule
         let savedID: Int64?
         if let id = editor.tagID {
             savedID = await tagWrite("The smart tag could not be saved") { store in
@@ -289,9 +373,20 @@ extension AppModel {
         guard let savedID else { return false }
         editor.countTask?.cancel()
         if smartTagEditor === editor { smartTagEditor = nil }
+        // Applied here at once, not left to a reload: the record, and the view of it (shown at once when new).
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let i = tags.firstIndex(where: { $0.id == savedID }) {
+            tags[i].name = clean
+            tags[i].ruleJSON = json
+        } else {
+            tags.append(TagRecord(id: savedID, parentID: nil, name: clean, kind: .smart, ruleJSON: json, createdAt: Date()))
+        }
+        if editor.tagID == nil {
+            query.scope = .tags([TagPick(tagID: savedID, rule: rule)])
+        } else {
+            reconcileTagScope()
+        }
         await afterTagChange()
-        // A new smart tag is shown at once.
-        if editor.tagID == nil, tag(savedID) != nil { query.scope = .tags([tagPick(savedID)]) }
         return true
     }
 
@@ -306,7 +401,7 @@ extension AppModel {
         editor.countTask = Task { [weak self, weak editor] in
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled, let self else { return }
-            let count = await self.runBackground({ try backend.store.faceIDs(for: countQuery).count },
+            let count = await self.runBackground({ try backend.store.count(for: countQuery) },
                                                  failureTitle: "smart tag count")
             guard let editor, let count, generation == editor.countGeneration else { return }
             editor.matchCount = count
@@ -343,6 +438,7 @@ extension AppModel {
     func deleteTag(_ id: Int64) async {
         let doomed = descendantTagIDs(of: id)
         guard await tagWrite("The tag could not be deleted", { try $0.deleteTag(id) }) != nil else { return }
+        tags.removeAll { doomed.contains($0.id) }
         if let renaming = renamingTagID, doomed.contains(renaming) { renamingTagID = nil }
         if let editing = smartTagEditor?.tagID, doomed.contains(editing) { cancelSmartTagEditor() }
         let picks = selectedTagPicks

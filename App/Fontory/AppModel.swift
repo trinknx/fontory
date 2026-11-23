@@ -539,7 +539,16 @@ final class AppModel {
     var expandedTagIDs: Set<Int64> = []
     /// The smart tag editor sheet's draft, while it is shown (see `SmartTagEditor`).
     var smartTagEditor: SmartTagEditorState?
-    @ObservationIgnored var organizationGeneration = 0
+    /// Organization reloads (see `reloadOrganization`): the one running, the merged kind of the pending one,
+    /// the last request number and the last request number a finished run covers.
+    @ObservationIgnored var organizationReloadTask: Task<Void, Never>?
+    @ObservationIgnored var organizationReloadPending: OrganizationReload?
+    @ObservationIgnored var organizationRequested = 0
+    @ObservationIgnored var organizationApplied = 0
+    /// Organization reload runs so far (smoke hook).
+    @ObservationIgnored var organizationReloadRuns = 0
+    /// Bumped by every tag-store write made here; a reload snapshot read before the latest one keeps `tags` as is.
+    @ObservationIgnored var tagWriteEpoch = 0
     /// The last ⌥-click applied to a tag row, to apply each click once (see `optionClickTag`).
     @ObservationIgnored var lastOptionClick: (tagID: Int64, time: TimeInterval)?
     /// Bumped after every tag change (assignments included), so views showing a face's tags reload them.

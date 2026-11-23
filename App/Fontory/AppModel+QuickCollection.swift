@@ -162,8 +162,8 @@ extension AppModel {
 
     static let styleCountsInterval: Duration = .seconds(1)
 
-    /// The Style counts (and a Style view) follow the backfill, at most once a second; the last batch's change
-    /// is reloaded too.
+    /// The Style counts (and a view depending on styles) follow the backfill, at most once a second; the last
+    /// batch's change is reloaded too.
     private func scheduleStyleCountsReload() {
         guard styleCountsReloadTask == nil else { return }
         let clock = ContinuousClock()
@@ -173,8 +173,9 @@ extension AppModel {
             guard let self else { return }
             self.lastStyleCountsReload = clock.now
             self.styleCountsReloadTask = nil
-            await self.reloadOrganization()
-            if case .styleClass = self.query.scope { self.scheduleRefresh() }
+            // Only what the backfill can change: Style counts and smart tags testing the style.
+            await self.reloadOrganization(.styles)
+            if self.viewDependsOnStyles { self.scheduleRefresh() }
         }
     }
 

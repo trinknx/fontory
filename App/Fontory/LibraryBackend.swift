@@ -272,11 +272,28 @@ final class LibraryBackend: Sendable {
     func organization(includeSystem: Bool) throws -> Organization {
         let tags = try store.tags()
         let counts = try store.organizationCounts(includeSystem: includeSystem)
-        var smart: [Int64: Int] = [:]
-        for tag in tags where tag.kind == .smart {
-            let pick = TagPick(tagID: tag.id, rule: SmartRule.decode(tag.ruleJSON ?? ""))
-            smart[tag.id] = try store.faceIDs(for: LibraryQuery(scope: .tags([pick]), includeSystem: includeSystem)).count
-        }
+        let smart = try smartCounts(tags.filter { $0.kind == .smart }, includeSystem: includeSystem)
         return Organization(tags: tags, counts: counts, smartCounts: smart)
+    }
+
+    /// Faces matching each smart tag's rule: one `COUNT(*)` each, no ordering or id list.
+    func smartCounts(_ smartTags: [TagRecord], includeSystem: Bool) throws -> [Int64: Int] {
+        var smart: [Int64: Int] = [:]
+        for tag in smartTags where tag.kind == .smart {
+            let pick = TagPick(tagID: tag.id, rule: SmartRule.decode(tag.ruleJSON ?? ""))
+            smart[tag.id] = try store.count(for: LibraryQuery(scope: .tags([pick]), includeSystem: includeSystem))
+        }
+        return smart
+    }
+
+    struct StyleOrganization: Sendable {
+        var perStyle: [StyleClass: Int]
+        var smartCounts: [Int64: Int]
+    }
+
+    /// What the style backfill can change: the Style counts and the counts of `smartTags` (those testing the style).
+    func styleOrganization(smartTags: [TagRecord], includeSystem: Bool) throws -> StyleOrganization {
+        StyleOrganization(perStyle: try store.styleCounts(includeSystem: includeSystem),
+                          smartCounts: try smartCounts(smartTags, includeSystem: includeSystem))
     }
 }

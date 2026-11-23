@@ -322,6 +322,8 @@ import Testing
             .tags([TagPick(tagID: 0, rule: rule([c(.name, .contains, .text("beta"))]))]),
             .tags([TagPick(tagID: 0, rule: rule([c(.weight, .between, .range(0, 0.1))]))]),
         ]
+        #expect(try f.store.styleCounts(includeSystem: true) == (try f.store.organizationCounts(includeSystem: true)).perStyle)
+        #expect(try f.store.styleCounts(includeSystem: true)[.serif] == 1)
         for scope in scopes {
             for sort in [LibraryQuery.Sort.family, .random(seed: 42)] {
                 var q = LibraryQuery(scope: scope, sort: sort)
