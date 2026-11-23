@@ -1,3 +1,4 @@
+import AppKit
 import FontoryCore
 import SwiftUI
 
@@ -19,9 +20,12 @@ struct MainWindow: View {
                              zoom: model.zoom[.grid] ?? AppModel.defaultZoom, preview: model.preview,
                              selection: model.selection, query: model.query)
             case .list:
-                BrowserPlaceholder()
+                FontListView(model: model, families: model.families, rowsVersion: model.rowsVersion,
+                             zoom: model.zoom[.list] ?? AppModel.defaultZoom, preview: model.preview,
+                             selection: model.selection, query: model.query)
             }
         }
+        .background(BrowserWindowReader(model: model))
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search fonts")
         .toolbar { BrowserToolbar(model: model) }
         .frame(minWidth: 820, minHeight: 480)
@@ -39,81 +43,26 @@ struct MainWindow: View {
     }
 }
 
-/// Stand-in for the list view (Task 12): a count and a plain list of the first matches.
-private struct BrowserPlaceholder: View {
-    @Environment(AppModel.self) private var model
-    private static let limit = 300
+/// Records the window it is placed in as the model's browser window.
+private struct BrowserWindowReader: NSViewRepresentable {
+    let model: AppModel
 
-    var body: some View {
-        @Bindable var model = model
-        VStack(alignment: .leading, spacing: 0) {
-            Text(summary)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-            Divider()
-            List(Array(model.faceIDs.prefix(Self.limit)), id: \.self, selection: $model.selection) { id in
-                if let row = model.row(id) {
-                    HStack {
-                        ActivationBadge(row: row, locked: model.isActivationLocked(row))
-                        Text(row.fullName)
-                        Spacer()
-                        Text(row.family).foregroundStyle(.secondary)
-                    }
-                    .contextMenu { FaceContextMenu(ids: contextIDs(for: id)) }
-                } else {
-                    Text("Font #\(id)").foregroundStyle(.secondary)
-                }
-            }
+    func makeNSView(context: Context) -> ReaderView {
+        let view = ReaderView()
+        view.onWindow = { [weak model] window in
+            if let window { model?.browserWindow = window }
         }
+        return view
     }
 
-    private var summary: String {
-        let n = model.faceIDs.count
-        let shown = n > Self.limit ? " (showing the first \(Self.limit))" : ""
-        return "\(n.formatted()) font\(n == 1 ? "" : "s")\(shown)"
-    }
+    func updateNSView(_ nsView: ReaderView, context: Context) {}
 
-    private func contextIDs(for id: Int64) -> [Int64] {
-        model.selection.contains(id) ? Array(model.selection) : [id]
-    }
-}
-
-private struct ActivationBadge: View {
-    let row: FaceRow
-    let locked: Bool
-
-    var body: some View {
-        Group {
-            if locked {
-                Image(systemName: "lock.fill").foregroundStyle(.secondary)
-            } else if !row.online {
-                Image(systemName: "circle.slash").foregroundStyle(.secondary)
-            } else {
-                switch row.activation {
-                case .on: Image(systemName: "circle.fill").foregroundStyle(.green)
-                case .temporary: Image(systemName: "circle.lefthalf.filled").foregroundStyle(.orange)
-                case .off: Image(systemName: "circle").foregroundStyle(.secondary)
-                }
-            }
+    final class ReaderView: NSView {
+        var onWindow: ((NSWindow?) -> Void)?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onWindow?(window)
         }
-        .imageScale(.small)
-        .frame(width: 16)
-    }
-}
-
-private struct FaceContextMenu: View {
-    @Environment(AppModel.self) private var model
-    let ids: [Int64]
-
-    var body: some View {
-        Button("Activate") { Task { await model.setActivation(ids, .on) } }
-        Button("Activate Temporarily") { Task { await model.setActivation(ids, .temporary) } }
-        Button("Deactivate") { Task { await model.setActivation(ids, .off) } }
-        Divider()
-        Button("Reveal in Finder") { model.revealInFinder(ids) }
-        Button("Copy Details") { model.copyDetails(ids) }
     }
 }
 
