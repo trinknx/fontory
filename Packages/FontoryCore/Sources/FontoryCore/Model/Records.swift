@@ -144,10 +144,13 @@ public struct FaceRow: Sendable, Identifiable, Hashable {
     /// nil when the file's location is offline.
     public var fileURL: URL?
     public var locationID: Int64
+    /// Bit i set when the face covers `ScriptCoverage.scripts[i]` (bit 0 is Latin).
+    public var scriptsBitmask: Int64
 
     public init(id: Int64, fileID: Int64, faceIndex: Int, postScriptName: String, family: String, style: String,
                 fullName: String, weight: Double, isVariable: Bool, format: String, vendor: String?, version: String?,
-                glyphCount: Int, activation: ActivationState, lastActivated: Date?, online: Bool, fileURL: URL?, locationID: Int64) {
+                glyphCount: Int, activation: ActivationState, lastActivated: Date?, online: Bool, fileURL: URL?, locationID: Int64,
+                scriptsBitmask: Int64 = 0) {
         self.id = id
         self.fileID = fileID
         self.faceIndex = faceIndex
@@ -166,6 +169,7 @@ public struct FaceRow: Sendable, Identifiable, Hashable {
         self.online = online
         self.fileURL = fileURL
         self.locationID = locationID
+        self.scriptsBitmask = scriptsBitmask
     }
 }
 

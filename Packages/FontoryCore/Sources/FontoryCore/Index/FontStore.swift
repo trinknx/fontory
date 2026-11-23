@@ -425,7 +425,8 @@ public final class FontStore: Sendable {
                 let s = try reader.prepare("""
                 SELECT faces.id, faces.file_id, faces.face_index, faces.postscript_name, \(LibraryQuery.effectiveFamily), faces.style,
                   faces.full_name, faces.weight, faces.is_variable, files.format, faces.vendor, faces.version, faces.glyph_count,
-                  faces.activation, faces.last_activated, locations.online, locations.last_known_path, files.relative_path, locations.id
+                  faces.activation, faces.last_activated, locations.online, locations.last_known_path, files.relative_path, locations.id,
+                  faces.scripts_bitmask
                 FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
                 WHERE faces.id IN (\(marks))
                 """)
@@ -446,7 +447,7 @@ public final class FontStore: Sendable {
                         vendor: s.isNull(10) ? nil : s.text(10), version: s.isNull(11) ? nil : s.text(11),
                         glyphCount: Int(s.int64(12)), activation: ActivationState(rawValue: Int(s.int64(13))) ?? .off,
                         lastActivated: s.isNull(14) ? nil : Date(timeIntervalSince1970: s.double(14)),
-                        online: online, fileURL: url, locationID: s.int64(18))
+                        online: online, fileURL: url, locationID: s.int64(18), scriptsBitmask: s.int64(19))
                     out[row.id] = row
                 }
             }

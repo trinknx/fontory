@@ -348,7 +348,7 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
 
     private func key(for row: FaceRow) -> PreviewPipeline.Key {
         var request = currentBaseRequest()
-        if preview.text.trimmingCharacters(in: .whitespaces).isEmpty { request.text = row.fullName }
+        request.text = preview.text(for: row)
         return PreviewPipeline.Key(faceID: row.id, request: request, autoSize: preview.autoSize)
     }
 

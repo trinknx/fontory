@@ -54,6 +54,17 @@ import Testing
         #expect(Set(r1) == Set(r2) && r1 != r2)
     }
 
+    @Test func rowsCarryScriptsBitmask() throws {
+        let f = try Fixture.make()
+        var face = Fixture.face("Cyr-Regular", family: "Cyr", style: "Regular", weight: 400)
+        face.scriptsBitmask = 1 << 3
+        _ = try f.store.insertFile(FileRecord(locationID: f.locA.id, relativePath: "Cyr.otf", size: 1, mtime: Date(), format: "otf", fingerprint: "c"),
+                                   faces: [face], importBatch: 9)
+        let rows = try f.store.rows(ids: try f.store.faceIDs(for: LibraryQuery()))
+        #expect(rows.values.first { $0.postScriptName == "Cyr-Regular" }?.scriptsBitmask == 1 << 3)
+        #expect(rows.values.first { $0.postScriptName == "Alpha-Regular" }?.scriptsBitmask == 0)
+    }
+
     @Test func familiesGroupsAndPicksRepresentative() throws {
         let f = try Fixture.make()
         let fams = try f.store.families(for: LibraryQuery())

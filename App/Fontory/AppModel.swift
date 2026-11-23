@@ -29,7 +29,9 @@ enum PreviewAlignment: String, CaseIterable, Sendable {
 }
 
 struct PreviewSettings: Equatable {
-    var text = "The quick brown fox jumps over the lazy dog"
+    static let defaultText = "The quick brown fox jumps over the lazy dog"
+
+    var text = PreviewSettings.defaultText
     /// nil: the size follows the zoom level.
     var pointSizeOverride: Double?
     var tracking: Double = 0
@@ -38,6 +40,16 @@ struct PreviewSettings: Equatable {
     var alignment: PreviewAlignment = .left
     var smoothing = true
     var autoSize = false
+
+    /// The text a face previews. Text the user typed always wins, for every face. Without it (the default sample, or
+    /// an empty field, which means "show names"), a face that does not cover Latin shows a phrase in a script it
+    /// covers, so it does not preview as missing glyphs; other faces show the default sample or their full name.
+    func text(for row: FaceRow) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return PreviewRenderer.sampleText(for: row.scriptsBitmask, fallback: row.fullName) }
+        if text == Self.defaultText { return PreviewRenderer.sampleText(for: row.scriptsBitmask, fallback: text) }
+        return text
+    }
 }
 
 struct AlertItem: Identifiable {
