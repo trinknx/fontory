@@ -235,6 +235,69 @@ public final class FontStore: Sendable {
         return out
     }
 
+    /// The given faces plus every other face stored in the same files (registration is per file).
+    public func faceIDs(inSameFilesAs ids: [Int64]) throws -> [Int64] {
+        let rowsByID = try rows(ids: ids)
+        var fileIDs: [Int64] = []
+        var seen = Set<Int64>()
+        for id in ids {
+            if let row = rowsByID[id], seen.insert(row.fileID).inserted { fileIDs.append(row.fileID) }
+        }
+        var out: [Int64] = []
+        out.reserveCapacity(fileIDs.count)
+        let s = try database.prepare("SELECT id FROM faces WHERE file_id = ? ORDER BY face_index")
+        defer { s.reset() }
+        for fileID in fileIDs {
+            s.reset()
+            try s.bind([.int(fileID)])
+            while try s.step() { out.append(s.int64(0)) }
+        }
+        return out
+    }
+
+    /// PostScript names of faces currently on or temporary.
+    public func activePostScriptNames() throws -> Set<String> {
+        let s = try database.prepare("SELECT DISTINCT postscript_name FROM faces WHERE activation != 0")
+        defer { s.reset() }
+        var out = Set<String>()
+        while try s.step() { out.insert(s.text(0)) }
+        return out
+    }
+
+    /// Files holding at least one face in `states`, optionally limited to some locations.
+    /// The URL is built from the location's last known path whether or not it is online.
+    public func activeFiles(states: [ActivationState], locationIDs: [Int64]? = nil) throws -> [ActiveFile] {
+        let sql = """
+        SELECT files.id, faces.id, faces.activation, locations.id, locations.online, locations.last_known_path, files.relative_path
+        FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
+        WHERE faces.activation != 0 ORDER BY files.id, faces.face_index
+        """
+        let s = try database.prepare(sql)
+        defer { s.reset() }
+        let wanted = Set(states)
+        let locs = locationIDs.map(Set.init)
+        var byFile: [Int64: ActiveFile] = [:]
+        var order: [Int64] = []
+        while try s.step() {
+            let loc = s.int64(3)
+            if let locs, !locs.contains(loc) { continue }
+            let fileID = s.int64(0)
+            let activation = ActivationState(rawValue: Int(s.int64(2))) ?? .off
+            if var f = byFile[fileID] {
+                f.faceIDs.append(s.int64(1)); f.states.insert(activation)
+                byFile[fileID] = f
+            } else {
+                let base = URL(fileURLWithPath: s.text(5))
+                let rel = s.text(6)
+                byFile[fileID] = ActiveFile(fileID: fileID, locationID: loc, online: s.int64(4) != 0,
+                                            url: rel.isEmpty ? base : base.appendingPathComponent(rel),
+                                            faceIDs: [s.int64(1)], states: [activation])
+                order.append(fileID)
+            }
+        }
+        return order.compactMap { byFile[$0] }.filter { !$0.states.isDisjoint(with: wanted) }
+    }
+
     private struct FamilyMember {
         var id: Int64
         var weight: Double, width: Double, slant: Double

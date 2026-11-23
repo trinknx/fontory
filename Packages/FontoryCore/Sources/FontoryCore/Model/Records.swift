@@ -1,7 +1,7 @@
 import Foundation
 
 public enum LocationKind: Int, Sendable { case folder = 0, fileSet = 1, system = 2 }
-public enum ActivationState: Int, Sendable { case off = 0, on = 1, temporary = 2 }
+public enum ActivationState: Int, Sendable, Hashable { case off = 0, on = 1, temporary = 2 }
 public enum OutlineType: String, Sendable { case truetype, cff, cff2, bitmap, unknown }
 
 public struct LocationRecord: Sendable, Identifiable, Hashable {
@@ -182,4 +182,14 @@ public struct FamilyGroup: Sendable, Identifiable, Hashable {
         self.faceIDs = faceIDs
         self.representativeID = representativeID
     }
+}
+
+/// A file with at least one face on or temporary, as seen by the activation service.
+public struct ActiveFile: Sendable, Hashable {
+    public var fileID: Int64
+    public var locationID: Int64
+    public var online: Bool
+    public var url: URL
+    public var faceIDs: [Int64]
+    public var states: Set<ActivationState>
 }
