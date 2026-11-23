@@ -39,7 +39,8 @@ extension LibraryQuery {
         case .all: break
         case .activated: clauses.append("faces.activation = 1")
         case .temporary: clauses.append("faces.activation = 2")
-        case .deactivated: clauses.append("faces.activation = 0")
+        // System fonts are always active (read-only), so they never count as deactivated.
+        case .deactivated: clauses.append("faces.activation = 0 AND locations.kind != 2")
         case .offline: clauses.append("locations.online = 0")
         case .recentImport: clauses.append("files.import_batch = (SELECT MAX(import_batch) FROM files)")
         case .location(let id, let subfolder):
@@ -74,8 +75,9 @@ extension LibraryQuery {
         case .lastActivated: order = "faces.last_activated IS NULL, faces.last_activated \(dir), faces.id \(dir)"
         case .random(let seed):
             // Reduce the seed first so id * seed stays well inside Int64.
-            let s = Int64(seed % Self.randomModulus)
-            order = "(faces.id * \(s)) % \(Self.randomModulus) \(dir), faces.id \(dir)"
+            // Bound, not interpolated, so every reshuffle reuses one cached statement.
+            order = "(faces.id * ?) % \(Self.randomModulus) \(dir), faces.id \(dir)"
+            bindings.append(.int(Int64(seed % Self.randomModulus)))
         }
 
         var sql = "SELECT \(columns) FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id"

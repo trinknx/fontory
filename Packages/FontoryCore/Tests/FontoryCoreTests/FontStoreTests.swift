@@ -34,6 +34,26 @@ import Testing
         #expect(try f.store.faceIDs(for: LibraryQuery(includeSystem: false)).count == 6)
     }
 
+    @Test func deactivatedScopeExcludesSystemFonts() throws {
+        let f = try Fixture.make()
+        let sys = try f.store.upsertLocation(kind: .system, volumeUUID: "SYS", relativePath: "", displayName: "System", lastKnownPath: "/System/Library/Fonts")
+        _ = try f.store.insertFile(FileRecord(locationID: sys.id, relativePath: "Sys.ttf", size: 1, mtime: Date(), format: "ttf", fingerprint: "s"),
+                                   faces: [Fixture.face("Sys", family: "Sys", style: "Regular", weight: 400)], importBatch: 9)
+        #expect(try f.store.faceIDs(for: LibraryQuery(scope: .deactivated)).count == 6)
+        #expect(try f.store.families(for: LibraryQuery(scope: .deactivated)).map(\.name) == ["Alpha", "Beta"])
+    }
+
+    @Test func randomSortBindsTheSeed() throws {
+        let a = LibraryQuery(sort: .random(seed: 42)).sql(columns: "faces.id")
+        let b = LibraryQuery(sort: .random(seed: 7_000_000)).sql(columns: "faces.id")
+        #expect(a.sql == b.sql)  // one cached statement for every reshuffle
+        #expect(a.bindings != b.bindings)
+        let f = try Fixture.make()
+        let r1 = try f.store.faceIDs(for: LibraryQuery(sort: .random(seed: 333_334)))
+        let r2 = try f.store.faceIDs(for: LibraryQuery(sort: .random(seed: 777_777)))
+        #expect(Set(r1) == Set(r2) && r1 != r2)
+    }
+
     @Test func familiesGroupsAndPicksRepresentative() throws {
         let f = try Fixture.make()
         let fams = try f.store.families(for: LibraryQuery())

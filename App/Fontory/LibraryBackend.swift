@@ -267,7 +267,8 @@ final class LibraryBackend: Sendable {
             switch g.activation {
             case .on: c.activated += g.count
             case .temporary: c.temporary += g.count
-            case .off: c.deactivated += g.count
+            // System fonts are always active and read-only: never "deactivated" (matches the .deactivated scope).
+            case .off: if g.kind != .system { c.deactivated += g.count }
             }
             if !g.online { c.offline += g.count }
             if g.inLatestImport { c.lastImport += g.count }
