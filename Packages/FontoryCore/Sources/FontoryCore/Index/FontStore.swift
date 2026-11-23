@@ -308,13 +308,13 @@ public final class FontStore: Sendable {
         }
     }
 
-    /// PostScript names of faces currently on or temporary.
-    public func activePostScriptNames() throws -> Set<String> {
+    /// For each PostScript name of a face currently on or temporary, the ids of the files holding such a face.
+    public func activeFileIDsByPostScriptName() throws -> [String: Set<Int64>] {
         try reader.withLock {
-            let s = try reader.prepare("SELECT DISTINCT postscript_name FROM faces WHERE activation != 0")
+            let s = try reader.prepare("SELECT DISTINCT postscript_name, file_id FROM faces WHERE activation != 0")
             defer { s.reset() }
-            var out = Set<String>()
-            while try s.step() { out.insert(s.text(0)) }
+            var out: [String: Set<Int64>] = [:]
+            while try s.step() { out[s.text(0), default: []].insert(s.int64(1)) }
             return out
         }
     }

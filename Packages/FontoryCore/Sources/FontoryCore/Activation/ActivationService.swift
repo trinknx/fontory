@@ -3,9 +3,34 @@ import Foundation
 public struct ActivationReport: Sendable {
     public var changedFaceIDs: [Int64] = []
     public var failures: [Int64: String] = [:]
-    /// faceID -> PostScript name already active elsewhere.
+    /// faceID -> PostScript name already active elsewhere (installed outside Fontory, active from another Fontory
+    /// file, or claimed by an earlier file of the same request). Collection siblings held back with a
+    /// conflicting face carry that face's name.
     public var conflicts: [Int64: String] = [:]
     public init() {}
+}
+
+/// Decides whether activating a file would put a second font with an already-active PostScript name on the system.
+/// A name is fine when nothing has it, or when it is active only from the same file. It conflicts when another
+/// Fontory file has it on or temporary, when an earlier file of the same batch claimed it, or when the system has it
+/// from outside Fontory.
+private struct ConflictCheck {
+    let system: Set<String>
+    var activeOwners: [String: Set<Int64>]
+
+    func conflicts(_ face: FaceRow, fileID: Int64) -> Bool {
+        let ps = face.postScriptName
+        if let owners = activeOwners[ps] { return owners != [fileID] }
+        return system.contains(ps)
+    }
+
+    func firstConflict(_ faces: [FaceRow], fileID: Int64) -> String? {
+        faces.first { conflicts($0, fileID: fileID) }?.postScriptName
+    }
+
+    mutating func claim(_ faces: [FaceRow], fileID: Int64) {
+        for f in faces { activeOwners[f.postScriptName, default: []].insert(fileID) }
+    }
 }
 
 public actor ActivationService {
@@ -38,21 +63,23 @@ public actor ActivationService {
 
             var targets: [(url: URL, faces: [FaceRow])] = []
             var offline: [FaceRow] = []
-            var systemNames: Set<String>?
-            var fontoryNames: Set<String> = []
+            var check: ConflictCheck?
             for fileID in order {
                 let faces = byFile[fileID]!
                 guard let url = faces[0].fileURL else { offline.append(contentsOf: faces); continue }
                 if state != .off, !force {
-                    if systemNames == nil {
-                        systemNames = registrar.availablePostScriptNames()
-                        fontoryNames = try store.activePostScriptNames()
+                    if check == nil {
+                        check = ConflictCheck(system: registrar.availablePostScriptNames(),
+                                              activeOwners: try store.activeFileIDsByPostScriptName())
                     }
-                    let clashing = faces.filter { systemNames!.contains($0.postScriptName) && !fontoryNames.contains($0.postScriptName) }
-                    if !clashing.isEmpty {
-                        for f in clashing { report.conflicts[f.id] = f.postScriptName }
+                    if let name = check!.firstConflict(faces, fileID: fileID) {
+                        // Registration is per file: every face of the file is held back, siblings included.
+                        for f in faces {
+                            report.conflicts[f.id] = check!.conflicts(f, fileID: fileID) ? f.postScriptName : name
+                        }
                         continue
                     }
+                    check!.claim(faces, fileID: fileID)
                 }
                 targets.append((url, faces))
             }

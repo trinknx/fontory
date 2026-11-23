@@ -656,12 +656,12 @@ final class AppModel {
         let conflicts = report.conflicts.sorted { $0.key < $1.key }
         if !conflicts.isEmpty {
             if !lines.isEmpty { lines.append("") }
-            lines.append("\(conflicts.count) font\(conflicts.count == 1 ? " has" : "s have") the same PostScript name as a font already installed:")
-            lines += conflicts.prefix(15).map { "• \($0.value)" }
+            lines.append("\(conflicts.count) font\(conflicts.count == 1 ? " shares" : "s share") a PostScript name with a font that is already installed or active:")
+            lines += conflicts.prefix(15).map { displayName($0.key) == $0.value ? "• \($0.value)" : "• \(displayName($0.key)) (\($0.value))" }
             if conflicts.count > 15 { lines.append("…and \(conflicts.count - 15) more") }
         }
         let title = context.map { "\($0): some fonts need attention" }
-            ?? (conflicts.isEmpty ? "Some fonts could not be changed" : "Some fonts conflict with installed fonts")
+            ?? (conflicts.isEmpty ? "Some fonts could not be changed" : "Some fonts conflict with active fonts")
         var item = AlertItem(title: title, message: lines.joined(separator: "\n"))
         if !conflicts.isEmpty {
             let ids = conflicts.map(\.key)

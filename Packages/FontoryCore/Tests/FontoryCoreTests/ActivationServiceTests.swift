@@ -98,7 +98,14 @@ final class FakeRegistrar: FontRegistrar, @unchecked Sendable {
         #expect(try f.store.rows(ids: [id])[id]?.activation == .on)
     }
 
-    @Test func fontoryOwnActiveFaceIsNotAConflict() async throws {
+    /// The id of the (first) face stored in the file at `path`.
+    func faceID(_ f: Fixture, file path: String) throws -> Int64 {
+        let fileID = try #require(f.fileIDs[path])
+        let rows = try f.store.rows(ids: try f.store.faceIDs(for: LibraryQuery()))
+        return try #require(rows.values.filter { $0.fileID == fileID }.min { $0.faceIndex < $1.faceIndex }?.id)
+    }
+
+    @Test func sameFileAlreadyActiveIsNotAConflict() async throws {
         let f = try Fixture.make()
         let fake = FakeRegistrar()
         let svc = service(f, fake)
@@ -108,6 +115,77 @@ final class FakeRegistrar: FontRegistrar, @unchecked Sendable {
         let report = await svc.set([id], to: .temporary)
         #expect(report.conflicts.isEmpty)
         #expect(try f.store.rows(ids: [id])[id]?.activation == .temporary)
+    }
+
+    @Test func secondFileWithSameNameAlreadyOnIsAConflict() async throws {
+        var f = try Fixture.make()
+        let batch = try f.store.nextImportBatch()
+        try f.add(f.locB.id, "Copy/Alpha-Regular.otf", [Fixture.face("Alpha-Regular", family: "Alpha", style: "Regular", weight: 400)], batch)
+        let a = try faceID(f, file: "Alpha-Regular.otf"), b = try faceID(f, file: "Copy/Alpha-Regular.otf")
+        let fake = FakeRegistrar()
+        let svc = service(f, fake)
+        _ = await svc.set([a], to: .on)
+        fake.available = ["Alpha-Regular"]
+        let report = await svc.set([b], to: .on)
+        #expect(report.conflicts == [b: "Alpha-Regular"])
+        #expect(fake.registerCalls.count == 1)
+        #expect(try f.store.rows(ids: [b])[b]?.activation == .off)
+    }
+
+    @Test func secondFileIsAConflictEvenWhenTheFirstIsNotVisibleToTheSystem() async throws {
+        var f = try Fixture.make()
+        let batch = try f.store.nextImportBatch()
+        try f.add(f.locB.id, "Copy/Alpha-Regular.otf", [Fixture.face("Alpha-Regular", family: "Alpha", style: "Regular", weight: 400)], batch)
+        let a = try faceID(f, file: "Alpha-Regular.otf"), b = try faceID(f, file: "Copy/Alpha-Regular.otf")
+        let fake = FakeRegistrar()
+        let svc = service(f, fake)
+        _ = await svc.set([a], to: .on)  // registrar reports nothing available: e.g. the first copy is offline
+        let report = await svc.set([b], to: .temporary)
+        #expect(report.conflicts == [b: "Alpha-Regular"])
+    }
+
+    @Test func twoSameNameFilesInOneBatchFirstWins() async throws {
+        var f = try Fixture.make()
+        let batch = try f.store.nextImportBatch()
+        try f.add(f.locB.id, "Copy/Alpha-Regular.otf", [Fixture.face("Alpha-Regular", family: "Alpha", style: "Regular", weight: 400)], batch)
+        let a = try faceID(f, file: "Alpha-Regular.otf"), b = try faceID(f, file: "Copy/Alpha-Regular.otf")
+        let fake = FakeRegistrar()
+        let report = await service(f, fake).set([a, b], to: .on)
+        #expect(report.conflicts == [b: "Alpha-Regular"])
+        #expect(report.changedFaceIDs == [a])
+        #expect(fake.registerCalls.count == 1)
+        #expect(fake.registerCalls[0].map(\.lastPathComponent) == ["Alpha-Regular.otf"])
+        #expect(fake.registerCalls[0][0].path.contains("Copy") == false)
+    }
+
+    @Test func forceRegistersBothSameNameFiles() async throws {
+        var f = try Fixture.make()
+        let batch = try f.store.nextImportBatch()
+        try f.add(f.locB.id, "Copy/Alpha-Regular.otf", [Fixture.face("Alpha-Regular", family: "Alpha", style: "Regular", weight: 400)], batch)
+        let a = try faceID(f, file: "Alpha-Regular.otf"), b = try faceID(f, file: "Copy/Alpha-Regular.otf")
+        let fake = FakeRegistrar()
+        let report = await service(f, fake).set([a, b], to: .on, force: true)
+        #expect(report.conflicts.isEmpty)
+        #expect(Set(report.changedFaceIDs) == [a, b])
+        #expect(fake.registerCalls.count == 1)
+        #expect(fake.registerCalls[0].count == 2)
+    }
+
+    @Test func collectionSiblingsSkippedByAConflictAreReported() async throws {
+        var f = try Fixture.make()
+        let batch = try f.store.nextImportBatch()
+        try f.add(f.locB.id, "Pair.ttc", [
+            Fixture.face("Alpha-Regular", family: "Alpha", style: "Regular", weight: 400, index: 0),
+            Fixture.face("Pair-Bold", family: "Pair", style: "Bold", weight: 700, index: 1),
+        ], batch)
+        let fileID = try #require(f.fileIDs["Pair.ttc"])
+        let rows = try f.store.rows(ids: try f.store.faceIDs(for: LibraryQuery())).values.filter { $0.fileID == fileID }
+        let clash = try #require(rows.first { $0.faceIndex == 0 }?.id), sibling = try #require(rows.first { $0.faceIndex == 1 }?.id)
+        let fake = FakeRegistrar()
+        fake.available = ["Alpha-Regular"]
+        let report = await service(f, fake).set([sibling], to: .on)
+        #expect(report.conflicts == [clash: "Alpha-Regular", sibling: "Alpha-Regular"])
+        #expect(fake.registerCalls.isEmpty)
     }
 
     @Test func alreadyRegisteredCountsAsSuccess() async throws {
