@@ -9,7 +9,15 @@ import SwiftUI
 final class SmartTagEditorState: Identifiable {
     struct Row: Identifiable, Hashable {
         let id = UUID()
-        var condition: SmartRule.Condition
+        /// Editing the row clears `changedFromUnsupported`.
+        var condition: SmartRule.Condition { didSet { changedFromUnsupported = false } }
+        /// The stored condition had an operator its field does not take and was reset; the row shows a warning.
+        var changedFromUnsupported = false
+
+        init(condition: SmartRule.Condition, changedFromUnsupported: Bool = false) {
+            self.condition = condition
+            self.changedFromUnsupported = changedFromUnsupported
+        }
     }
 
     /// The tag being edited; nil for a new smart tag.
@@ -35,14 +43,13 @@ final class SmartTagEditorState: Identifiable {
         match = rule.match
         inverted = rule.inverted
         // Rows the editor cannot show (an operator the field does not take) are reset to the field's first valid
-        // operator; such a condition matched nothing anyway.
+        // operator (such a condition matched nothing anyway) and marked, so Save is not a silent rewrite.
         rows = rule.conditions.map { cond in
             var cond = cond
-            if !SmartRuleSchema.ops(for: cond.field).contains(cond.op) {
-                cond.op = SmartRuleSchema.ops(for: cond.field)[0]
-                cond.value = SmartRuleSchema.defaultValue(for: cond.field, tags: [], locations: [])
-            }
-            return Row(condition: cond)
+            guard !SmartRuleSchema.ops(for: cond.field).contains(cond.op) else { return Row(condition: cond) }
+            cond.op = SmartRuleSchema.ops(for: cond.field)[0]
+            cond.value = SmartRuleSchema.defaultValue(for: cond.field, tags: [], locations: [])
+            return Row(condition: cond, changedFromUnsupported: true)
         }
     }
 
@@ -275,7 +282,9 @@ struct SmartTagEditor: View {
                         .frame(maxWidth: .infinity, minHeight: Self.rowHeight)
                 }
                 ForEach($editor.rows) { $row in
-                    ConditionRow(condition: $row.condition, model: model) { editor.removeRow(row.id) }
+                    ConditionRow(condition: $row.condition, changedFromUnsupported: row.changedFromUnsupported, model: model) {
+                        editor.removeRow(row.id)
+                    }
                         .frame(height: Self.rowHeight)
                 }
             }
@@ -290,11 +299,18 @@ struct SmartTagEditor: View {
 /// field – operator – value – "−".
 private struct ConditionRow: View {
     @Binding var condition: SmartRule.Condition
+    let changedFromUnsupported: Bool
     let model: AppModel
     let remove: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
+            if changedFromUnsupported {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.yellow)
+                    .help("Changed from an unsupported operator")
+                    .accessibilityLabel("Changed from an unsupported operator")
+            }
             Picker("Field", selection: fieldBinding) {
                 ForEach(SmartRuleSchema.fieldOrder, id: \.self) { Text(SmartRuleSchema.title($0)).tag($0) }
             }

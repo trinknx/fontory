@@ -740,6 +740,36 @@ enum OrganizationSmoke {
             model.cancelSmartTagEditor()
         }
 
+        // An unreadable stored rule: Edit… asks first and leaves rule_json alone; Replace opens an empty editor.
+        let unreadable = #"{"conditions":[{"field":"fromTheFuture","op":"is","value":"x"}],"match":"all"}"#
+        if let futureID = await model.createTag(name: "Future", parentID: nil, kind: .smart, ruleJSON: unreadable) {
+            model.alert = nil
+            model.editSmartTag(futureID)
+            let stored = (try? store.tags())?.first { $0.id == futureID }?.ruleJSON
+            check(model.smartTagEditor == nil && model.alert?.actionTitle == "Replace Rule…" && model.alert?.isDestructive == true
+                  && stored == unreadable, "unreadable rule: Edit… shows the alert, rule_json unchanged")
+            model.alert?.action?()
+            model.alert = nil
+            check(model.smartTagEditor?.tagID == futureID && model.smartTagEditor?.rows.isEmpty == true,
+                  "unreadable rule: Replace Rule… opens an empty editor")
+            model.cancelSmartTagEditor()
+            let afterCancel = (try? store.tags())?.first { $0.id == futureID }?.ruleJSON
+            check(afterCancel == unreadable, "unreadable rule: Cancel after Replace keeps rule_json")
+            await model.deleteTag(futureID)
+        } else {
+            check(false, "create Future", model.alert?.message ?? "")
+        }
+
+        // A condition whose operator its field does not take is reset and marked.
+        var odd = SmartRule()
+        odd.conditions = [SmartRule.Condition(field: .weight, op: .contains, value: .text("x")),
+                          SmartRule.Condition(field: .name, op: .contains, value: .text("a"))]
+        let oddState = SmartTagEditorState(tagID: nil, name: "odd", rule: odd)
+        check(oddState.rows.map(\.changedFromUnsupported) == [true, false] && oddState.rows[0].condition.op == .between,
+              "unsupported operator: row reset and marked")
+        oddState.rows[0].condition.value = .range(400, 700)
+        check(!oddState.rows[0].changedFromUnsupported, "editing the marked row clears the mark")
+
         // Weight/width stops map to stored units and round-trip through the saved JSON.
         let weights = SmartRuleSchema.weightStops.map(\.value)
         let widths = SmartRuleSchema.widthStops.map(\.value)

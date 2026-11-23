@@ -234,10 +234,29 @@ extension AppModel {
     }
 
     /// Edit…: opens the editor on an existing smart tag.
+    /// A stored rule this version cannot read (malformed, or an unknown field/operator from a newer version) is
+    /// never opened as an empty rule: an alert asks first, and only "Replace Rule…" opens the editor empty.
     func editSmartTag(_ id: Int64) {
         guard let record = tag(id), record.kind == .smart else { return }
-        let rule = SmartRule.decode(record.ruleJSON ?? "") ?? SmartRule()
-        smartTagEditor = SmartTagEditorState(tagID: id, name: record.name, rule: rule)
+        let json = record.ruleJSON ?? ""
+        if json.isEmpty {
+            smartTagEditor = SmartTagEditorState(tagID: id, name: record.name, rule: SmartRule())
+        } else if let rule = SmartRule.decode(json) {
+            smartTagEditor = SmartTagEditorState(tagID: id, name: record.name, rule: rule)
+        } else {
+            var item = AlertItem(title: "This smart tag’s rule can’t be read by this version of Fontory.",
+                                 message: "It may have been made by a newer version. Replacing it discards the stored rule when you save.")
+            item.actionTitle = "Replace Rule…"
+            item.isDestructive = true
+            item.action = { [weak self] in self?.replaceUnreadableSmartRule(id) }
+            alert = item
+        }
+    }
+
+    /// "Replace Rule…": the editor on an empty rule for a smart tag whose stored rule cannot be read.
+    func replaceUnreadableSmartRule(_ id: Int64) {
+        guard let record = tag(id), record.kind == .smart else { return }
+        smartTagEditor = SmartTagEditorState(tagID: id, name: record.name, rule: SmartRule())
     }
 
     /// Cancel: drops the draft.
