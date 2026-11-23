@@ -463,6 +463,77 @@ public final class FontStore: Sendable {
         }
     }
 
+    /// The family named `family` (the effective family, compared case-insensitively): its faces in family order
+    /// (weight, width, slant) and its representative, chosen as in `families(for:)`. Private system faces are left
+    /// out, like everywhere else; system faces too unless `includeSystem`. Nil when no face matches.
+    public func family(named family: String, includeSystem: Bool) throws -> FamilyGroup? {
+        try reader.withLock {
+            let s = try reader.prepare("""
+            SELECT faces.id, \(LibraryQuery.effectiveFamily), faces.weight, faces.width, faces.slant, faces.is_italic
+            FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
+            WHERE \(LibraryQuery.effectiveFamily) = ?1 COLLATE NOCASE AND \(LibraryQuery.publicFaceClause)
+              AND (?2 != 0 OR locations.kind != 2)
+            ORDER BY faces.weight, faces.width, faces.slant, faces.id
+            """)
+            defer { s.reset() }
+            try s.bind([.text(family), .int(includeSystem ? 1 : 0)])
+            var members: [FamilyMember] = []
+            var name: String?
+            while try s.step() {
+                if name == nil { name = s.text(1) }
+                members.append(FamilyMember(id: s.int64(0), weight: s.double(2), width: s.double(3), slant: s.double(4),
+                                            isItalic: s.int64(5) != 0, order: members.count))
+            }
+            guard let name, let best = members.min(by: { Self.score($0) < Self.score($1) }) else { return nil }
+            let key = name.lowercased()
+            let p = try reader.prepare("SELECT representative_face_id FROM family_prefs WHERE family_key = ? AND representative_face_id IS NOT NULL")
+            defer { p.reset() }
+            try p.bind([.text(key)])
+            let ids = members.map(\.id)
+            var rep = best.id
+            if try p.step(), ids.contains(p.int64(0)) { rep = p.int64(0) }
+            return FamilyGroup(id: key, name: name, faceIDs: ids, representativeID: rep)
+        }
+    }
+
+    /// Every indexed column of one face, for the Info tab. Nil when the face no longer exists.
+    public func faceInfo(id: Int64) throws -> FaceInfo? {
+        try reader.withLock {
+            let s = try reader.prepare("""
+            SELECT faces.id, faces.face_index, faces.postscript_name, faces.full_name, \(LibraryQuery.effectiveFamily), faces.family,
+              faces.style, faces.version, faces.vendor, faces.designer, files.format, locations.last_known_path, files.relative_path,
+              locations.online, files.size, files.added_at, faces.glyph_count, faces.weight, faces.width, faces.slant, faces.is_italic,
+              faces.units_per_em, faces.ascender, faces.descender, faces.cap_height, faces.x_height, faces.fs_type, faces.outline_type,
+              faces.is_color, faces.is_bitmap, faces.is_variable, faces.axes_json, faces.has_gsub, faces.has_gpos, faces.note,
+              faces.activation, faces.last_activated, locations.kind
+            FROM faces JOIN files ON files.id = faces.file_id JOIN locations ON locations.id = files.location_id
+            WHERE faces.id = ?
+            """)
+            defer { s.reset() }
+            try s.bind([.int(id)])
+            guard try s.step() else { return nil }
+            func optText(_ col: Int32) -> String? { s.isNull(col) ? nil : s.text(col) }
+            func optDate(_ col: Int32) -> Date? { s.isNull(col) ? nil : Date(timeIntervalSince1970: s.double(col)) }
+            let base = URL(fileURLWithPath: s.text(11))
+            let rel = s.text(12)
+            return FaceInfo(
+                id: s.int64(0), faceIndex: Int(s.int64(1)), postScriptName: s.text(2), fullName: s.text(3),
+                family: s.text(4), fontFamily: s.text(5), style: s.text(6),
+                version: optText(7), vendor: optText(8), designer: optText(9), format: s.text(10),
+                fileURL: rel.isEmpty ? base : base.appendingPathComponent(rel), online: s.int64(13) != 0,
+                fileSize: s.int64(14), addedAt: optDate(15), glyphCount: Int(s.int64(16)),
+                weight: s.double(17), width: s.double(18), slant: s.double(19), isItalic: s.int64(20) != 0,
+                metrics: FaceMetrics(unitsPerEm: Int(s.int64(21)), ascender: s.double(22), descender: s.double(23),
+                                     capHeight: s.double(24), xHeight: s.double(25)),
+                fsType: s.isNull(26) ? nil : Int(s.int64(26)),
+                outlineType: OutlineType(rawValue: s.text(27)) ?? .unknown,
+                isColor: s.int64(28) != 0, isBitmap: s.int64(29) != 0, isVariable: s.int64(30) != 0,
+                axes: VariationAxis.decode(json: optText(31)), hasGSUB: s.int64(32) != 0, hasGPOS: s.int64(33) != 0,
+                note: optText(34), activation: ActivationState(rawValue: Int(s.int64(35))) ?? .off,
+                lastActivated: optDate(36), locationKind: LocationKind(rawValue: Int(s.int64(37))) ?? .folder)
+        }
+    }
+
     // MARK: Mutations
 
     /// Activating also clears the file's external flag: a file Fontory registered is Fontory's own.
