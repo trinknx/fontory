@@ -1971,6 +1971,9 @@ enum OrganizationSmoke {
             try fm.createDirectory(at: fonts, withIntermediateDirectories: true)
             try fm.copyItem(at: URL(fileURLWithPath: "/System/Library/Fonts/Supplemental/Georgia Italic.ttf"),
                             to: fonts.appendingPathComponent("Georgia Italic.ttf"))
+            // Latin-only (no Vietnamese stacked marks such as ế, ệ): for the missing-characters note.
+            try fm.copyItem(at: URL(fileURLWithPath: "/System/Library/Fonts/Supplemental/Hoefler Text.ttc"),
+                            to: fonts.appendingPathComponent("Hoefler Text.ttc"))
             backend = try LibraryBackend(databaseURL: root.appendingPathComponent("library.sqlite"), registrar: SmokeRegistrar())
         } catch {
             check(false, "layouts: setup", "\(error)"); return
@@ -2069,6 +2072,8 @@ enum OrganizationSmoke {
         layouts.zoomToFit()
         check(layouts.zoomsToFit && layouts.effectiveZoom == layouts.fitZoom, "layouts: zoom to fit")
 
+        await layoutEditingSteps(layouts, store: backend.store)
+
         // Rename, duplicate.
         await layouts.rename(url, to: "Renamed")
         let renamed = layouts.layoutsDirectory.appendingPathComponent("Renamed.json")
@@ -2108,6 +2113,134 @@ enum OrganizationSmoke {
         check(realDates() == realBefore, "layouts: the real Layouts and Templates folders are untouched", "\(realBefore) → \(realDates())")
         check(standardSnapshot() == standardBefore, "layouts: nothing written to the user's defaults")
         check(recycled.allSatisfy { $0.path.hasPrefix(root.path) }, "layouts: only temp files were recycled")
+    }
+
+    // MARK: Wave 3C task 6: block editing and inspector
+
+    /// Block editing at the model level (what the canvas and inspector call): select, move and resize as one undo
+    /// step each, text, size/tracking/line height/alignment/colour/sizes, font and style, delete and add, and the
+    /// "N characters missing" note for a Latin-only font with Vietnamese text.
+    private static func layoutEditingSteps(_ layouts: LayoutsModel, store: FontStore) async {
+        guard let doc = layouts.current, let block = doc.blocks.first else { check(false, "editing: a layout is open"); return }
+        let id = block.id
+        let start = block.frame
+        func current() -> LayoutBlock? { layouts.current?.blocks.first { $0.id == id } }
+
+        // Select by page point (the canvas converts its view point first).
+        let inside = CGPoint(x: start.x + start.w / 2, y: start.y + start.h / 2)
+        layouts.select(layouts.blockID(atPage: inside))
+        check(layouts.selectedBlockID == id && layouts.selectedBlock?.id == id, "editing: clicking a block selects it")
+        layouts.select(layouts.blockID(atPage: CGPoint(x: -50, y: -50)))
+        check(layouts.selectedBlockID == nil, "editing: clicking outside every block clears the selection")
+        layouts.select(id)
+
+        // Move: live intermediate frames, one undo step at mouse-up.
+        layouts.beginLiveEdit()
+        layouts.moveBlock(id, from: start, by: CGSize(width: 10, height: 10))
+        check(current()?.frame.x == start.x + 10, "editing: dragging moves the block live")
+        layouts.moveBlock(id, from: start, by: CGSize(width: 40, height: 25))
+        layouts.endLiveEdit()
+        check(current()?.frame == LayoutFrame(x: start.x + 40, y: start.y + 25, w: start.w, h: start.h),
+              "editing: the drag ends at the last position", "\(String(describing: current()?.frame))")
+        layouts.undo()
+        check(current()?.frame == start, "editing: one undo reverts the whole drag", "\(String(describing: current()?.frame))")
+        layouts.redo()
+        check(current()?.frame.x == start.x + 40, "editing: redo repeats the drag")
+        layouts.undo()
+
+        // Resize by a corner, never below 20 × 20.
+        layouts.beginLiveEdit()
+        layouts.resizeBlock(id, from: start, corner: .bottomRight, by: CGSize(width: -5000, height: -5000))
+        layouts.endLiveEdit()
+        check(current()?.frame == LayoutFrame(x: start.x, y: start.y, w: 20, h: 20),
+              "editing: resizing stops at 20 × 20", "\(String(describing: current()?.frame))")
+        layouts.undo()
+        layouts.beginLiveEdit()
+        layouts.resizeBlock(id, from: start, corner: .topLeft, by: CGSize(width: -10, height: -20))
+        layouts.endLiveEdit()
+        check(current()?.frame == LayoutFrame(x: start.x - 10, y: start.y - 20, w: start.w + 10, h: start.h + 20),
+              "editing: the top-left handle keeps the opposite corner", "\(String(describing: current()?.frame))")
+        layouts.undo()
+        check(current()?.frame == start, "editing: resize undoes")
+        layouts.beginLiveEdit()
+        layouts.endLiveEdit()
+        check(current()?.frame == start && layouts.canRedo, "editing: a click without a drag is no undo step")
+
+        // Text and the typographic fields.
+        layouts.setText("Edited in place", for: id)
+        check(current()?.text == "Edited in place", "editing: the in-place editor's text is applied")
+        layouts.undo()
+        check(current()?.text == block.text, "editing: text undoes")
+        let fields: [(String, () -> Void, (LayoutBlock) -> Bool)] = [
+            ("size", { layouts.setSize(61) }, { $0.size == 61 }),
+            ("tracking", { layouts.setTracking(-25) }, { $0.tracking == -25 }),
+            ("line height", { layouts.setLineHeight(1.5) }, { $0.lineHeight == 1.5 }),
+            ("alignment", { layouts.setAlignment(block.alignment == .right ? .center : .right) }, { $0.alignment != block.alignment }),
+            ("colour", { layouts.setColor("#FF0000") }, { $0.color == "#FF0000" }),
+        ]
+        for (name, set, holds) in fields {
+            set()
+            check(current().map(holds) == true, "editing: setting \(name) applies")
+            layouts.undo()
+            check(current() == block, "editing: \(name) undoes")
+        }
+        layouts.setSize(-4)
+        check(current()?.size == LayoutsModel.sizeRange.lowerBound, "editing: size is clamped", "\(String(describing: current()?.size))")
+        layouts.undo()
+        check(LayoutsModel.parseSizes("12, 16,24 ,  36.5") == [12, 16, 24, 36.5] && LayoutsModel.parseSizes("12, big") == nil
+              && LayoutsModel.parseSizes(" ") == nil, "editing: waterfall sizes parse from a comma-separated field")
+        check(layouts.setSizes("10, 20") && current()?.sizes == [10, 20], "editing: waterfall sizes apply")
+        layouts.undo()
+        check(!layouts.setSizes("x") && current() == block, "editing: bad waterfall sizes are refused")
+        let showMissing = layouts.current?.showMissing
+        layouts.setShowMissing(!(showMissing ?? true))
+        check(layouts.current?.showMissing == !(showMissing ?? true), "editing: Show Missing Characters toggles")
+        layouts.undo()
+        check(layouts.current?.showMissing == showMissing, "editing: Show Missing Characters undoes")
+
+        // Delete and add.
+        let count = layouts.current?.blocks.count ?? 0
+        layouts.deleteSelectedBlock()
+        check(layouts.current?.blocks.count == count - 1 && current() == nil && layouts.selectedBlockID == nil,
+              "editing: ⌫ deletes the selected block")
+        layouts.undo()
+        check(layouts.current?.blocks.count == count && current() == block, "editing: delete undoes")
+        layouts.addTextBlock()
+        let page = layouts.current?.pageSize ?? LayoutSize(w: 0, h: 0)
+        let added = layouts.selectedBlock
+        check(layouts.current?.blocks.count == count + 1 && added?.kind == .text
+              && added?.frame == LayoutFrame(x: (page.w - 300) / 2, y: (page.h - 100) / 2, w: 300, h: 100),
+              "editing: + Text Block adds a selected 300 × 100 block at the page centre", "\(String(describing: added?.frame))")
+        layouts.undo()
+        check(layouts.current?.blocks.count == count && layouts.selectedBlockID == nil, "editing: adding undoes")
+
+        // Fonts: Choose Font… search, the style menu, and the missing-characters note.
+        layouts.addTextBlock()
+        guard let newID = layouts.selectedBlockID else { check(false, "editing: the new block is selected"); return }
+        let found = await layouts.searchFamilies("hoefler")
+        check(found.map(\.name).contains("Hoefler Text"), "editing: Choose Font… finds a family by name", "\(found.map(\.name))")
+        guard let hoefler = found.first(where: { $0.name == "Hoefler Text" }) else { return }
+        await layouts.chooseFamily(hoefler)
+        let representative = try? store.reference(forFace: hoefler.representativeID)
+        check(layouts.selectedBlock?.font == representative, "editing: choosing a family sets its representative",
+              "\(String(describing: layouts.selectedBlock?.font)) vs \(String(describing: representative))")
+        let styles = await layouts.styles(for: layouts.selectedBlock?.font)
+        check(styles.count > 1 && styles.allSatisfy { $0.reference.family == "Hoefler Text" },
+              "editing: the style menu lists the family's styles", "\(styles.map(\.name))")
+        if let other = styles.first(where: { $0.reference != representative }) {
+            layouts.setFont(other.reference)
+            check(layouts.selectedBlock?.font == other.reference, "editing: choosing a style applies it")
+            layouts.undo()
+            check(layouts.selectedBlock?.font == representative, "editing: a style change undoes")
+        }
+        layouts.setText("Tiếng Việt", for: newID)
+        let noted = await eventually(within: .seconds(3)) { layouts.missingCharacters(in: newID) == 2 }
+        check(noted && !layouts.isFontMissing(newID),
+              "editing: a Latin-only font with Vietnamese text notes 2 characters missing",
+              "\(layouts.missingCharacters(in: newID)) / \(layouts.report)")
+        layouts.select(newID)
+        layouts.deleteSelectedBlock()
+        check(layouts.current?.blocks.count == count, "editing: the test block is removed")
     }
 
     /// Polls (on the main actor) until `condition` holds or `budget` passes.

@@ -26,7 +26,7 @@ struct LayoutCanvasView: NSViewRepresentable {
             // Reported after the layout pass, never while SwiftUI updates the view.
             DispatchQueue.main.async { MainActor.assumeIsolated { model?.canvasDidLayout(fitZoom: fit, backingScale: backing) } }
         }
-        page.onSelect = { [weak model] id in model?.selectedBlockID = id }
+        page.model = model
         return scroll
     }
 
@@ -79,16 +79,58 @@ struct LayoutCanvasView: NSViewRepresentable {
     }
 }
 
-/// Draws the page bitmap centred at `zoom`, then the overlay. Flipped, so page and view y both grow downwards.
+/// Page points (origin top-left) ↔ page-view points (flipped) at the canvas zoom: the one mapping used for
+/// drawing the overlay, hit-testing, dragging, the handles and placing the in-place editor.
+struct PageTransform {
+    /// Where the page's top-left corner sits in the view.
+    var origin: CGPoint
+    /// View points per page point.
+    var zoom: CGFloat
+
+    func viewRect(_ frame: LayoutFrame) -> CGRect {
+        CGRect(x: origin.x + frame.x * zoom, y: origin.y + frame.y * zoom, width: frame.w * zoom, height: frame.h * zoom)
+    }
+
+    func pagePoint(_ point: CGPoint) -> CGPoint {
+        CGPoint(x: (point.x - origin.x) / zoom, y: (point.y - origin.y) / zoom)
+    }
+
+    /// A view-point distance in whole page points.
+    func pageDelta(_ delta: CGSize) -> CGSize {
+        CGSize(width: (delta.width / zoom).rounded(), height: (delta.height / zoom).rounded())
+    }
+}
+
+/// Draws the page bitmap centred at `zoom`, then the overlay (selection, corner handles, "Missing font" badges).
+/// Flipped, so page and view y both grow downwards. Click selects, dragging the body moves, a corner handle resizes,
+/// double-click edits the text in place, ⌫ deletes the selected block.
 final class LayoutPageView: NSView {
+    static let handleSize: CGFloat = 8
+    /// How far a mouse-down may wander before it counts as a drag.
+    static let dragThreshold: CGFloat = 3
+
+    weak var model: LayoutsModel?
     private var image: NSImage?
     private var document: LayoutDocument?
     private var zoom: CGFloat = 1
     private var selection: UUID?
     private var missingFontBlocks: Set<String> = []
-    var onSelect: ((UUID?) -> Void)?
+    private var currentCGImage: CGImage?
+    private var editor: BlockTextEditor?
+
+    private enum DragMode { case move, resize(LayoutsModel.Corner) }
+    private struct Drag {
+        var id: UUID
+        var mode: DragMode
+        var start: LayoutFrame
+        var startPoint: CGPoint
+        var began = false
+    }
+    private var drag: Drag?
 
     override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     /// The page at the current zoom, in view points.
     var pageViewSize: CGSize {
@@ -103,6 +145,8 @@ final class LayoutPageView: NSView {
                       width: size.width, height: size.height)
     }
 
+    var transform: PageTransform { PageTransform(origin: pageRect.origin, zoom: zoom) }
+
     func update(image cgImage: CGImage?, document: LayoutDocument?, zoom: CGFloat, selection: UUID?, missingFontBlocks: Set<String>) {
         if cgImage !== currentCGImage {
             currentCGImage = cgImage
@@ -112,37 +156,137 @@ final class LayoutPageView: NSView {
         self.zoom = zoom
         self.selection = selection
         self.missingFontBlocks = missingFontBlocks
+        positionEditor()
         needsDisplay = true
     }
 
-    private var currentCGImage: CGImage?
-
-    // MARK: Geometry (hit-testing hooks)
-
-    /// A block's frame in view coordinates.
-    func viewRect(of block: LayoutBlock) -> CGRect {
-        let page = pageRect
-        return CGRect(x: page.minX + block.frame.x * zoom, y: page.minY + block.frame.y * zoom,
-                      width: block.frame.w * zoom, height: block.frame.h * zoom)
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        positionEditor()
     }
 
-    /// A view point in page points (origin top-left).
-    func pagePoint(_ point: CGPoint) -> CGPoint {
-        let page = pageRect
-        return CGPoint(x: (point.x - page.minX) / zoom, y: (point.y - page.minY) / zoom)
+    private func block(_ id: UUID?) -> LayoutBlock? {
+        guard let id else { return nil }
+        return document?.blocks.first { $0.id == id }
     }
 
-    /// The topmost block under a view point.
-    func block(at point: CGPoint) -> LayoutBlock? {
-        guard let doc = document else { return nil }
-        let p = pagePoint(point)
-        return doc.blocks.last { b in
-            CGRect(x: b.frame.x, y: b.frame.y, width: b.frame.w, height: b.frame.h).contains(p)
+    // MARK: Hit-testing
+
+    /// The selected block's corner handles, in view points.
+    private func handleRects(for block: LayoutBlock) -> [(LayoutsModel.Corner, CGRect)] {
+        let r = transform.viewRect(block.frame)
+        let s = Self.handleSize
+        func square(_ x: CGFloat, _ y: CGFloat) -> CGRect { CGRect(x: x - s / 2, y: y - s / 2, width: s, height: s) }
+        return [(.topLeft, square(r.minX, r.minY)), (.topRight, square(r.maxX, r.minY)),
+                (.bottomLeft, square(r.minX, r.maxY)), (.bottomRight, square(r.maxX, r.maxY))]
+    }
+
+    private func corner(at point: CGPoint) -> LayoutsModel.Corner? {
+        guard editor == nil, let selected = block(selection) else { return nil }
+        // A little larger than drawn, so the handle is easy to grab.
+        return handleRects(for: selected).first { $0.1.insetBy(dx: -3, dy: -3).contains(point) }?.0
+    }
+
+    // MARK: Mouse
+
+    override func mouseDown(with event: NSEvent) {
+        // A click outside the in-place editor ends editing (clicks inside go to the editor itself).
+        endEditing(refocus: false)
+        window?.makeFirstResponder(self)
+        guard let model else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        if let corner = corner(at: point), let selected = block(selection) {
+            drag = Drag(id: selected.id, mode: .resize(corner), start: selected.frame, startPoint: point)
+            return
+        }
+        let id = model.blockID(atPage: transform.pagePoint(point))
+        model.select(id)
+        selection = id
+        needsDisplay = true
+        guard let id, let hit = block(id) else { return }
+        if event.clickCount >= 2 {
+            beginEditing(hit)
+            return
+        }
+        drag = Drag(id: id, mode: .move, start: hit.frame, startPoint: point)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard var current = drag, let model else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let viewDelta = CGSize(width: point.x - current.startPoint.x, height: point.y - current.startPoint.y)
+        if !current.began {
+            guard hypot(viewDelta.width, viewDelta.height) >= Self.dragThreshold else { return }
+            model.beginLiveEdit()
+            current.began = true
+            drag = current
+        }
+        let delta = transform.pageDelta(viewDelta)
+        switch current.mode {
+        case .move: model.moveBlock(current.id, from: current.start, by: delta)
+        case .resize(let corner): model.resizeBlock(current.id, from: current.start, corner: corner, by: delta)
         }
     }
 
-    override func mouseDown(with event: NSEvent) {
-        onSelect?(block(at: convert(event.locationInWindow, from: nil))?.id)
+    override func mouseUp(with event: NSEvent) {
+        if drag?.began == true { model?.endLiveEdit() }
+        drag = nil
+    }
+
+    // MARK: Keys
+
+    override func keyDown(with event: NSEvent) {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.function, .numericPad])
+        // ⌫ and ⌦ delete the selected block.
+        if mods.isEmpty, event.keyCode == 51 || event.keyCode == 117, let model, model.selectedBlockID != nil {
+            model.deleteSelectedBlock()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    // MARK: In-place editor
+
+    private func beginEditing(_ block: LayoutBlock) {
+        guard let model, let doc = document else { return }
+        endEditing(refocus: false)
+        let editor = BlockTextEditor(block: block, document: doc, zoom: zoom, frame: transform.viewRect(block.frame))
+        editor.onEnd = { [weak self, weak editor] text, refocus in
+            guard let self, let editor else { return }
+            self.model?.setText(text, for: editor.blockID)
+            if self.editor === editor { self.editor = nil }
+            self.needsDisplay = true
+            // Removed after the current event: this may run inside the editor's resignFirstResponder.
+            DispatchQueue.main.async { [weak self, weak editor] in
+                editor?.removeFromSuperview()
+                if refocus, let self { self.window?.makeFirstResponder(self) }
+            }
+        }
+        self.editor = editor
+        addSubview(editor)
+        window?.makeFirstResponder(editor)
+        editor.selectAll(nil)
+        needsDisplay = true
+        let size = max(1, block.size * zoom)
+        Task { @MainActor [weak editor] in
+            guard let font = await model.editorFont(for: block, size: size), let editor, editor.superview != nil else { return }
+            editor.applyStyle(font: font)
+        }
+    }
+
+    private func endEditing(refocus: Bool) {
+        editor?.finish(refocus: refocus)
+    }
+
+    /// Keeps the editor over its block (zoom, resize); ends editing if the block is gone.
+    private func positionEditor() {
+        guard let editor else { return }
+        guard let edited = block(editor.blockID) else {
+            endEditing(refocus: false)
+            return
+        }
+        let rect = transform.viewRect(edited.frame)
+        if editor.frame != rect { editor.frame = rect }
     }
 
     // MARK: Drawing
@@ -168,20 +312,30 @@ final class LayoutPageView: NSView {
         drawOverlay(doc)
     }
 
-    /// Selection and badges, in view points (independent of the page bitmap).
+    /// Selection, handles and badges, in view points (independent of the page bitmap).
     private func drawOverlay(_ doc: LayoutDocument) {
+        let transform = transform
         for block in doc.blocks {
-            let rect = viewRect(of: block)
+            let rect = transform.viewRect(block.frame)
             if missingFontBlocks.contains(block.id.uuidString) { drawMissingBadge(at: rect) }
             if block.id == selection {
                 NSColor.controlAccentColor.setStroke()
                 let path = NSBezierPath(rect: rect.insetBy(dx: -0.5, dy: -0.5))
                 path.lineWidth = 1.5
                 path.stroke()
+                if editor == nil {
+                    for (_, handle) in handleRects(for: block) {
+                        NSColor.white.setFill()
+                        handle.fill()
+                        NSColor.controlAccentColor.setStroke()
+                        let border = NSBezierPath(rect: handle.insetBy(dx: 0.5, dy: 0.5))
+                        border.lineWidth = 1
+                        border.stroke()
+                    }
+                }
             }
         }
     }
-
     private func drawMissingBadge(at rect: CGRect) {
         let text = NSAttributedString(string: "Missing font", attributes: [
             .font: NSFont.systemFont(ofSize: 10, weight: .semibold),

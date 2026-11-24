@@ -16,13 +16,16 @@ struct LayoutsWindow: View {
         } detail: {
             LayoutDetail(layouts: layouts)
                 .inspector(isPresented: $showsInspector) {
-                    LayoutInspectorPlaceholder(layouts: layouts)
+                    LayoutInspector(layouts: layouts)
                         .inspectorColumnWidth(min: 220, ideal: 260, max: 360)
                 }
         }
         .navigationTitle(layouts.currentURL?.deletingPathExtension().lastPathComponent ?? "Layouts")
         .toolbar {
             ToolbarItemGroup {
+                Button { layouts.addTextBlock() } label: { Label("Text Block", systemImage: "plus.square") }
+                    .help("Add a text block at the centre of the page")
+                    .disabled(layouts.current == nil)
                 Button { layouts.zoomOut() } label: { Image(systemName: "minus.magnifyingglass") }
                     .help("Zoom Out")
                     .disabled(layouts.current == nil)
@@ -144,35 +147,6 @@ private struct LayoutDetail: View {
             ContentUnavailableView("No Layout Open", systemImage: "doc.richtext",
                                    description: Text("Choose a layout, or start one with New Layout."))
         }
-    }
-}
-
-/// The selected block's details. The full inspector (font, style, size…) comes later.
-private struct LayoutInspectorPlaceholder: View {
-    let layouts: LayoutsModel
-
-    var body: some View {
-        Form {
-            if let doc = layouts.current, let id = layouts.selectedBlockID, let block = doc.blocks.first(where: { $0.id == id }) {
-                Section("Block") {
-                    LabeledContent("Kind", value: block.kind.rawValue.capitalized)
-                    LabeledContent("Font", value: block.font.postScriptName.isEmpty ? block.font.family : block.font.postScriptName)
-                    if layouts.report.missingFontBlockIDs.contains(id.uuidString) {
-                        Label("Missing font", systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                    }
-                    if let n = layouts.report.missingCharacters[id.uuidString], n > 0 {
-                        Text("\(n) character\(n == 1 ? "" : "s") missing")
-                            .foregroundStyle(.secondary)
-                    }
-                    LabeledContent("Size", value: block.size.formatted() + " pt")
-                }
-            } else if layouts.current != nil {
-                Text("Select a block on the page.")
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
     }
 }
 

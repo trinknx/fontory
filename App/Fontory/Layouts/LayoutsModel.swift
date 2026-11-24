@@ -11,6 +11,7 @@ final class LayoutsModel {
     nonisolated static let windowID = "layouts"
     static let autosaveDelay: Duration = .seconds(1)
     static let undoLimit = 200
+    static let coalesceInterval: Duration = .seconds(1)
     static let zoomRange: ClosedRange<CGFloat> = 0.05...8
     static let zoomStep: CGFloat = 1.25
     /// The largest bitmap side the canvas renders, in pixels.
@@ -44,6 +45,10 @@ final class LayoutsModel {
     var candidates: [FontReference] { current?.candidates ?? [] }
     @ObservationIgnored private var undoStack: [LayoutDocument] = []
     @ObservationIgnored private var redoStack: [LayoutDocument] = []
+    /// The document before the live edit in progress (a drag), registered as one undo step when it ends.
+    @ObservationIgnored private var liveEditBase: LayoutDocument?
+    /// The key and time of the last coalescing edit (e.g. the colour panel); a repeat soon after adds no undo step.
+    @ObservationIgnored private var lastCoalesced: (key: String, time: ContinuousClock.Instant)?
     /// Bumped by every change of `current`; a save clears `isDirty` only if nothing changed since its snapshot.
     @ObservationIgnored private var changeCount = 0
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?
@@ -227,6 +232,8 @@ final class LayoutsModel {
     private func closeCurrent() {
         undoStack = []
         redoStack = []
+        liveEditBase = nil
+        lastCoalesced = nil
         selectedBlockID = nil
         renderTask?.cancel()
         renderTask = nil
@@ -240,31 +247,70 @@ final class LayoutsModel {
     // MARK: Editing
 
     /// Changes the open document. An undoable change is one undo step; a change that leaves the document equal is
-    /// ignored. Marks the layout dirty, schedules the autosave and re-renders.
-    func apply(_ edit: (inout LayoutDocument) -> Void, undoable: Bool = true) {
+    /// ignored. Marks the layout dirty, schedules the autosave and re-renders. Undoable changes with the same
+    /// `coalescing` key less than `coalesceInterval` apart share one undo step (a colour dragged in the colour panel).
+    func apply(_ edit: (inout LayoutDocument) -> Void, undoable: Bool = true, coalescing: String? = nil) {
         guard let before = current else { return }
         var after = before
         edit(&after)
         guard after != before else { return }
         if undoable {
-            undoStack.append(before)
-            if undoStack.count > Self.undoLimit { undoStack.removeFirst(undoStack.count - Self.undoLimit) }
+            let now = ContinuousClock.now
+            let merges = coalescing != nil && lastCoalesced?.key == coalescing && !undoStack.isEmpty
+                && lastCoalesced.map { now - $0.time < Self.coalesceInterval } == true
+            if !merges {
+                undoStack.append(before)
+                if undoStack.count > Self.undoLimit { undoStack.removeFirst(undoStack.count - Self.undoLimit) }
+            }
             redoStack = []
+            lastCoalesced = coalescing.map { ($0, now) }
         } else {
             // Keep the change across undo/redo: replay it on every stored state.
             undoStack = undoStack.map { var d = $0; edit(&d); return d }
             redoStack = redoStack.map { var d = $0; edit(&d); return d }
+            if let base = liveEditBase { var d = base; edit(&d); liveEditBase = d }
         }
         replaceCurrent(with: after)
     }
 
+    /// Starts a live edit (a drag): `applyLive` changes then show at once, and `endLiveEdit` registers them as one
+    /// undo step.
+    func beginLiveEdit() {
+        if liveEditBase != nil { endLiveEdit() }
+        liveEditBase = current
+    }
+
+    /// An intermediate change of the live edit: shown and saved, but not an undo step of its own.
+    func applyLive(_ edit: (inout LayoutDocument) -> Void) {
+        guard var doc = current else { return }
+        if liveEditBase == nil { liveEditBase = doc }
+        edit(&doc)
+        guard doc != current else { return }
+        replaceCurrent(with: doc)
+    }
+
+    /// Ends the live edit: one undo step back to where it began, if anything changed.
+    func endLiveEdit() {
+        guard let base = liveEditBase else { return }
+        liveEditBase = nil
+        guard let doc = current, doc != base else { return }
+        undoStack.append(base)
+        if undoStack.count > Self.undoLimit { undoStack.removeFirst(undoStack.count - Self.undoLimit) }
+        redoStack = []
+        lastCoalesced = nil
+    }
+
     func undo() {
+        endLiveEdit()
+        lastCoalesced = nil
         guard let doc = current, let previous = undoStack.popLast() else { return }
         redoStack.append(doc)
         replaceCurrent(with: previous)
     }
 
     func redo() {
+        endLiveEdit()
+        lastCoalesced = nil
         guard let doc = current, let next = redoStack.popLast() else { return }
         undoStack.append(doc)
         replaceCurrent(with: next)
@@ -414,4 +460,240 @@ final class LayoutsModel {
     static func handlesUndoKey(windowIsKey: Bool, editingText: Bool) -> Bool {
         windowIsKey && !editingText
     }
+}
+
+// MARK: - Block editing
+
+/// What the canvas and the inspector call. Every change goes through `apply` (or a live edit), so undo covers it.
+extension LayoutsModel {
+    enum Corner: CaseIterable, Sendable { case topLeft, topRight, bottomLeft, bottomRight }
+
+    nonisolated static let minBlockSize: Double = 20
+    static let newBlockSize = LayoutSize(w: 300, h: 100)
+    nonisolated static let sizeRange: ClosedRange<Double> = 1...2000
+    static let lineHeightRange: ClosedRange<Double> = 0.1...10
+    static let trackingRange: ClosedRange<Double> = -1000...10000
+
+    var selectedBlock: LayoutBlock? {
+        guard let id = selectedBlockID else { return nil }
+        return current?.blocks.first { $0.id == id }
+    }
+
+    func select(_ id: UUID?) {
+        if selectedBlockID != id { selectedBlockID = id }
+    }
+
+    /// The topmost block containing a page point (points, origin top-left).
+    func blockID(atPage point: CGPoint) -> UUID? {
+        current?.blocks.last { b in
+            CGRect(x: b.frame.x, y: b.frame.y, width: b.frame.w, height: b.frame.h).contains(point)
+        }?.id
+    }
+
+    /// Changes one block (one undo step).
+    func updateBlock(_ id: UUID, coalescing: String? = nil, _ edit: (inout LayoutBlock) -> Void) {
+        apply({ doc in
+            guard let i = doc.blocks.firstIndex(where: { $0.id == id }) else { return }
+            edit(&doc.blocks[i])
+        }, coalescing: coalescing)
+    }
+
+    private func updateSelected(coalescing: String? = nil, _ edit: (inout LayoutBlock) -> Void) {
+        guard let id = selectedBlockID else { return }
+        updateBlock(id, coalescing: coalescing, edit)
+    }
+
+    // MARK: Move and resize (live edits between beginLiveEdit and endLiveEdit)
+
+    /// Moves a block to `start` offset by `delta` page points.
+    func moveBlock(_ id: UUID, from start: LayoutFrame, by delta: CGSize) {
+        setFrameLive(id, LayoutFrame(x: start.x + delta.width, y: start.y + delta.height, w: start.w, h: start.h))
+    }
+
+    /// Resizes a block by dragging one corner of `start` by `delta`; the opposite corner stays put.
+    func resizeBlock(_ id: UUID, from start: LayoutFrame, corner: Corner, by delta: CGSize) {
+        setFrameLive(id, Self.resized(start, corner: corner, by: delta))
+    }
+
+    /// `start` with `corner` dragged by `delta`, at least `minBlockSize` on each side.
+    nonisolated static func resized(_ start: LayoutFrame, corner: Corner, by delta: CGSize) -> LayoutFrame {
+        var minX = start.x, minY = start.y, maxX = start.x + start.w, maxY = start.y + start.h
+        switch corner {
+        case .topLeft, .bottomLeft: minX = min(minX + delta.width, maxX - minBlockSize)
+        case .topRight, .bottomRight: maxX = max(maxX + delta.width, minX + minBlockSize)
+        }
+        switch corner {
+        case .topLeft, .topRight: minY = min(minY + delta.height, maxY - minBlockSize)
+        case .bottomLeft, .bottomRight: maxY = max(maxY + delta.height, minY + minBlockSize)
+        }
+        return LayoutFrame(x: minX, y: minY, w: maxX - minX, h: maxY - minY)
+    }
+
+    private func setFrameLive(_ id: UUID, _ frame: LayoutFrame) {
+        applyLive { doc in
+            guard let i = doc.blocks.firstIndex(where: { $0.id == id }) else { return }
+            doc.blocks[i].frame = frame
+        }
+    }
+
+    // MARK: Text and typography
+
+    func setText(_ text: String, for id: UUID) {
+        updateBlock(id) { $0.text = text }
+    }
+
+    func setSize(_ size: Double) {
+        guard size.isFinite else { return }
+        updateSelected { $0.size = min(Self.sizeRange.upperBound, max(Self.sizeRange.lowerBound, size)) }
+    }
+
+    func setLineHeight(_ value: Double) {
+        guard value.isFinite else { return }
+        updateSelected { $0.lineHeight = min(Self.lineHeightRange.upperBound, max(Self.lineHeightRange.lowerBound, value)) }
+    }
+
+    func setTracking(_ value: Double) {
+        guard value.isFinite else { return }
+        updateSelected { $0.tracking = min(Self.trackingRange.upperBound, max(Self.trackingRange.lowerBound, value)) }
+    }
+
+    func setAlignment(_ alignment: LayoutAlignment) {
+        updateSelected { $0.alignment = alignment }
+    }
+
+    /// A `#RRGGBB` colour, or nil for the layout's foreground. Changes in quick succession are one undo step.
+    func setColor(_ hex: String?) {
+        guard hex.map(LayoutColor.isValid) ?? true else { return }
+        updateSelected(coalescing: "color") { $0.color = hex }
+    }
+
+    /// Sets the waterfall sizes from a comma-separated field; false (and nothing changed) when it doesn't parse.
+    @discardableResult
+    func setSizes(_ text: String) -> Bool {
+        guard let sizes = Self.parseSizes(text) else { return false }
+        updateSelected { $0.sizes = sizes }
+        return true
+    }
+
+    /// "12, 16, 24" → [12, 16, 24]; nil when empty or when any entry is not a size in `sizeRange`.
+    nonisolated static func parseSizes(_ text: String) -> [Double]? {
+        let parts = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !parts.isEmpty else { return nil }
+        var out: [Double] = []
+        for part in parts {
+            guard let v = Double(part), v.isFinite, sizeRange.contains(v) else { return nil }
+            out.append(v)
+        }
+        return out
+    }
+
+    nonisolated static func formatSizes(_ sizes: [Double]) -> String {
+        sizes.map { $0.formatted(.number.grouping(.never)) }.joined(separator: ", ")
+    }
+
+    func setShowMissing(_ on: Bool) {
+        apply { $0.showMissing = on }
+    }
+
+    // MARK: Add and delete
+
+    /// Deletes the selected block (⌫ on the canvas).
+    func deleteSelectedBlock() {
+        guard let id = selectedBlockID else { return }
+        apply { $0.blocks.removeAll { $0.id == id } }
+    }
+
+    /// "+ Text Block": a 300 × 100 text block at the page centre, in the selected block's font (else the first
+    /// candidate's, else the first block's), selected.
+    func addTextBlock() {
+        guard let doc = current else { return }
+        let size = Self.newBlockSize
+        let font = selectedBlock?.font ?? doc.candidates.first ?? doc.blocks.first?.font
+            ?? FontReference(postScriptName: "", family: "")
+        let block = LayoutBlock(kind: .text,
+                                frame: LayoutFrame(x: (doc.pageSize.w - size.w) / 2, y: (doc.pageSize.h - size.h) / 2,
+                                                   w: size.w, h: size.h),
+                                text: "Text", font: font, size: 24)
+        apply { $0.blocks.append(block) }
+        selectedBlockID = block.id
+    }
+
+    // MARK: Fonts
+
+    /// Sets a block's font (the selected block's by default).
+    func setFont(_ ref: FontReference, for id: UUID? = nil) {
+        guard let id = id ?? selectedBlockID else { return }
+        updateBlock(id) { $0.font = ref }
+    }
+
+    /// The styles of `ref`'s family (the style menu), looked up off the main thread.
+    func styles(for ref: FontReference?) async -> [PairingStyle] {
+        guard let ref, let store = fontStore() else { return [] }
+        return await Task.detached(priority: .userInitiated) { (try? store.styles(ofFamilyOf: ref)) ?? [] }.value
+    }
+
+    /// Families whose name matches `text` (Choose Font…), through the library search, off the main thread.
+    func searchFamilies(_ text: String) async -> [FamilyGroup] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let store = fontStore() else { return [] }
+        var query = LibraryQuery()
+        query.search = SearchText(trimmed, scope: [.name, .family])
+        return await Task.detached(priority: .userInitiated) { (try? store.families(for: query)) ?? [] }.value
+    }
+
+    /// Choose Font…: the selected block takes the family's representative face.
+    func chooseFamily(_ group: FamilyGroup) async {
+        guard let id = selectedBlockID, let store = fontStore() else { return }
+        let faceID = group.representativeID
+        guard let ref = await Task.detached(priority: .userInitiated, operation: { try? store.reference(forFace: faceID) }).value
+        else { return }
+        setFont(ref, for: id)
+    }
+
+    /// A candidate from the family menu: the selected block takes that family's style closest to its current one
+    /// (the candidate's own face when the current style is unknown).
+    func applyCandidate(_ candidate: FontReference) async {
+        guard let id = selectedBlockID, let currentFont = selectedBlock?.font else { return }
+        guard let store = fontStore() else { setFont(candidate, for: id); return }
+        let chosen = await Task.detached(priority: .userInitiated) { () -> FontReference in
+            let target = (try? store.styles(ofFamilyOf: candidate)) ?? []
+            let own = (try? store.styles(ofFamilyOf: currentFont)) ?? []
+            guard !target.isEmpty, let style = own.first(where: { $0.reference == currentFont }) else { return candidate }
+            return PairingCycler.closestStyle(to: style, in: target)
+        }.value
+        setFont(chosen, for: id)
+    }
+
+    /// The block's font at `size` for the in-place editor, loaded off the main thread; nil when it is missing.
+    func editorFont(for block: LayoutBlock, size: CGFloat) async -> NSFont? {
+        guard let resolved = resolved[block.font], !resolved.isMissing, let url = resolved.url else { return nil }
+        let faceIndex = resolved.faceIndex
+        let variations = block.font.variations ?? [:]
+        let box = await Task.detached(priority: .userInitiated) { () -> FontBox? in
+            guard let base = FontFile.font(at: url, faceIndex: faceIndex, size: size) else { return nil }
+            guard !variations.isEmpty else { return FontBox(font: base) }
+            let values = Dictionary(variations.map { (NSNumber(value: VariationInfo.code($0.key)), NSNumber(value: $0.value)) },
+                                    uniquingKeysWith: { a, _ in a })
+            let attributes = CTFontDescriptorCreateWithAttributes([kCTFontVariationAttribute: values] as CFDictionary)
+            return FontBox(font: CTFontCreateCopyWithAttributes(base, size, nil, attributes))
+        }.value
+        return box.map { $0.font as NSFont }
+    }
+
+    // MARK: Report notes
+
+    /// "N characters missing" for a block, from the last render.
+    func missingCharacters(in id: UUID) -> Int {
+        report.missingCharacters[id.uuidString] ?? 0
+    }
+
+    /// "Missing font" for a block, from the last render.
+    func isFontMissing(_ id: UUID) -> Bool {
+        report.missingFontBlockIDs.contains(id.uuidString)
+    }
+}
+
+/// A CTFont handed back from a background load (CoreText fonts are immutable and thread-safe).
+private struct FontBox: @unchecked Sendable {
+    let font: CTFont
 }
