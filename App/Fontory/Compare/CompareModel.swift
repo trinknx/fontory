@@ -34,6 +34,8 @@ final class CompareModel: CandidateStripSource {
     private(set) var emptyMessage: String?
     @ObservationIgnored var fontStore: @MainActor () -> FontStore? = { nil }
     var isKey = false
+    /// The canvas's appearance (light/dark), which the colours are resolved for; nil until the window exists.
+    @ObservationIgnored private(set) var appearance: NSAppearance?
 
     // MARK: Private
 
@@ -152,6 +154,13 @@ final class CompareModel: CandidateStripSource {
         refreshRender()
     }
 
+    /// The window's appearance changed (or is first known): the colours are resolved again and the scene redrawn.
+    func appearanceDidChange(_ new: NSAppearance) {
+        guard appearance?.name != new.name else { return }
+        appearance = new
+        refreshRender()
+    }
+
     /// Re-resolves every font (the library may have changed, e.g. a drive came back) and re-renders.
     func refreshFonts() {
         cacheGeneration += 1
@@ -204,7 +213,7 @@ final class CompareModel: CandidateStripSource {
     @discardableResult
     func copyImage() -> Bool {
         guard let scene, scene.a.path != nil || scene.b.path != nil else { return false }
-        let (colorA, colorB, guide, background) = Self.colors()
+        let (colorA, colorB, guide, background) = Self.colors(appearance)
         guard let image = CompareRenderer.image(scene, options: options, colorA: colorA, colorB: colorB, guideColor: guide,
                                                 background: background, scale: 2),
               let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return false }
@@ -231,7 +240,7 @@ final class CompareModel: CandidateStripSource {
         let store = fontStore()
         let known = resolved
         let cacheGen = cacheGeneration
-        let (colorA, colorB, guide, _) = Self.colors()
+        let (colorA, colorB, guide, _) = Self.colors(appearance)
         renderTask = Task { [weak self] in
             let aLabel = await self?.label(for: a) ?? a.family
             let bLabel: String
@@ -276,11 +285,11 @@ final class CompareModel: CandidateStripSource {
     }
 
     /// System blue/red for A/B, the secondary label for the guides and the text background, resolved for the
-    /// current appearance.
-    private static func colors() -> (CGColor, CGColor, CGColor, CGColor) {
+    /// window's appearance.
+    private static func colors(_ appearance: NSAppearance?) -> (CGColor, CGColor, CGColor, CGColor) {
         var out: (CGColor, CGColor, CGColor, CGColor) = (CGColor(gray: 0, alpha: 1), CGColor(gray: 0, alpha: 1),
                                                          CGColor(gray: 0.5, alpha: 1), CGColor(gray: 1, alpha: 1))
-        NSAppearance.currentDrawing().performAsCurrentDrawingAppearance {
+        (appearance ?? NSAppearance.currentDrawing()).performAsCurrentDrawingAppearance {
             out = (NSColor.systemBlue.cgColor, NSColor.systemRed.cgColor, NSColor.secondaryLabelColor.cgColor,
                    NSColor.textBackgroundColor.cgColor)
         }

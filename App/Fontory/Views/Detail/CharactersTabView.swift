@@ -275,6 +275,7 @@ private struct GlyphInspector: View {
     /// Whether the selected glyph has a vector outline (bitmap and colour glyphs have none: no SVG).
     @State private var hasOutline = true
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.openWindow) private var openWindow
 
     static let side: CGFloat = 96
 
@@ -310,6 +311,10 @@ private struct GlyphInspector: View {
                     Button("Copy SVG") { copySVG(entry) }
                         .disabled(!hasOutline)
                         .help(hasOutline ? "Copy the outline as an SVG document" : "This glyph has no outline (bitmap/colour)")
+                    Button("Compare…") { compare(entry) }
+                        .disabled(!entry.isMapped || face == nil)
+                        .help(entry.isMapped ? "Compare \(entry.character) in this style with the Quick Collection"
+                                             : "This glyph has no character")
                 }
                 .controlSize(.small)
             } else {
@@ -365,6 +370,15 @@ private struct GlyphInspector: View {
         guard !Task.isCancelled else { return }
         image = rendered.0
         hasOutline = rendered.1
+    }
+
+    /// Opens Compare with A = this face, the text = this character (not added to the recent texts) and the Quick
+    /// Collection as candidates.
+    private func compare(_ entry: GlyphEntry) {
+        guard let face, entry.isMapped else { return }
+        openWindow(id: CompareModel.windowID)
+        let text = entry.character, candidates = model.quickCollectionIDs.sorted()
+        Task { await model.compare.open(referenceFaceID: face.faceID, candidateFaceIDs: candidates, text: text) }
     }
 
     private func copySVG(_ entry: GlyphEntry) {

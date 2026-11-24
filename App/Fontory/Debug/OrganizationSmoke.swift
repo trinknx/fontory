@@ -207,6 +207,28 @@ enum OrganizationSmoke {
         await model.openInCompare()
         check(model.compare.a != nil && model.compare.candidates.count == 1 && model.compare.b?.family == model.compare.candidates.first?.family,
               "compare: openInCompare opens the selection")
+        let noFlags = NSEvent.ModifierFlags(), arrowFlags: NSEvent.ModifierFlags = [.function, .numericPad]
+        check(CompareCanvasView.command(keyCode: 123, modifiers: arrowFlags) == .cycle(.family(-1))
+              && CompareCanvasView.command(keyCode: 124, modifiers: noFlags) == .cycle(.family(1))
+              && CompareCanvasView.command(keyCode: 126, modifiers: arrowFlags) == .cycle(.style(-1))
+              && CompareCanvasView.command(keyCode: 125, modifiers: arrowFlags) == .cycle(.style(1))
+              && CompareCanvasView.command(keyCode: 126, modifiers: [.shift, .function, .numericPad]) == .cycle(.referenceStyle(-1))
+              && CompareCanvasView.command(keyCode: 125, modifiers: .shift) == .cycle(.referenceStyle(1))
+              && CompareCanvasView.command(keyCode: 8, modifiers: .command) == .copy
+              && CompareCanvasView.command(keyCode: 8, modifiers: noFlags) == nil
+              && CompareCanvasView.command(keyCode: 123, modifiers: .command) == nil
+              && CompareCanvasView.command(keyCode: 51, modifiers: noFlags) == nil,
+              "compare: canvas keys map keyCode + modifiers to cycling and copy")
+        check(CompareReadout.percent(-6.4) == "−6%" && CompareReadout.percent(4.6) == "+5%" && CompareReadout.percent(0.2) == "0%"
+              && CompareReadout.percent(nil) == "—" && CompareReadout.fraction(0.5312) == "0.53"
+              && CompareReadout.lacks("B", 1) == "B lacks 1 character" && CompareReadout.lacks("A", 3) == "A lacks 3 characters"
+              && CompareReadout.lacks("A", 0) == nil,
+              "compare: readout formatting (percent, fraction, lacks)")
+        if let scene = model.compare.scene {
+            check(CompareReadout.rows(scene).map(\.title) == ["x-height", "Cap height", "Ascender", "Descender", "Width"]
+                  && CompareReadout.notes(scene).isEmpty,
+                  "compare: readout rows for a line (no scale note at the same size)")
+        }
         model.selection = [sans, mono]
         model.quickCollectionIDs = [serif, sans, mono]
         model.openFamilyDetail(faceID: serif)

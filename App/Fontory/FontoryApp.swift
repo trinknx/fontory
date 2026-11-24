@@ -98,6 +98,7 @@ struct FontoryApp: App {
                     .disabled(!model.isBrowserKey || (model.selection.isEmpty && (model.detail == nil || model.detailSelection.isEmpty)))
                 Divider()
                 OpenInLayoutsMenuItem(model: model)
+                CompareFontsMenuItem(model: model)
                 Divider()
                 Button("Find Duplicates") { model.applySidebarSelection([.duplicates], modifiers: []) }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
@@ -109,6 +110,12 @@ struct FontoryApp: App {
                 .environment(model)
         }
         .defaultSize(width: 1200, height: 800)
+
+        Window("Compare", id: CompareModel.windowID) {
+            CompareWindow()
+                .environment(model)
+        }
+        .defaultSize(width: 1100, height: 600)
 
         Settings {
             SettingsView()
@@ -135,6 +142,23 @@ private struct OpenInLayoutsMenuItem: View {
             Task { await model.openInLayouts() }
         }
         .keyboardShortcut("k")
+        .disabled(!model.isBrowserKey)
+    }
+}
+
+/// Font ▸ Compare Fonts (⌥⌘K), in the browser and on the family page: opens or focuses the Compare window and
+/// replaces A and the candidates from the selection (else the Quick Collection).
+private struct CompareFontsMenuItem: View {
+    let model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Compare Fonts") {
+            guard model.browserIsKey else { return }
+            openWindow(id: CompareModel.windowID)
+            Task { await model.openInCompare() }
+        }
+        .keyboardShortcut("k", modifiers: [.option, .command])
         .disabled(!model.isBrowserKey)
     }
 }
