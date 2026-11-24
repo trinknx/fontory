@@ -124,6 +124,16 @@ import Testing
         #expect(try f.store.originalFamilies(faceIDs: [f.faceIDs["Alpha-Regular"]!]).isEmpty)
     }
 
+    @Test func editedFamiliesMapsKeysToOriginals() throws {
+        let f = try Fixture.make()
+        #expect(try f.store.editedFamilies().isEmpty)
+        let alpha = f.faceIDs["Alpha-Regular"]!, beta = f.faceIDs["Beta-Light"]!
+        try f.store.setCustomFamily("Merged", faceIDs: [alpha, beta])
+        #expect(try f.store.editedFamilies() == ["merged": ["Alpha", "Beta"]])
+        try f.store.clearCustomFamilies(faceIDs: [alpha, beta])
+        #expect(try f.store.editedFamilies().isEmpty)
+    }
+
     @Test func searchFindsCustomName() throws {
         let f = try Fixture.make()
         let ids = [f.faceIDs["Alpha-Regular"]!, f.faceIDs["Alpha-Bold"]!]

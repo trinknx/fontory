@@ -52,6 +52,7 @@ enum OrganizationSmoke {
             await reviewFixSteps(model, backend: backend)
             await filterSteps(model, backend: backend, folder: dir)
             await exportSteps(model, backend: backend, faces: faces, folder: dir)
+            await familyEditorSteps()
             await duplicateSteps()
             await backupSteps()
         } catch {
@@ -1558,6 +1559,135 @@ enum OrganizationSmoke {
         let standardAfter = ["previewSettings", SettingsKey.duplicateLocationRank, SettingsKey.skipDuplicatesOnImport]
             .map { String(describing: UserDefaults.standard.object(forKey: $0)) }
         check(standardAfter == standardBefore, "duplicates: nothing written to the user's defaults")
+    }
+
+    // MARK: Wave 3b task 8: Family Editor
+
+    /// Polls (on the main actor) until `condition` holds or 3 s pass.
+    private static func eventually(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<300 {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
+    /// A fresh temporary library with the three seeded faces: rename, undo, merge, split, original names, clashes,
+    /// search, the edited mark, the family page following a rename, and the ⌘Z routing rule.
+    private static func familyEditorSteps() async {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("FontoryFamilySmoke-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: dir) }
+        let backend: LibraryBackend
+        let faces: [String: Int64]
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            backend = try LibraryBackend(databaseURL: dir.appendingPathComponent("library.sqlite"))
+            faces = try seed(backend.store, folder: dir)
+        } catch {
+            check(false, "family: setup", "\(error)"); return
+        }
+        guard let serif = faces["Smoke Serif"], let sans = faces["Smoke Sans"], let mono = faces["Smoke Mono"] else {
+            check(false, "family: seed", "\(faces)"); return
+        }
+        let store = backend.store
+        let model = AppModel()
+        await model.attachBackendForSmoke(backend)
+        func families() -> [String: Set<Int64>] {
+            Dictionary(((try? store.families(for: LibraryQuery())) ?? []).map { ($0.name, Set($0.faceIDs)) },
+                       uniquingKeysWith: { $0.union($1) })
+        }
+        // The browser's own refresh (scheduled by the edit) may supersede a smoke refresh: wait for the face.
+        func gridName(_ id: Int64) async -> String? {
+            await model.refreshNowForSmoke()
+            _ = await eventually { model.faceIDs.contains(id) }
+            return model.faceIDs.contains(id) ? model.row(id)?.family : nil
+        }
+        check(!model.canUndoFamilyEdit, "family: nothing to undo at first")
+
+        // Rename.
+        await model.renameFamily(faceIDs: [serif], to: "Smoke Book")
+        let renamed = await gridName(serif)
+        check(renamed == "Smoke Book", "family: renaming Smoke Serif to Smoke Book shows Smoke Book in the grid", renamed ?? "nil")
+        check(model.canUndoFamilyEdit, "family: the rename can be undone")
+        check(model.editedFamilies["smoke book"] == ["Smoke Serif"], "family: the edited mark lists the original name",
+              "\(model.editedFamilies)")
+        check(AppModel.editedTooltip(["Smoke Serif"]) == "Original: Smoke Serif", "family: the edited mark's tooltip copy")
+
+        // Search finds the custom name.
+        model.searchText = "Smoke Book"
+        await model.refreshNowForSmoke()
+        check(model.faceIDs == [serif], "family: search Smoke Book finds the renamed face", "\(model.faceIDs)")
+        model.searchText = ""
+        await model.refreshNowForSmoke()
+
+        // Undo.
+        await model.undoLastFamilyEdit()
+        let undone = await gridName(serif)
+        check(undone == "Smoke Serif", "family: undo puts back Smoke Serif", undone ?? "nil")
+        check(!model.canUndoFamilyEdit && model.editedFamilies.isEmpty, "family: one level of undo, no edited mark left")
+
+        // Merge.
+        await model.mergeFamilies(["smoke serif", "smoke sans"], into: "Smoke")
+        var g = families()
+        check(g["Smoke"] == [serif, sans] && g.count == 2, "family: merging Serif + Sans into Smoke makes one family of 2", "\(g)")
+        check(model.editedFamilies["smoke"] == ["Smoke Sans", "Smoke Serif"], "family: the merged family lists both originals",
+              "\(model.editedFamilies)")
+
+        // Split.
+        await model.moveToNewFamily(faceIDs: [sans], name: "Smoke Solo")
+        g = families()
+        check(g["Smoke"] == [serif] && g["Smoke Solo"] == [sans] && g.count == 3, "family: moving one face to Smoke Solo makes two families", "\(g)")
+
+        // Use Original Names, per family.
+        await model.useOriginalNames(faceIDs: [serif])
+        await model.useOriginalNames(faceIDs: [sans])
+        g = families()
+        check(g == ["Smoke Serif": [serif], "Smoke Sans": [sans], "Smoke Mono": [mono]], "family: Use Original Names gives three families again", "\(g)")
+        check(customFamily(store, serif) == nil && customFamily(store, sans) == nil, "family: no override is left")
+        await model.undoLastFamilyEdit()
+        check(families()["Smoke Solo"] == [sans], "family: undo after Use Original Names puts the name back", "\(families())")
+        await model.useOriginalNames(faceIDs: [sans])
+
+        // Clash with an existing family that differs only in case.
+        let clash = await model.familyClash(name: "smoke mono", excluding: [serif])
+        let noClash = await model.familyClash(name: "Smoke Other", excluding: [serif])
+        let ownName = await model.familyClash(name: "SMOKE SERIF", excluding: [serif])
+        check(clash && !noClash && !ownName, "family: a clash with Smoke Mono (typed smoke mono) is reported, case-insensitively",
+              "clash \(clash) other \(noClash) own \(ownName)")
+        check(AppModel.clashWarning("Smoke Mono") == "A family named Smoke Mono already exists. Its fonts and these will show as one family.",
+              "family: the clash warning copy")
+        check(AppModel.familyEditorNote == "Names change only in Fontory. Other apps still show the original names.",
+              "family: the editor note copy")
+        await model.renameFamily(faceIDs: [serif], to: "smoke mono")
+        g = families()
+        check(customFamily(store, mono) == nil && g.count == 2 && g.values.contains([serif, mono]),
+              "family: renaming into Smoke Mono groups them and leaves Mono's rows untouched", "\(g)")
+        await model.undoLastFamilyEdit()
+
+        // The family page follows a rename; a split keeps it on the old family.
+        model.openFamilyDetail(faceID: serif)
+        _ = await eventually { model.detail?.family == "Smoke Serif" }
+        await model.renameFamily(faceIDs: [serif], to: "Smoke Book")
+        let followed = await eventually { model.detail?.family == "Smoke Book" && model.detail?.faceIDs == [serif] }
+        check(followed, "family: the open family page re-opens under the new name", "\(String(describing: model.detail))")
+        await model.mergeFamilies(["smoke book", "smoke sans"], into: "Smoke Book")
+        let merged = await eventually { model.detail?.faceIDs.count == 2 }
+        check(merged, "family: the open family page shows the merged styles", "\(String(describing: model.detail))")
+        await model.moveToNewFamily(faceIDs: [sans], name: "Smoke Solo")
+        let stayed = await eventually { model.detail?.family == "Smoke Book" && model.detail?.faceIDs == [serif] }
+        check(stayed, "family: after Move to New Family the page stays on the old family", "\(String(describing: model.detail))")
+        await model.useOriginalNames(faceIDs: [serif, sans])
+        let original = await eventually { model.detail?.family == "Smoke Serif" }
+        check(original, "family: Use Original Names re-opens the page under the original name", "\(String(describing: model.detail))")
+        model.closeFamilyDetail()
+
+        // ⌘Z routing: only ⌘Z in the key browser with no text being edited and an edit to undo.
+        let rule = AppModel.handlesFamilyUndoKey
+        check(rule(true, true, false, true) && !rule(false, true, false, true) && !rule(true, false, false, true)
+              && !rule(true, true, true, true) && !rule(true, true, false, false),
+              "family: ⌘Z undoes a family edit only in the key browser, outside text fields, when there is one")
+        check(model.alert == nil, "family: no alert", model.alert?.message ?? "")
     }
 
     // MARK: Wave 3b task 5: Backups

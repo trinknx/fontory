@@ -29,6 +29,12 @@ struct FontoryApp: App {
                 Button("Back Up Library…") { model.showBackUpPanel() }
                 RestoreLibraryMenuItem(model: model)
             }
+            CommandGroup(after: .undoRedo) {
+                // ⌘Z itself reaches it through the key monitor below (only in the browser, outside text fields),
+                // so the standard Undo keeps working for text.
+                Button("Undo Family Edit") { if model.browserIsKey { Task { await model.undoLastFamilyEdit() } } }
+                    .disabled(!model.isBrowserKey || !model.canUndoFamilyEdit)
+            }
             CommandGroup(before: .toolbar) {
                 // On the family page both close it and show the browser in that mode, whichever mode is current.
                 Button("as Grid") { model.showBrowser(as: .grid) }
@@ -118,14 +124,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // menu and regardless of the first responder; it acts only in the main browser window.
         // Esc leaves the family page from anywhere in it, except while a text field is being edited (the search
         // field clears itself on Esc).
+        // ⌘Z undoes the last family edit when the browser is key, no text is being edited there and there is an
+        // edit to undo (`AppModel.handlesFamilyUndoKey`); otherwise it goes on to the standard Undo (text fields,
+        // the Text tab, sheets, Settings). The Edit menu's Undo item is left alone.
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let isZoomIn = mods == .command && event.charactersIgnoringModifiers == "="
             let isEscape = event.keyCode == 53 && mods.subtracting([.function, .numericPad]).isEmpty
-            guard isZoomIn || isEscape else { return event }
+            let isUndo = mods == .command && event.charactersIgnoringModifiers?.lowercased() == "z"
+            guard isZoomIn || isEscape || isUndo else { return event }
             let handled = MainActor.assumeIsolated { () -> Bool in
                 guard let key = NSApp.keyWindow, key === self.model.browserWindow else { return false }
-                if isEscape {
+                if isUndo {
+                    guard AppModel.handlesFamilyUndoKey(isCommandZ: true, browserIsKey: true,
+                                                        editingText: key.firstResponder is NSText,
+                                                        canUndo: self.model.canUndoFamilyEdit) else { return false }
+                    Task { await self.model.undoLastFamilyEdit() }
+                } else if isEscape {
                     // An empty text field (the search field) has nothing to clear: Esc goes Back from there too.
                     guard self.model.detail != nil, !self.model.isShowingPreviewOptions else { return false }
                     if let text = key.firstResponder as? NSText, !text.string.isEmpty { return false }

@@ -45,6 +45,7 @@ struct MainWindow: View {
         .sheet(isPresented: Binding(get: { model.exportProgress != nil }, set: { _ in })) { ExportSheet() }
         .sheet(item: $model.tagPanel) { TagPanel(model: model, request: $0) }
         .sheet(item: $model.smartTagEditor) { SmartTagEditor(editor: $0, model: model) }
+        .sheet(item: $model.familyNameRequest) { FamilyNameSheet(model: model, request: $0) }
         .alert("Save Preview Text as Preset", isPresented: $model.isNamingPreset) {
             TextField("Name", text: $presetName)
             Button("Save") {

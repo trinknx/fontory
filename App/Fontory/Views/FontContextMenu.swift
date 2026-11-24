@@ -20,7 +20,40 @@ enum FontContextMenu {
             menu.addItem(.separator())
             menu.addItem(ClosureMenuItem("Set as Family Representative") { model.setFamilyRepresentative(id) })
         }
+        let family = familyItems(for: ids, model: model)
+        if !family.isEmpty {
+            menu.addItem(.separator())
+            for item in family { menu.addItem(item) }
+        }
         return menu
+    }
+
+    /// Family Editor items. On the family page (styles selected): "Move to New Family…". In the browser: for the
+    /// families of the clicked cards, "Rename Family…" (one family) or "Merge Families…" (two or more), and "Use
+    /// Original Names" (enabled when one of them is edited). Families come from the cached rows, one per key.
+    static func familyItems(for ids: [Int64], model: AppModel) -> [NSMenuItem] {
+        if let detail = model.detail {
+            let styles = detail.faceIDs.filter(Set(ids).contains)
+            guard !styles.isEmpty else { return [] }
+            return [ClosureMenuItem("Move to New Family…") { model.beginMoveToNewFamily(faceIDs: styles) }]
+        }
+        var seen = Set<String>()
+        var names: [String] = []
+        for id in ids {
+            guard let family = model.cachedRow(id)?.family, seen.insert(family.lowercased()).inserted else { continue }
+            names.append(family)
+        }
+        guard !names.isEmpty else { return [] }
+        var items: [NSMenuItem] = []
+        if names.count == 1 {
+            items.append(ClosureMenuItem("Rename Family…") { model.beginRenameFamily(named: names[0]) })
+        } else {
+            items.append(ClosureMenuItem("Merge Families…") { model.beginMergeFamilies(named: names) })
+        }
+        let original = ClosureMenuItem("Use Original Names") { model.useOriginalNames(ofFamilies: names) }
+        original.isEnabled = names.contains { model.editedOriginals(ofFamily: $0) != nil }
+        items.append(original)
+        return items
     }
 
     /// Activate / Deactivate (always persistent). Disabled when every face is read-only: a system font or a font

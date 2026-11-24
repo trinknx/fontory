@@ -468,6 +468,18 @@ final class AppModel {
     nonisolated static let variationSamplePointSizeRange: ClosedRange<Double> = 12...144
     nonisolated static let detailPointSizeRange: ClosedRange<Double> = 8...200
     @ObservationIgnored private var detailGeneration = 0
+    /// A family edit is moving the page to the family's new name: a refresh's `reloadDetail`, which looks the page
+    /// up by its old name, must not close it meanwhile.
+    @ObservationIgnored private var detailFollowingEdit = 0
+
+    // MARK: Family Editor (see AppModel+FamilyEditor.swift)
+
+    /// Edited families: family key → the original family names of its faces with a custom name (the pencil mark).
+    var editedFamilies: [String: [String]] = [:]
+    /// The previous `custom_family` of the faces changed by the last family edit (one level of undo, in memory).
+    var familyUndo: [Int64: String?]?
+    /// The rename / merge / split sheet.
+    var familyNameRequest: FamilyNameRequest?
 
     // MARK: Characters tab
 
@@ -1013,6 +1025,7 @@ final class AppModel {
             self?.counts = counts
         }
         Task { await reloadOrganization() }
+        Task { await reloadEditedFamilies() }
     }
 
     /// The row for a face, from a small cache filled in batches around the requested position.
@@ -1600,6 +1613,33 @@ final class AppModel {
         glyphPipeline.cancelAll()
     }
 
+    /// Runs a family edit (the store write through the page's re-open): a refresh's `reloadDetail` finishing
+    /// meanwhile would look the page up by its old name and close it, so it is ignored.
+    func whileFollowingFamilyEdit(_ body: () async -> Void) async {
+        detailFollowingEdit += 1
+        defer { detailFollowingEdit -= 1 }
+        await body()
+    }
+
+    /// After a family edit: shows the family `faceID` now belongs to (the page follows a rename), or leaves the page
+    /// when that family is gone. Only acts while a family page is open.
+    func reopenFamilyDetail(following faceID: Int64) async {
+        guard let backend, detail != nil else { return }
+        detailGeneration += 1
+        let generation = detailGeneration
+        let includeSystem = query.includeSystem
+        let group = await runBackground { () -> FamilyGroup? in
+            guard let name = try backend.store.rows(ids: [faceID])[faceID]?.family else { return nil }
+            return try backend.store.family(named: name, includeSystem: includeSystem)
+        } ?? nil
+        guard generation == detailGeneration, detail != nil else { return }
+        guard let group else { return closeFamilyDetail() }
+        detail = FamilyDetail(family: group.name, faceIDs: group.faceIDs, representativeID: group.representativeID)
+        let kept = detailSelection.filter(group.faceIDs.contains)
+        if kept != detailSelection { detailSelection = kept }
+        prefetchRows(group.faceIDs)
+    }
+
     /// Re-reads the shown family's faces (after a refresh); leaves the page when none is left.
     private func reloadDetail() {
         guard let backend, let current = detail else { return }
@@ -1607,7 +1647,7 @@ final class AppModel {
         let includeSystem = query.includeSystem
         Task {
             let group = await runBackground { try backend.store.family(named: current.family, includeSystem: includeSystem) } ?? nil
-            guard generation == detailGeneration, detail == current else { return }
+            guard generation == detailGeneration, detail == current, detailFollowingEdit == 0 else { return }
             guard let group else { return closeFamilyDetail() }
             let updated = FamilyDetail(family: group.name, faceIDs: group.faceIDs, representativeID: group.representativeID)
             guard updated != current else { return }

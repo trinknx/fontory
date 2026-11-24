@@ -75,7 +75,20 @@ struct FamilyDetailView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .textSelection(.enabled)
+                    .contextMenu { familyMenu }
+                if let originals = model.editedOriginals(ofFamily: detail.family) {
+                    Image(systemName: "pencil")
+                        .foregroundStyle(.secondary)
+                        .help(AppModel.editedTooltip(originals))
+                        .accessibilityLabel("Edited. \(AppModel.editedTooltip(originals))")
+                }
                 Spacer(minLength: 0)
+                Button {
+                    model.beginRenameFamily(named: detail.family)
+                } label: {
+                    Label("Edit Family…", systemImage: "square.and.pencil")
+                }
+                .help("Rename this family in Fontory")
                 Button {
                     Task { await model.exportFamily(detail) }
                 } label: {
@@ -90,6 +103,18 @@ struct FamilyDetailView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+    }
+
+    /// The title's context menu: rename, split the selected styles off, back to the original names.
+    @ViewBuilder
+    private var familyMenu: some View {
+        Button("Rename Family…") { model.beginRenameFamily(named: detail.family) }
+        Button("Move to New Family…") {
+            model.beginMoveToNewFamily(faceIDs: detail.faceIDs.filter(model.detailSelection.contains))
+        }
+        .disabled(model.detailSelection.isEmpty)
+        Button("Use Original Names") { Task { await model.useOriginalNames(faceIDs: detail.faceIDs) } }
+            .disabled(model.editedOriginals(ofFamily: detail.family) == nil)
     }
 
     // MARK: Control bar

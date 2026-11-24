@@ -83,6 +83,18 @@ extension FontStore {
         }
     }
 
+    /// Every edited family: its key (the lowercased custom name) mapped to the distinct original `family` values of
+    /// the faces carrying that custom name, sorted. Drives the "edited" mark on cards and the family page.
+    public func editedFamilies() throws -> [String: [String]] {
+        try reader.withLock {
+            let s = try reader.prepare("SELECT custom_family, family FROM faces WHERE custom_family IS NOT NULL")
+            defer { s.reset() }
+            var out: [String: Set<String>] = [:]
+            while try s.step() { out[s.text(0).lowercased(), default: []].insert(s.text(1)) }
+            return out.mapValues { $0.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending } }
+        }
+    }
+
     // MARK: Private (call inside `database.withLock` + a transaction)
 
     private func familyColumns(_ id: Int64) throws -> (String, String?)? {

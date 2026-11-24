@@ -404,6 +404,7 @@ final class FontGridController: NSObject, NSCollectionViewDataSource, NSCollecti
         let row = model.cachedRow(id)
         item.configure(faceID: id, row: row, background: preview.background)
         item.isInQuickCollection = model.quickCollectionIDs.contains(id)
+        item.editedOriginals = row.flatMap { model.editedOriginals(ofFamily: $0.family) }
         guard let row else {
             item.wantedKey = nil
             needRow(at: index)

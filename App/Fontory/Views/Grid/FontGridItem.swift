@@ -1,7 +1,8 @@
 import AppKit
 import FontoryCore
 
-/// One grid cell: the preview image, the family + style label, the activation dot and the Quick Collection mark.
+/// One grid cell: the preview image, the family + style label, the edited mark, the activation dot and the Quick
+/// Collection mark.
 final class FontGridItem: NSCollectionViewItem {
     static let identifier = NSUserInterfaceItemIdentifier("FontGridItem")
     static let labelHeight: CGFloat = 22
@@ -21,11 +22,27 @@ final class FontGridItem: NSCollectionViewItem {
     private let dot = ActivationDot()
     private let offlineBadge = NSImageView()
     private let bookmark = NSImageView()
+    /// The family is edited in Fontory: a pencil right after the name, its tooltip listing the original names.
+    private let editedMark = NSImageView()
+    private var editedMarkWidth: NSLayoutConstraint!
+    private var editedMarkGap: NSLayoutConstraint!
     /// The offline badge ends before the bookmark when it shows, else at the cell's edge.
     private var badgeBeforeBookmark: NSLayoutConstraint!
     private var badgeAtEdge: NSLayoutConstraint!
 
     /// The face is in the Quick Collection: a bookmark at the top right of the name strip.
+    /// The original family names when the face's family is edited (any face of it has a custom name), else nil.
+    var editedOriginals: [String]? {
+        didSet {
+            guard editedOriginals != oldValue else { return }
+            let shown = editedOriginals != nil
+            editedMark.isHidden = !shown
+            editedMark.toolTip = editedOriginals.map(AppModel.editedTooltip)
+            editedMarkWidth.constant = shown ? 11 : 0
+            editedMarkGap.constant = shown ? 3 : 0
+        }
+    }
+
     var isInQuickCollection = false {
         didSet {
             guard isInQuickCollection != oldValue else { return }
@@ -80,7 +97,16 @@ final class FontGridItem: NSCollectionViewItem {
         bookmark.setContentCompressionResistancePriority(.required, for: .horizontal)
         offlineBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        for v in [dot, label, offlineBadge, bookmark] as [NSView] { root.addSubview(v) }
+        editedMark.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: "Family edited in Fontory")
+        editedMark.symbolConfiguration = .init(pointSize: 10, weight: .regular)
+        editedMark.contentTintColor = .secondaryLabelColor
+        editedMark.translatesAutoresizingMaskIntoConstraints = false
+        editedMark.isHidden = true
+        editedMark.setContentCompressionResistancePriority(.required, for: .horizontal)
+        editedMarkWidth = editedMark.widthAnchor.constraint(equalToConstant: 0)
+        editedMarkGap = editedMark.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 0)
+
+        for v in [dot, label, editedMark, offlineBadge, bookmark] as [NSView] { root.addSubview(v) }
         badgeBeforeBookmark = offlineBadge.trailingAnchor.constraint(lessThanOrEqualTo: bookmark.leadingAnchor, constant: -4)
         badgeAtEdge = offlineBadge.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -Self.padding)
         NSLayoutConstraint.activate([
@@ -90,7 +116,10 @@ final class FontGridItem: NSCollectionViewItem {
             dot.heightAnchor.constraint(equalToConstant: 18),
             label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 3),
             label.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
-            offlineBadge.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 4),
+            editedMarkGap,
+            editedMarkWidth,
+            editedMark.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
+            offlineBadge.leadingAnchor.constraint(equalTo: editedMark.trailingAnchor, constant: 4),
             offlineBadge.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
             badgeAtEdge,
             bookmark.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Self.padding),
@@ -123,6 +152,7 @@ final class FontGridItem: NSCollectionViewItem {
         dot.state = .placeholder
         offlineBadge.isHidden = true
         isInQuickCollection = false
+        editedOriginals = nil
     }
 
     override var isSelected: Bool {
