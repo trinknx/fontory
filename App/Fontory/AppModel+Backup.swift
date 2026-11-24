@@ -80,15 +80,7 @@ extension AppModel {
 
     /// The quit backup, waited for at most `budget` (the write itself keeps going until the app exits).
     func writeAutomaticBackup(within budget: Duration) async {
-        let backup = Task { await self.writeAutomaticBackup() }
-        let timer = Task { try? await Task.sleep(for: budget) }
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { await backup.value }
-            group.addTask { await timer.value }
-            await group.next()
-            group.cancelAll()
-        }
-        timer.cancel()
+        await awaitAtMost(budget, Task { await self.writeAutomaticBackup() })
     }
 
     /// Back Up Now: writes a backup of the library to `url`.

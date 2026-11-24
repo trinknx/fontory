@@ -157,15 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if quitPrepared { return .terminateNow }
         Task {
-            let prepare = Task { await model.prepareForQuit() }
-            let timeout = Task { try? await Task.sleep(for: .seconds(5)) }
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await prepare.value }
-                group.addTask { await timeout.value }
-                await group.next()
-                group.cancelAll()
-            }
-            timeout.cancel()
+            await awaitAtMost(.seconds(5), Task { await model.prepareForQuit() })
             quitPrepared = true
             NSApp.reply(toApplicationShouldTerminate: true)
         }

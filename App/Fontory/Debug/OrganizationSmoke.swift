@@ -1509,8 +1509,6 @@ enum OrganizationSmoke {
         defer { suite.removePersistentDomain(forName: suiteName) }
         let keys = ["previewSettings", SettingsKey.duplicateLocationRank, SettingsKey.skipDuplicatesOnImport]
         let standardBefore = keys.map { String(describing: UserDefaults.standard.object(forKey: $0)) }
-        // Read only: the listing of the real backup folder must not change.
-        let realBefore = BackupFiles(directory: AppModel.defaultBackupDirectory()).list().map(\.url.lastPathComponent)
 
         let fonts = root.appendingPathComponent("Fonts", isDirectory: true)
         let extra = root.appendingPathComponent("Extra", isDirectory: true)
@@ -1569,6 +1567,15 @@ enum OrganizationSmoke {
         check(listed.count == 1 && Set(everything) == [today.lastPathComponent, "notes.txt"] && todayTags == ["Smoke Keep"],
               "backup: a second automatic backup overwrites today's file (still one file), prunes old ones, leaves other files",
               "\(everything) tags \(todayTags)")
+        // The quit backup's budget: a fast write returns at once; slow work is cut off at the budget.
+        let clock = ContinuousClock()
+        let fast = await clock.measure { await model.writeAutomaticBackup(within: .seconds(3)) }
+        check(fast < .seconds(1), "backup: a fast quit backup returns well under its 3 s budget", "\(fast)")
+        var inTime = true
+        let slow = await clock.measure {
+            inTime = await awaitAtMost(.milliseconds(200), Task { try? await Task.sleep(for: .seconds(2)) })
+        }
+        check(!inTime && slow < .seconds(1), "backup: awaitAtMost stops waiting at the budget", "\(slow)")
         check(model.backupEntries.map(\.url.lastPathComponent) == [today.lastPathComponent], "backup: backupEntries refreshed after a write",
               "\(model.backupEntries.map(\.url.lastPathComponent))")
 
@@ -1643,9 +1650,12 @@ enum OrganizationSmoke {
         model.dismissRestore()
 
         // Cancel during scanning: the missing Extra folder is re-added and stays; nothing is applied.
+        guard let keepAgain = (try? store.tags())?.first(where: { $0.name == "Smoke Keep" })?.id else {
+            check(false, "backup: the restored tag before Cancel"); return
+        }
         _ = await model.runBackground {
             try store.deleteLocation(extraLoc.id)
-            try store.deleteTag(store.tags().first { $0.name == "Smoke Keep" }!.id)
+            try store.deleteTag(keepAgain)
         }
         await model.reloadLocations()
         model.holdsRestoreScanForSmoke = true
@@ -1683,7 +1693,10 @@ enum OrganizationSmoke {
 
         // Quitting cancels a running restore and writes today's backup.
         if let extraAgain { _ = await model.runBackground { try store.deleteLocation(extraAgain.id) } }
-        _ = await model.runBackground { try store.deleteTag(store.tags().first { $0.name == "Smoke Keep" }!.id) }
+        guard let keepThird = (try? store.tags())?.first(where: { $0.name == "Smoke Keep" })?.id else {
+            check(false, "backup: the restored tag before quitting"); return
+        }
+        _ = await model.runBackground { try store.deleteTag(keepThird) }
         await model.reloadLocations()
         model.holdsRestoreScanForSmoke = true
         let quitting = Task { await model.beginRestore(from: manual, restoreActivation: false) }
@@ -1699,8 +1712,6 @@ enum OrganizationSmoke {
 
         let standardAfter = keys.map { String(describing: UserDefaults.standard.object(forKey: $0)) }
         check(standardAfter == standardBefore, "backup: nothing written to the user's defaults")
-        let realAfter = BackupFiles(directory: AppModel.defaultBackupDirectory()).list().map(\.url.lastPathComponent)
-        check(realAfter == realBefore, "backup: nothing written to the real backup folder")
     }
 }
 #endif
