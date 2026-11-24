@@ -66,8 +66,7 @@ public enum FontExporter {
             .appendingPathComponent(sanitize(options.archiveName)) : nil
         let root = staging ?? folder
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
-        var cleanup = true
-        defer { if cleanup, let staging { try? fm.removeItem(at: staging.deletingLastPathComponent()) } }
+        defer { if let staging { try? fm.removeItem(at: staging.deletingLastPathComponent()) } }
 
         var copied = 0, skipped = 0
         for (i, file) in files.enumerated() {
@@ -79,26 +78,28 @@ public enum FontExporter {
             guard let src = file.url, fm.fileExists(atPath: src.path) else { skipped += 1; continue }
             var dir = root
             if options.byFamily {
-                dir = root.appendingPathComponent(sanitize(file.family.isEmpty ? "Unknown" : file.family), isDirectory: true)
+                dir = root.appendingPathComponent(sanitize(file.family), isDirectory: true)
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
-            try fm.copyItem(at: src, to: uniqueURL(in: dir, name: file.fileName))
-            copied += 1
+            do {
+                try fm.copyItem(at: src, to: uniqueURL(in: dir, name: file.fileName))
+                copied += 1
+            } catch { skipped += 1 }
         }
         progress(files.count, files.count)
 
         guard let staging else { return ExportResult(copied: copied, skipped: skipped, output: folder) }
         let zip = uniqueURL(in: folder, name: sanitize(options.archiveName) + ".zip")
-        do { try ditto(["-c", "-k", "--keepParent", staging.path, zip.path]) } catch {
+        do { try Ditto.run(["-c", "-k", "--keepParent", staging.path, zip.path]) } catch {
             try? fm.removeItem(at: zip)
-            throw error
+            throw NSError(domain: "FontExporter", code: 1, userInfo: [NSLocalizedDescriptionKey: (error as? Ditto.Failure)?.message ?? "ditto failed"])
         }
-        cleanup = true
         return ExportResult(copied: copied, skipped: skipped, output: zip)
     }
 
     static func sanitize(_ name: String) -> String {
-        name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        let n = name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        return (n.isEmpty || n == "." || n == "..") ? "Unknown" : n
     }
 
     /// `Name.otf`, then `Name 2.otf`, `Name 3.otf`; never an existing path.
@@ -114,21 +115,5 @@ public enum FontExporter {
             n += 1
         } while fm.fileExists(atPath: url.path)
         return url
-    }
-
-    private static func ditto(_ args: [String]) throws {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        p.arguments = args
-        let err = Pipe()
-        p.standardError = err
-        p.standardOutput = FileHandle.nullDevice
-        try p.run()
-        let msg = err.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else {
-            throw NSError(domain: "FontExporter", code: Int(p.terminationStatus),
-                          userInfo: [NSLocalizedDescriptionKey: String(data: msg, encoding: .utf8) ?? "ditto failed"])
-        }
     }
 }

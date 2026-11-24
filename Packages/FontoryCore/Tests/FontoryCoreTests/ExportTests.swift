@@ -132,4 +132,25 @@ import Foundation
         }
         #expect(!names(env.dest).contains("Z.zip"))
     }
+
+    @Test func dotDotFamilyStaysInside() throws {
+        let env = try Env()
+        let ids = try env.add("a.otf", family: "..")
+        let r = try run(try env.store.exportFiles(faceIDs: ids), env, ExportOptions(byFamily: true))
+        #expect(r.copied == 1)
+        #expect(names(env.dest) == ["Unknown"])
+        #expect(names(env.dest.appendingPathComponent("Unknown")) == ["a.otf"])
+        #expect(!FileManager.default.fileExists(atPath: env.root.appendingPathComponent("a.otf").path))
+    }
+
+    @Test func vanishedSourceCountsAsSkipped() throws {
+        let env = try Env()
+        let a = try env.add("a.otf")
+        let b = try env.add("b.otf")
+        let files = try env.store.exportFiles(faceIDs: a + b)
+        try FileManager.default.removeItem(at: files[0].url!)
+        let r = try run(files, env)
+        #expect(r.copied == 1 && r.skipped == 1)
+        #expect(names(env.dest) == ["b.otf"])
+    }
 }

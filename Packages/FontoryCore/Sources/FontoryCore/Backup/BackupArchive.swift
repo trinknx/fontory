@@ -58,17 +58,6 @@ public enum BackupArchive {
     }
 
     private static func ditto(_ args: [String]) throws {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        p.arguments = args
-        let err = Pipe()
-        p.standardError = err
-        p.standardOutput = FileHandle.nullDevice
-        try p.run()
-        let msg = err.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else {
-            throw BackupError.unreadable(String(data: msg, encoding: .utf8) ?? "ditto failed (\(p.terminationStatus))")
-        }
+        do { try Ditto.run(args) } catch let f as Ditto.Failure { throw BackupError.unreadable(f.message) }
     }
 }
