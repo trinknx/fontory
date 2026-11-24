@@ -21,14 +21,14 @@ import Testing
 
     @Test func scopeLimitsColumns() {
         let s = SearchText("grot", scope: [.family])
-        #expect(s.ftsMatch == "{family} : \"grot\"*")
+        #expect(s.ftsMatch == "{family custom_family} : \"grot\"*")
         let all = SearchText("grot")
         #expect(all.ftsMatch?.hasPrefix("{") == true)
         #expect(all.ftsMatch?.contains("vendor") == true)
     }
 
     @Test func multipleTermsAnd() {
-        #expect(SearchText("a b", scope: [.family]).ftsMatch == "{family} : \"a\"* AND {family} : \"b\"*")
+        #expect(SearchText("a b", scope: [.family]).ftsMatch == "{family custom_family} : \"a\"* AND {family custom_family} : \"b\"*")
     }
 
     @Test func emptyInputHasNoTerms() {

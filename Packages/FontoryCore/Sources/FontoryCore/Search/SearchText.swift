@@ -60,7 +60,7 @@ public struct SearchText: Sendable, Hashable {
     private static func columns(for field: Field) -> [String] {
         switch field {
         case .name: ["full_name", "postscript_name", "style"]
-        case .family: ["family"]
+        case .family: ["family", "custom_family"]
         case .foundry: ["vendor"]
         case .designer: ["designer"]
         case .notes: ["note"]

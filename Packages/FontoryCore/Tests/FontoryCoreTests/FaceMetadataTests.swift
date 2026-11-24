@@ -42,9 +42,9 @@ import Testing
 
         let v = try db.prepare("PRAGMA user_version")
         #expect(try v.step())
-        #expect(v.int64(0) == 4)
+        #expect(v.int64(0) == Int64(Schema.currentVersion))
         v.reset()
-        #expect(Schema.currentVersion == 4)
+        #expect(Schema.currentVersion == 5)
 
         let faceCols = try columns(db, "faces")
         #expect(faceCols["features"] == "''")

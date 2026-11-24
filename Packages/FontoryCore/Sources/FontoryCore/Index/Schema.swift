@@ -1,9 +1,9 @@
 import Foundation
 
 public enum Schema {
-    public static let currentVersion: Int32 = 4
+    public static let currentVersion: Int32 = 5
 
-    private static let steps: [(version: Int32, sql: String)] = [(1, v1), (2, v2), (3, v3), (4, v4)]
+    private static let steps: [(version: Int32, sql: String)] = [(1, v1), (2, v2), (3, v3), (4, v4), (5, v5)]
 
     /// Runs each step whose version is greater than the database's `user_version`.
     public static func migrate(_ db: Database) throws {
@@ -18,6 +18,33 @@ public enum Schema {
             }
         }
     }
+
+    /// Wave 3B: the search index also covers `custom_family`, so a renamed family is found by its new name.
+    /// Recreates `faces_fts` and its triggers (the update trigger also fires on `custom_family`) and rebuilds
+    /// the index from `faces`.
+    static let v5 = """
+    DROP TRIGGER faces_ai;
+    DROP TRIGGER faces_ad;
+    DROP TRIGGER faces_au;
+    DROP TABLE faces_fts;
+    CREATE VIRTUAL TABLE faces_fts USING fts5(family, custom_family, style, full_name, postscript_name, vendor, designer, note,
+      content='faces', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
+    CREATE TRIGGER faces_ai AFTER INSERT ON faces BEGIN
+      INSERT INTO faces_fts(rowid, family, custom_family, style, full_name, postscript_name, vendor, designer, note)
+      VALUES (new.id, new.family, new.custom_family, new.style, new.full_name, new.postscript_name, new.vendor, new.designer, new.note);
+    END;
+    CREATE TRIGGER faces_ad AFTER DELETE ON faces BEGIN
+      INSERT INTO faces_fts(faces_fts, rowid, family, custom_family, style, full_name, postscript_name, vendor, designer, note)
+      VALUES ('delete', old.id, old.family, old.custom_family, old.style, old.full_name, old.postscript_name, old.vendor, old.designer, old.note);
+    END;
+    CREATE TRIGGER faces_au AFTER UPDATE OF family, custom_family, style, full_name, postscript_name, vendor, designer, note ON faces BEGIN
+      INSERT INTO faces_fts(faces_fts, rowid, family, custom_family, style, full_name, postscript_name, vendor, designer, note)
+      VALUES ('delete', old.id, old.family, old.custom_family, old.style, old.full_name, old.postscript_name, old.vendor, old.designer, old.note);
+      INSERT INTO faces_fts(rowid, family, custom_family, style, full_name, postscript_name, vendor, designer, note)
+      VALUES (new.id, new.family, new.custom_family, new.style, new.full_name, new.postscript_name, new.vendor, new.designer, new.note);
+    END;
+    INSERT INTO faces_fts(faces_fts) VALUES('rebuild');
+    """
 
     /// Wave 3A: per-face coverage (little-endian UInt32 `[start, end]` pairs, inclusive, sorted, non-overlapping),
     /// feature tags (`" liga smcp "`), default figure style (0 unknown, 1 lining, 2 oldstyle) and the version of that
