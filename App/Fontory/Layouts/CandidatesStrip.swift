@@ -88,7 +88,10 @@ struct CandidatesStrip<Source: CandidateStripSource & Observable>: View {
         // ⇧↑/⇧↓ step the reference style (Compare); without ⇧ the plain arrows go on to `onMoveCommand`. Layouts
         // ignores `.referenceStyle`.
         .onKeyPress(keys: [.upArrow, .downArrow]) { press in
-            guard press.modifiers == .shift else { return .ignored }
+            // Arrow keys may also carry numeric-pad/function/caps-lock flags: only ⇧ must be there, and no ⌘ ⌥ ⌃.
+            guard press.modifiers.contains(.shift), press.modifiers.isDisjoint(with: [.command, .option, .control]) else {
+                return .ignored
+            }
             source.cycle(.referenceStyle(press.key == .upArrow ? -1 : 1))
             return .handled
         }
