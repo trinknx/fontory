@@ -1,0 +1,42 @@
+{
+  "background": "#FFFFFF",
+  "blocks": [
+    {
+      "alignment": "left",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 746,
+        "w": 499,
+        "x": 48,
+        "y": 48
+      },
+      "id": "B884878C-A1F1-5C8D-B83D-CBDC36DD8C2E",
+      "kind": "waterfall",
+      "lineHeight": 1.25,
+      "size": 24,
+      "sizes": [
+        12,
+        16,
+        24,
+        36,
+        48,
+        72,
+        96
+      ],
+      "text": "Quiet hands make careful letters.",
+      "tracking": 0
+    }
+  ],
+  "candidates": [],
+  "foreground": "#111111",
+  "name": "Waterfall",
+  "pageSize": {
+    "h": 842,
+    "w": 595
+  },
+  "showMissing": true,
+  "version": 1
+}

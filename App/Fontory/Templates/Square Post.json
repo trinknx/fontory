@@ -1,0 +1,52 @@
+{
+  "background": "#FFFFFF",
+  "blocks": [
+    {
+      "alignment": "left",
+      "font": {
+        "family": "Helvetica Neue",
+        "postScriptName": "HelveticaNeue-Bold"
+      },
+      "frame": {
+        "h": 560,
+        "w": 920,
+        "x": 80,
+        "y": 150
+      },
+      "id": "4736ADAF-B636-5B6D-A3C1-1920541314A4",
+      "kind": "text",
+      "lineHeight": 0.95,
+      "size": 168,
+      "text": "Fresh\nbread,\nevery day",
+      "tracking": -25
+    },
+    {
+      "alignment": "left",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 140,
+        "w": 920,
+        "x": 80,
+        "y": 820
+      },
+      "id": "8EF3B631-8708-564B-B1B0-1D0E311ED6AA",
+      "kind": "text",
+      "lineHeight": 1.4,
+      "size": 36,
+      "text": "Baked before sunrise and gone by noon. Come early, stay for coffee.",
+      "tracking": 0
+    }
+  ],
+  "candidates": [],
+  "foreground": "#111111",
+  "name": "Square Post",
+  "pageSize": {
+    "h": 1080,
+    "w": 1080
+  },
+  "showMissing": true,
+  "version": 1
+}

@@ -1,0 +1,52 @@
+{
+  "background": "#FFFFFF",
+  "blocks": [
+    {
+      "alignment": "left",
+      "font": {
+        "family": "Helvetica Neue",
+        "postScriptName": "HelveticaNeue-Bold"
+      },
+      "frame": {
+        "h": 560,
+        "w": 920,
+        "x": 80,
+        "y": 150
+      },
+      "id": "388731A6-D1EC-52EC-8E46-5B518355AAF4",
+      "kind": "text",
+      "lineHeight": 0.95,
+      "size": 168,
+      "text": "Bánh mì\nthơm mỗi\nngày",
+      "tracking": -25
+    },
+    {
+      "alignment": "left",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 140,
+        "w": 920,
+        "x": 80,
+        "y": 820
+      },
+      "id": "3DBCBE34-962F-5DF0-9D9D-6D2AC202E7B7",
+      "kind": "text",
+      "lineHeight": 1.4,
+      "size": 36,
+      "text": "Nướng trước lúc bình minh, hết sạch trước buổi trưa. Ghé sớm nhé, uống cà phê cùng nhau.",
+      "tracking": 0
+    }
+  ],
+  "candidates": [],
+  "foreground": "#111111",
+  "name": "Square Post — Tiếng Việt",
+  "pageSize": {
+    "h": 1080,
+    "w": 1080
+  },
+  "showMissing": true,
+  "version": 1
+}

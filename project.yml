@@ -9,7 +9,13 @@ targets:
   Fontory:
     type: application
     platform: macOS
-    sources: [App/Fontory]
+    sources:
+      - path: App/Fontory
+        excludes:
+          - Templates
+      - path: App/Fontory/Templates
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: FontoryCore
     settings:

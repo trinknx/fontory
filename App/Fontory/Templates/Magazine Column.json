@@ -1,0 +1,91 @@
+{
+  "background": "#FFFFFF",
+  "blocks": [
+    {
+      "alignment": "left",
+      "font": {
+        "family": "Helvetica Neue",
+        "postScriptName": "HelveticaNeue-Bold"
+      },
+      "frame": {
+        "h": 150,
+        "w": 499,
+        "x": 48,
+        "y": 56
+      },
+      "id": "1528062F-B4C7-51D5-8340-43067993E387",
+      "kind": "text",
+      "lineHeight": 1.05,
+      "size": 40,
+      "text": "The slow return of the handmade",
+      "tracking": -10
+    },
+    {
+      "alignment": "left",
+      "color": "#4B5563",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia-Italic"
+      },
+      "frame": {
+        "h": 80,
+        "w": 499,
+        "x": 48,
+        "y": 226
+      },
+      "id": "68F87F58-56EE-5FA5-82DE-9290351518F9",
+      "kind": "text",
+      "lineHeight": 1.4,
+      "size": 16,
+      "text": "Why small workshops are finding new audiences, one careful object at a time.",
+      "tracking": 0
+    },
+    {
+      "alignment": "justified",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 440,
+        "w": 238,
+        "x": 48,
+        "y": 340
+      },
+      "id": "C1F36246-D5BD-5A42-875C-36C57C494CD1",
+      "kind": "text",
+      "lineHeight": 1.5,
+      "size": 10,
+      "text": "Walk into any weekend market and you will notice it: tables of hand-thrown cups, stitched notebooks, bottles of oil pressed in a single afternoon. Makers who once sold to neighbours now ship to strangers who value the story as much as the object. They keep their runs small on purpose. A shorter run means more attention, and attention is the one ingredient that cannot be rushed.",
+      "tracking": 0
+    },
+    {
+      "alignment": "justified",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 440,
+        "w": 238,
+        "x": 309,
+        "y": 340
+      },
+      "id": "B35063C7-1898-5163-B041-2D4CB28D56E6",
+      "kind": "text",
+      "lineHeight": 1.5,
+      "size": 10,
+      "text": "Customers respond to that care. They return not for novelty but for the feeling of holding something made by a person who was thinking about them. Prices tell part of the story, yet the real draw is trust, built slowly through repeat orders and honest notes in the parcel. It is an old model, quietly reinvented for a busy world, and it seems to be working.",
+      "tracking": 0
+    }
+  ],
+  "candidates": [],
+  "foreground": "#111111",
+  "name": "Magazine Column",
+  "pageSize": {
+    "h": 842,
+    "w": 595
+  },
+  "showMissing": true,
+  "version": 1
+}

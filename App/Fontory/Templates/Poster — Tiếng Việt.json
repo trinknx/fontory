@@ -1,0 +1,92 @@
+{
+  "background": "#FFFFFF",
+  "blocks": [
+    {
+      "alignment": "left",
+      "font": {
+        "family": "Helvetica Neue",
+        "postScriptName": "HelveticaNeue-Bold"
+      },
+      "frame": {
+        "h": 420,
+        "w": 900,
+        "x": 90,
+        "y": 110
+      },
+      "id": "FD5FE06F-0096-55E0-8364-0571A0370B22",
+      "kind": "text",
+      "lineHeight": 1.0,
+      "size": 120,
+      "text": "Mở cửa sổ\nđón nắng vào",
+      "tracking": -20
+    },
+    {
+      "alignment": "left",
+      "color": "#C2410C",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia-Italic"
+      },
+      "frame": {
+        "h": 130,
+        "w": 900,
+        "x": 90,
+        "y": 560
+      },
+      "id": "189E88FA-7588-5104-9A8B-27394E856392",
+      "kind": "text",
+      "lineHeight": 1.2,
+      "size": 44,
+      "text": "Một xưởng nhỏ, một chiếc bàn dài, một mùa làm việc mới.",
+      "tracking": 0
+    },
+    {
+      "alignment": "left",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 330,
+        "w": 760,
+        "x": 90,
+        "y": 740
+      },
+      "id": "85658881-05F2-5F2B-BAAB-009CCC564471",
+      "kind": "text",
+      "lineHeight": 1.5,
+      "size": 30,
+      "text": "Mỗi tấm áp phích bắt đầu từ vài dòng chữ chân thành. Hãy đặt chúng thật lớn, chừa chỗ để chữ thở, và để kiểu chữ truyền tải cảm xúc từ bên kia đường.",
+      "tracking": 0
+    },
+    {
+      "alignment": "left",
+      "color": "#6B7280",
+      "font": {
+        "family": "Helvetica Neue",
+        "postScriptName": "HelveticaNeue"
+      },
+      "frame": {
+        "h": 50,
+        "w": 900,
+        "x": 90,
+        "y": 1220
+      },
+      "id": "FC8D9585-F413-56CC-A57B-0EAA50C7640C",
+      "kind": "text",
+      "lineHeight": 1.3,
+      "size": 20,
+      "text": "THỨ BẢY 14 THÁNG 6  ·  XƯỞNG PHÍA BẮC  ·  VÀO CỬA TỰ DO",
+      "tracking": 120
+    }
+  ],
+  "candidates": [],
+  "foreground": "#111111",
+  "name": "Poster — Tiếng Việt",
+  "pageSize": {
+    "h": 1350,
+    "w": 1080
+  },
+  "showMissing": true,
+  "version": 1
+}

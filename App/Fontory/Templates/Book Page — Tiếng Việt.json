@@ -1,0 +1,71 @@
+{
+  "background": "#FFFFFF",
+  "blocks": [
+    {
+      "alignment": "left",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia-Bold"
+      },
+      "frame": {
+        "h": 70,
+        "w": 324,
+        "x": 48,
+        "y": 56
+      },
+      "id": "39D86D5C-134D-532D-A95A-EA00A715B88A",
+      "kind": "text",
+      "lineHeight": 1.15,
+      "size": 26,
+      "text": "Chương ba\nĐường dài về nhà",
+      "tracking": 0
+    },
+    {
+      "alignment": "justified",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 200,
+        "w": 324,
+        "x": 48,
+        "y": 150
+      },
+      "id": "82D103B9-FE83-50E0-A423-81EC84083097",
+      "kind": "text",
+      "lineHeight": 1.5,
+      "size": 11.5,
+      "text": "Con đường rẽ hai lần trước khi chạm tới dòng sông, và đến khúc quanh thứ hai thì Mai đã thôi không đếm những hàng rào nữa. Chiếc túi nhẹ hơn lúc sáng, dù cô không nói được mình đã bỏ lại thứ gì.",
+      "tracking": 0
+    },
+    {
+      "alignment": "justified",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 200,
+        "w": 324,
+        "x": 48,
+        "y": 330
+      },
+      "id": "07901892-2AD3-5C14-A328-309F555E1027",
+      "kind": "text",
+      "lineHeight": 1.5,
+      "size": 11.5,
+      "text": "Ở bến phà, một người đàn ông đang vá lưới bằng những ngón tay chậm rãi, kiên nhẫn. Ông không ngẩng lên khi cô hỏi về chuyến sang sông buổi tối; ông chỉ hất đầu về phía mặt nước, nơi một ngọn đèn nhỏ đã sáng bên bờ đối diện.",
+      "tracking": 0
+    }
+  ],
+  "candidates": [],
+  "foreground": "#111111",
+  "name": "Book Page — Tiếng Việt",
+  "pageSize": {
+    "h": 595,
+    "w": 420
+  },
+  "showMissing": true,
+  "version": 1
+}

@@ -1,0 +1,71 @@
+{
+  "background": "#FFFFFF",
+  "blocks": [
+    {
+      "alignment": "left",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia-Bold"
+      },
+      "frame": {
+        "h": 70,
+        "w": 324,
+        "x": 48,
+        "y": 56
+      },
+      "id": "B0837EAB-5B0F-51C3-B3DA-02DD6EB7E8BD",
+      "kind": "text",
+      "lineHeight": 1.15,
+      "size": 26,
+      "text": "Chapter Three\nThe Long Way Home",
+      "tracking": 0
+    },
+    {
+      "alignment": "justified",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 200,
+        "w": 324,
+        "x": 48,
+        "y": 150
+      },
+      "id": "14828C0B-6E83-5332-B1D4-50A6FD2BE177",
+      "kind": "text",
+      "lineHeight": 1.5,
+      "size": 11.5,
+      "text": "The road bent twice before it reached the river, and by the second bend Mara had stopped counting the fences. Her bag was lighter than it had been that morning, though she could not say what she had left behind.",
+      "tracking": 0
+    },
+    {
+      "alignment": "justified",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 200,
+        "w": 324,
+        "x": 48,
+        "y": 330
+      },
+      "id": "C3616F47-46B0-5F17-8561-D277DE9DF290",
+      "kind": "text",
+      "lineHeight": 1.5,
+      "size": 11.5,
+      "text": "At the ferry a man was mending a net with slow, patient fingers. He did not look up when she asked about the evening crossing; he only nodded toward the water, where a small lamp was already burning on the far bank.",
+      "tracking": 0
+    }
+  ],
+  "candidates": [],
+  "foreground": "#111111",
+  "name": "Book Page",
+  "pageSize": {
+    "h": 595,
+    "w": 420
+  },
+  "showMissing": true,
+  "version": 1
+}

@@ -1,0 +1,33 @@
+{
+  "background": "#FFFFFF",
+  "blocks": [
+    {
+      "alignment": "center",
+      "font": {
+        "family": "Helvetica Neue",
+        "postScriptName": "HelveticaNeue-Bold"
+      },
+      "frame": {
+        "h": 300,
+        "w": 1400,
+        "x": 100,
+        "y": 150
+      },
+      "id": "2D0C451C-C16F-5E01-8899-E750D4264069",
+      "kind": "text",
+      "lineHeight": 1.0,
+      "size": 240,
+      "text": "Lantern",
+      "tracking": -10
+    }
+  ],
+  "candidates": [],
+  "foreground": "#111111",
+  "name": "Wordmark",
+  "pageSize": {
+    "h": 600,
+    "w": 1600
+  },
+  "showMissing": true,
+  "version": 1
+}

@@ -1,0 +1,52 @@
+{
+  "background": "#FFFFFF",
+  "blocks": [
+    {
+      "alignment": "center",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 600,
+        "w": 515,
+        "x": 40,
+        "y": 40
+      },
+      "id": "0E5D0D5C-1E01-564F-9D06-A7A8D5D4111E",
+      "kind": "charset",
+      "lineHeight": 1.2,
+      "size": 20,
+      "text": "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz 0123456789 ĂÂÊÔƠƯĐ ÀÁẢÃẠẰẮẲẴẶẦẤẨẪẬÈÉẺẼẸỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌỒỐỔỖỘỜỚỞỠỢÙÚỦŨỤỪỨỬỮỰỲÝỶỸỴ ăâêôơưđ àáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵ . , : ; ! ? ' \" ( ) [ ] - – — / & @ # % * + = $ €",
+      "tracking": 0
+    },
+    {
+      "alignment": "left",
+      "font": {
+        "family": "Georgia",
+        "postScriptName": "Georgia"
+      },
+      "frame": {
+        "h": 110,
+        "w": 515,
+        "x": 40,
+        "y": 670
+      },
+      "id": "13690A01-0012-5217-B024-67CCD59C153C",
+      "kind": "text",
+      "lineHeight": 1.4,
+      "size": 20,
+      "text": "Sphinx of black quartz, judge my vow. Quạ kêu quanh khu vườn, gió thổi mạnh lắm nhé.",
+      "tracking": 0
+    }
+  ],
+  "candidates": [],
+  "foreground": "#111111",
+  "name": "Character Sheet",
+  "pageSize": {
+    "h": 842,
+    "w": 595
+  },
+  "showMissing": true,
+  "version": 1
+}
