@@ -133,13 +133,16 @@ public enum CompareRenderer {
             baselines = [baseline(centre: height / 2, [extA, extB])]
         }
 
+        // Outside glyph mode both lines start at one shared left origin (the wider line is centred).
+        let sharedOriginX = (Double(canvas.width) - max((shapedA?.width ?? 0) * kA, (shapedB?.width ?? 0) * kB)) / 2
+
         func side(_ resolved: ResolvedFont?, _ label: String, _ shaped: Shaped?, k: Double, baseline: CGFloat) -> CompareSide {
             guard let shaped else {
                 return CompareSide(font: resolved, label: label, isMissing: resolved != nil, metrics: nil,
                                    missingCharacters: 0, path: nil)
             }
             let width = shaped.width * k
-            let originX = (Double(canvas.width) - width) / 2
+            let originX = glyphMode ? (Double(canvas.width) - width) / 2 : sharedOriginX
             var metrics = CompareMetrics(xHeight: shaped.xHeight, capHeight: shaped.capHeight, ascender: shaped.ascender,
                                          descender: shaped.descender, lineWidth: width)
             if glyphMode {
@@ -201,7 +204,7 @@ public enum CompareRenderer {
             case .text(let string):
                 let attributed = NSAttributedString(string: string, attributes: [.init(kCTFontAttributeName as String): font])
                 let line = CTLineCreateWithAttributedString(attributed)
-                appendGlyphs(of: line, to: path, offsetX: x)
+                appendGlyphs(of: line, font: font, to: path, offsetX: x)
                 x += CTLineGetTypographicBounds(line, nil, nil, nil)
             case .dots:
                 let centre = CGPoint(x: x + emDot * 0.3, y: emDot * 0.3)
@@ -224,7 +227,8 @@ public enum CompareRenderer {
                       ink: ink)
     }
 
-    private static func appendGlyphs(of line: CTLine, to path: CGMutablePath, offsetX: Double) {
+    private static func appendGlyphs(of line: CTLine, font side: CTFont, to path: CGMutablePath, offsetX: Double) {
+        let sideName = CTFontCopyPostScriptName(side) as String
         let runs = CTLineGetGlyphRuns(line) as? [CTRun] ?? []
         for run in runs {
             let count = CTRunGetGlyphCount(run)
@@ -236,6 +240,8 @@ public enum CompareRenderer {
             let attributes = CTRunGetAttributes(run) as NSDictionary
             guard let runFont = attributes[kCTFontAttributeName as String] else { continue }
             let font = runFont as! CTFont   // swiftlint:disable:this force_cast
+            // CoreText font fallback must never draw a glyph the font itself lacks.
+            guard CTFontCopyPostScriptName(font) as String == sideName else { continue }
             for (glyph, position) in zip(glyphs, positions) {
                 guard let glyphPath = CTFontCreatePathForGlyph(font, glyph, nil) else { continue }
                 path.addPath(glyphPath, transform: CGAffineTransform(translationX: position.x + offsetX, y: position.y))
@@ -244,7 +250,7 @@ public enum CompareRenderer {
     }
 
     /// A font's reported height, or the ink height of a reference letter when it reports 0.
-    private static func verticalMetric(_ reported: CGFloat, fallback letter: String, font: CTFont) -> Double {
+    static func verticalMetric(_ reported: CGFloat, fallback letter: String, font: CTFont) -> Double {
         if reported > 0 { return Double(reported) }
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: letter, attributes: [.init(kCTFontAttributeName as String): font]))
         let height = Double(CTLineGetBoundsWithOptions(line, .useGlyphPathBounds).maxY)
@@ -257,9 +263,9 @@ public enum CompareRenderer {
                             guideColor: CGColor, in ctx: CGContext) {
         let sideBySide = scene.baselines.count == 2
         if options.guides {
-            drawGuides(scene, side: scene.a, scale: 1, baseline: scene.baselines[0], color: colorA, guideColor: guideColor, in: ctx)
+            drawGuides(scene, side: scene.a, scale: 1, baseline: scene.baselines[0], color: colorA, guideColor: guideColor, drawsBaseline: true, in: ctx)
             drawGuides(scene, side: scene.b, scale: scene.scaleB, baseline: scene.baselines[sideBySide ? 1 : 0],
-                       color: colorB, guideColor: guideColor, in: ctx)
+                       color: colorB, guideColor: guideColor, drawsBaseline: sideBySide, in: ctx)
         }
         ctx.saveGState()
         ctx.setLineWidth(1.5)
@@ -289,15 +295,17 @@ public enum CompareRenderer {
     }
 
     private static func drawGuides(_ scene: CompareScene, side: CompareSide, scale: Double, baseline: CGFloat,
-                                   color: CGColor, guideColor: CGColor, in ctx: CGContext) {
+                                   color: CGColor, guideColor: CGColor, drawsBaseline: Bool, in ctx: CGContext) {
         guard let metrics = side.metrics else { return }
         let width = scene.canvas.width
         ctx.saveGState()
         ctx.setLineWidth(0.5)
-        ctx.setStrokeColor(guideColor)
-        ctx.move(to: CGPoint(x: 0, y: baseline))
-        ctx.addLine(to: CGPoint(x: width, y: baseline))
-        ctx.strokePath()
+        if drawsBaseline {
+            ctx.setStrokeColor(guideColor)
+            ctx.move(to: CGPoint(x: 0, y: baseline))
+            ctx.addLine(to: CGPoint(x: width, y: baseline))
+            ctx.strokePath()
+        }
         ctx.setStrokeColor(color.copy(alpha: color.alpha * 0.6) ?? color)
         ctx.setLineDash(phase: 0, lengths: [4, 3])
         let unit = Double(scene.pointSize) * scale

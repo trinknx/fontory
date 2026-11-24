@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreText
 import Foundation
 import Testing
 @testable import FontoryCore
@@ -87,11 +88,23 @@ import Testing
         #expect(s.a.path != nil)
     }
 
-    @Test(.enabled(if: FileManager.default.fileExists(atPath: CompareRendererTests.applePath)))
-    func zeroXHeightFallsBackToInk() {
-        let symbols = resolved("AppleSymbols", "Apple Symbols", Self.applePath)
-        let s = scene("Hamburgefonstiv", rule: .matchXHeight, b: symbols)
-        #expect(s.scaleB.isFinite && s.scaleB > 0)
+    /// No installed system font reports an x-height of 0 (checked: all of /System/Library/Fonts[/Supplemental]), so the
+    /// fallback is proven directly: a reported 0 must become the measured ink height of "x" / "H".
+    @Test func zeroReportedHeightFallsBackToInk() throws {
+        let font = try #require(LayoutRenderer.font(URL(fileURLWithPath: TempFonts.hoeflerText), 0, variations: [:], size: 100))
+        let x = CompareRenderer.verticalMetric(0, fallback: "x", font: font)
+        let h = CompareRenderer.verticalMetric(0, fallback: "H", font: font)
+        #expect(x > 0 && abs(x - Double(CTFontGetXHeight(font))) < 3)
+        #expect(h > 0 && abs(h - Double(CTFontGetCapHeight(font))) < 3)
+        #expect(CompareRenderer.verticalMetric(42, fallback: "x", font: font) == 42)
+    }
+
+    @Test func overlayLinesShareLeftOrigin() {
+        for mode in [CompareMode.overlay, .sideBySide] {
+            let s = scene("Hamburgefonstiv", mode: mode)
+            let gap = abs(s.a.path!.boundingBox.minX - s.b.path!.boundingBox.minX)
+            #expect(gap <= 0.05 * s.pointSize)
+        }
     }
 
     @Test func emptyTextRendersGuidesOnly() {
