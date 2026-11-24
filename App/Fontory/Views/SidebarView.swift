@@ -21,6 +21,8 @@ struct SidebarView: View {
                 libraryRow("Last Import", "clock", .recentImport, model.counts.lastImport)
                 libraryRow("Activated", "sun.max", .activated, model.counts.activated)
                     .help("Everything active on this Mac: System, User and the fonts Fontory activated")
+                libraryRow("Untagged", "tag.slash", .untagged, model.organizationCounts.untagged)
+                    .help("Fonts without any tag")
                 if let progress = model.faceBackfillProgress, progress.total > 0 {
                     FaceBackfillRow(progress: progress)
                 }
