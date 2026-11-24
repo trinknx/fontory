@@ -152,7 +152,7 @@ public final class PreviewRenderer: Sendable {
 
     // MARK: Lines
 
-    private static let placeholder = "\u{25CC}"   // ◌ DOTTED CIRCLE
+    static let placeholder = "\u{25CC}"   // ◌ DOTTED CIRCLE
 
     /// Characters that never need a glyph of their own: C0/C1 controls and DEL, zero-width and directional
     /// formatting characters (embeddings, overrides, isolates U+2066–2069, the Arabic letter mark U+061C), joiners,
