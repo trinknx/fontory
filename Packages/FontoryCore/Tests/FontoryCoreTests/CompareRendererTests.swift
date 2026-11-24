@@ -151,4 +151,35 @@ import Testing
         #expect(CompareRenderer.percentDifference(100, 94) == -6)
         #expect(CompareRenderer.percentDifference(0, 5) == nil)
     }
+
+    /// A variable instance's PostScript name may differ from the base font's; the line must still draw.
+    @Test func variableInstanceStillDraws() throws {
+        let path = "/System/Library/Fonts/SFNS.ttf"
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        let ref = FontReference(postScriptName: "SFNS", family: "System Font", variations: ["wght": 700])
+        let font = ResolvedFont(reference: ref, faceID: 1, url: URL(fileURLWithPath: path), faceIndex: 0, isMissing: false)
+        let options = CompareOptions(mode: .overlay, sizeRule: .sameSize, outlines: false, guides: false)
+        let s = CompareRenderer.scene(a: font, aLabel: "SF", b: nil, bLabel: "", text: "Hamburgefonstiv",
+                                      options: options, canvas: Self.canvas)
+        let path2 = try #require(s.a.path)
+        #expect(!path2.isEmpty)
+    }
+
+    /// A run CoreText fell back to another font for is not drawn (the side's font lacks the character).
+    @Test func fallbackRunIsNotDrawn() throws {
+        let symbols = try #require(FontFile.font(at: URL(fileURLWithPath: Self.applePath), faceIndex: 0, size: 100))
+        var scalar: [UniChar] = [0x65E5]
+        var glyph: [CGGlyph] = [0]
+        guard !CTFontGetGlyphsForCharacters(symbols, &scalar, &glyph, 1) else { return }   // font has it: no fallback to test
+        let line = CTLineCreateWithAttributedString(NSAttributedString(
+            string: "日", attributes: [.init(kCTFontAttributeName as String): symbols]))
+        let usedFallback = (CTLineGetGlyphRuns(line) as? [CTRun] ?? []).contains { run in
+            let f = (CTRunGetAttributes(run) as NSDictionary)[kCTFontAttributeName as String] as! CTFont
+            return !CompareRenderer.isSameFace(f, symbols)
+        }
+        guard usedFallback else { return }
+        let path = CGMutablePath()
+        CompareRenderer.appendGlyphs(of: line, font: symbols, to: path, offsetX: 0)
+        #expect(path.isEmpty)
+    }
 }

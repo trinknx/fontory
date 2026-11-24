@@ -44,7 +44,10 @@ private struct CompareHeader: View {
                 HStack(spacing: 4) {
                     TextField("Text", text: $field)
                         .textFieldStyle(.roundedBorder)
-                        .onSubmit { compare.commitText(field) }
+                        .onSubmit {
+                            compare.commitText(field)
+                            compare.focusCanvas(force: true)
+                        }
                     Menu {
                         ForEach(CompareModel.presets, id: \.self) { preset in
                             Button(preset) { pick(preset) }
@@ -86,11 +89,11 @@ private struct CompareHeader: View {
                 Spacer(minLength: 0)
             }
             HStack(spacing: 8) {
-                legend(color: .blue, tag: "A", name: compare.a == nil ? nil : (compare.scene?.a.label ?? compare.a?.family))
+                legend(color: .blue, tag: "A", name: compare.legendName(a: true))
                 Button { Task { await compare.swap() } } label: { Image(systemName: "arrow.left.arrow.right") }
                     .help("Swap A and B")
                     .disabled(compare.a == nil || compare.b == nil)
-                legend(color: .red, tag: "B", name: compare.b == nil ? nil : (compare.scene?.b.label ?? compare.b?.family))
+                legend(color: .red, tag: "B", name: compare.legendName(a: false))
                 Spacer(minLength: 0)
                 Text("←→ family  ↑↓ style  ⇧↑↓ A's style  ⌘C copy")
                     .font(.caption)
@@ -183,6 +186,9 @@ enum CompareReadout {
         return rows
     }
 
+    /// B and Δ% columns only when there is a B (spec: no B → the readout shows A only).
+    nonisolated static func showsB(_ scene: CompareScene) -> Bool { scene.b.font != nil }
+
     nonisolated static func lacks(_ side: String, _ count: Int) -> String? {
         count > 0 ? "\(side) lacks \(count) character\(count == 1 ? "" : "s")" : nil
     }
@@ -205,20 +211,25 @@ private struct CompareReadoutView: View {
             if let scene {
                 let rows = CompareReadout.rows(scene)
                 let notes = CompareReadout.notes(scene)
+                let hasB = CompareReadout.showsB(scene)
                 VStack(alignment: .leading, spacing: 4) {
                     Grid(alignment: .trailing, horizontalSpacing: 20, verticalSpacing: 1) {
                         GridRow {
                             Text("")
                             Text("A").foregroundStyle(Color(nsColor: .systemBlue)).fontWeight(.semibold)
-                            Text("B").foregroundStyle(Color(nsColor: .systemRed)).fontWeight(.semibold)
-                            Text("Δ%").foregroundStyle(.secondary)
+                            if hasB {
+                                Text("B").foregroundStyle(Color(nsColor: .systemRed)).fontWeight(.semibold)
+                                Text("Δ%").foregroundStyle(.secondary)
+                            }
                         }
                         ForEach(rows, id: \.title) { row in
                             GridRow {
                                 Text(row.title).foregroundStyle(.secondary).gridColumnAlignment(.leading)
                                 Text(row.a)
-                                Text(row.b)
-                                Text(row.delta).foregroundStyle(.secondary)
+                                if hasB {
+                                    Text(row.b)
+                                    Text(row.delta).foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }

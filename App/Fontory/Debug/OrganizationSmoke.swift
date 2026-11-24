@@ -224,20 +224,67 @@ enum OrganizationSmoke {
               && CompareReadout.lacks("B", 1) == "B lacks 1 character" && CompareReadout.lacks("A", 3) == "A lacks 3 characters"
               && CompareReadout.lacks("A", 0) == nil,
               "compare: readout formatting (percent, fraction, lacks)")
+        model.compare.canvasDidResize(CGSize(width: 800, height: 400), scale: 1)
+        await model.compare.waitForRenderForSmoke()
         if let scene = model.compare.scene {
             check(CompareReadout.rows(scene).map(\.title) == ["x-height", "Cap height", "Ascender", "Descender", "Width"]
-                  && CompareReadout.notes(scene).isEmpty,
-                  "compare: readout rows for a line (no scale note at the same size)")
+                  && CompareReadout.notes(scene).isEmpty && CompareReadout.showsB(scene),
+                  "compare: readout rows for a line (no scale note at the same size), B and Δ% shown with a B")
+        } else {
+            check(false, "compare: readout scene rendered after a canvas resize")
         }
+        await model.compare.open(referenceFaceID: serif, candidateFaceIDs: [])
+        await model.compare.waitForRenderForSmoke()
+        if let scene = model.compare.scene {
+            check(!CompareReadout.showsB(scene), "compare: no B hides the B and Δ% readout columns")
+        } else {
+            check(false, "compare: no-B scene rendered")
+        }
+        // Dropping fonts into an empty window: the first becomes A, the rest the candidates, the message goes.
+        await model.compare.open(referenceFaceID: nil, candidateFaceIDs: [])
+        check(model.compare.a == nil && model.compare.emptyMessage != nil, "compare: empty before the drop")
+        await model.compare.addCandidates(faceIDs: [sans, mono, serif])
+        await model.compare.waitForRenderForSmoke()
+        check(model.compare.a?.family == "Smoke Sans" && model.compare.candidates.map(\.family) == ["Smoke Mono", "Smoke Serif"]
+              && model.compare.b?.family == "Smoke Mono" && model.compare.emptyMessage == nil,
+              "compare: dropping fonts into an empty window makes the first A, the rest candidates, and clears the message",
+              "\(model.compare.a?.family ?? "nil") \(model.compare.candidates.map(\.family)) \(model.compare.b?.family ?? "nil") \(model.compare.emptyMessage ?? "nil")")
         model.selection = [sans, mono]
         model.quickCollectionIDs = [serif, sans, mono]
         model.openFamilyDetail(faceID: serif)
         _ = await eventually { model.detail?.family == "Smoke Serif" }
         check(model.compareSource.reference == serif && model.compareSource.candidates == [sans, mono],
               "compare: an open family page wins over 2+ selected faces", "\(model.compareSource)")
+        // A family page compares the style being viewed: the single selected face, else the representative.
+        model.setDetailForSmoke(FamilyDetail(family: "Smoke Serif", faceIDs: [serif, sans], representativeID: serif), selection: [sans])
+        check(model.compareSource.reference == sans, "compare: a family page with one style selected compares that style",
+              "\(model.compareSource)")
+        model.setDetailForSmoke(FamilyDetail(family: "Smoke Serif", faceIDs: [serif, sans], representativeID: serif), selection: [])
+        check(model.compareSource.reference == serif, "compare: a family page with no style selected compares the representative")
+        model.setDetailForSmoke(FamilyDetail(family: "Smoke Serif", faceIDs: [serif, sans], representativeID: serif), selection: [sans, serif])
+        check(model.compareSource.reference == serif, "compare: a family page with 2 styles selected compares the representative")
+        model.setDetailForSmoke(nil)
         model.closeFamilyDetail()
         model.quickCollectionIDs = []
         model.selection = []
+
+        // Characters ▸ Compare… keeps the previous custom text in the recents, then sets the character.
+        compare.setText("Previous custom")
+        await compare.open(referenceFaceID: serif, candidateFaceIDs: [sans], text: "ß")
+        check(compare.text == "ß" && compare.recentTexts.first == "Previous custom",
+              "compare: opening with a character text pushes the previous custom text to the recents", "\(compare.recentTexts)")
+        let recentsBefore = compare.recentTexts
+        compare.setText(CompareModel.presets[1])
+        await compare.open(referenceFaceID: serif, candidateFaceIDs: [sans], text: "Q")
+        check(compare.recentTexts == recentsBefore, "compare: a preset previous text is not pushed to the recents")
+        // The legend names the current A, not the previous scene's.
+        await compare.waitForRenderForSmoke()
+        await compare.open(referenceFaceID: mono, candidateFaceIDs: [sans])
+        check(compare.legendName(a: true) == "Smoke Mono", "compare: the legend shows the current A while a render is pending",
+              compare.legendName(a: true) ?? "nil")
+        await compare.waitForRenderForSmoke()
+        check(compare.legendName(a: true) == "Smoke Mono Regular", "compare: the legend shows Family Style once rendered",
+              compare.legendName(a: true) ?? "nil")
 
         check(standardKeys() == standardBefore, "compare: nothing was written to the standard defaults",
               "\(standardKeys()) vs \(standardBefore)")

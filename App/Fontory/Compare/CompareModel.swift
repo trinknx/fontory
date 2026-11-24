@@ -34,8 +34,8 @@ final class CompareModel: CandidateStripSource {
     private(set) var emptyMessage: String?
     @ObservationIgnored var fontStore: @MainActor () -> FontStore? = { nil }
     var isKey = false
-    /// Set by the canvas: gives it keyboard focus unless the text field is being edited.
-    @ObservationIgnored var focusCanvas: (() -> Void)?
+    /// Set by the canvas (see `focusCanvas(force:)`).
+    @ObservationIgnored var canvasFocusHandler: ((Bool) -> Void)?
     /// The canvas's appearance (light/dark), which the colours are resolved for; nil until the window exists.
     @ObservationIgnored private(set) var appearance: NSAppearance?
 
@@ -65,6 +65,20 @@ final class CompareModel: CandidateStripSource {
             guides: defaults.object(forKey: Key.guides) as? Bool ?? true)
     }
 
+    /// Gives the canvas keyboard focus, unless the text field is being edited (so typing is never interrupted).
+    /// `force` is for an explicit action (a click on a candidate or Swap, Return in the field): the text is
+    /// committed, so the canvas takes focus even after typing.
+    func focusCanvas(force: Bool = false) { canvasFocusHandler?(force) }
+
+    /// The legend's name for A or B: nil when that side is empty; the scene's "Family Style" label only when the
+    /// scene was rendered for the current font (while a render is pending, the family name).
+    func legendName(a isA: Bool) -> String? {
+        guard let current = isA ? a : b else { return nil }
+        let side = isA ? scene?.a : scene?.b
+        if let side, side.font?.reference == current { return side.label }
+        return current.family
+    }
+
     // MARK: Opening
 
     /// Replaces A, B and the candidates: A is `referenceFaceID`'s face (else the first candidate's), the candidates
@@ -72,10 +86,13 @@ final class CompareModel: CandidateStripSource {
     func open(referenceFaceID: Int64?, candidateFaceIDs: [Int64], text newText: String? = nil) async {
         openGeneration += 1
         let gen = openGeneration
-        defer { focusCanvas?() }
+        defer { focusCanvas() }
         await run { model in
             guard gen == model.openGeneration else { return }
-            if let newText { model.setText(newText) }
+            if let newText, newText != model.text {
+                model.pushRecent(model.text)
+                model.setText(newText)
+            }
             var ids = candidateFaceIDs
             let referenceID: Int64? = referenceFaceID ?? (ids.isEmpty ? nil : ids.removeFirst())
             guard let referenceID, let store = model.fontStore() else { model.showEmpty(); return }
@@ -107,6 +124,7 @@ final class CompareModel: CandidateStripSource {
     /// A and B are read when the swap runs, after earlier cycling and opening finished.
     func swap() async {
         let gen = openGeneration
+        defer { focusCanvas(force: true) }
         await run { model in
             guard gen == model.openGeneration, let oldA = model.a, let oldB = model.b, let store = model.fontStore() else { return }
             let representative = await Task.detached(priority: .userInitiated) { () -> FontReference? in
@@ -133,6 +151,11 @@ final class CompareModel: CandidateStripSource {
     /// Sets the text and, when it is a custom one, pushes it to the front of the recent texts (Return, preset pick).
     func commitText(_ s: String) {
         setText(s)
+        pushRecent(s)
+    }
+
+    /// A custom text (not a preset, not blank) goes to the front of the recents.
+    private func pushRecent(_ s: String) {
         guard !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !Self.presets.contains(s) else { return }
         recentTexts.removeAll { $0 == s }
         recentTexts.insert(s, at: 0)
@@ -362,6 +385,7 @@ extension CompareModel {
     /// B becomes that family, in its style closest to A.
     func pickCandidate(_ ref: FontReference) async {
         let gen = openGeneration
+        defer { focusCanvas(force: true) }
         await run { model in
             guard gen == model.openGeneration else { return }
             let chosen = if let a = model.a { await model.closestStyle(in: ref, to: a) } else { ref }
@@ -377,11 +401,30 @@ extension CompareModel {
     }
 
     /// Dragged or added fonts: their families (A's excluded) join the candidates; with no B yet the first becomes B.
+    /// With no A yet (the empty window) the first dropped face becomes A and the rest the candidates.
     func addCandidates(faceIDs: [Int64]) async {
         guard !faceIDs.isEmpty else { return }
         let gen = openGeneration
+        defer { focusCanvas(force: true) }
         await run { model in
             guard gen == model.openGeneration, let store = model.fontStore() else { return }
+            if model.a == nil {
+                let found = await Task.detached(priority: .userInitiated) { () -> (FontReference, [FontReference])? in
+                    guard let first = faceIDs.first, let ref = try? store.reference(forFace: first) else { return nil }
+                    return (ref, (try? store.candidateReferences(faceIDs: Array(faceIDs.dropFirst()))) ?? [])
+                }.value
+                guard gen == model.openGeneration, let (ref, refs) = found else { return }
+                let list = PairingCycler.merge([], adding: refs).filter { $0.family.lowercased() != ref.family.lowercased() }
+                let first: FontReference?
+                if let candidate = list.first { first = await model.closestStyle(in: candidate, to: ref) } else { first = nil }
+                guard gen == model.openGeneration else { return }
+                model.emptyMessage = nil
+                model.a = ref
+                model.candidates = list
+                model.b = first
+                model.refreshRender()
+                return
+            }
             let refs = await Task.detached(priority: .userInitiated) { (try? store.candidateReferences(faceIDs: faceIDs)) ?? [] }.value
             guard gen == model.openGeneration else { return }
             let own = model.a?.family.lowercased()

@@ -42,8 +42,11 @@ final class CompareCanvasView: NSView {
     }
 
     /// Takes keyboard focus unless the user is editing the text field (so the arrows cycle, never move a caret).
-    func takeFocus() {
-        guard let window, !(window.firstResponder is NSText && fieldEdited) else { return }
+    /// `force` (an explicit action, text committed) takes it even after typing.
+    func takeFocus(force: Bool = false) {
+        guard let window else { return }
+        if force { fieldEdited = false }
+        guard !(window.firstResponder is NSText && fieldEdited) else { return }
         fieldEdited = false
         if window.firstResponder !== self { window.makeFirstResponder(self) }
     }
@@ -112,7 +115,7 @@ final class CompareCanvasView: NSView {
             let sender = note.object as? NSView
             MainActor.assumeIsolated { if let self, sender?.window === self.window { self.fieldEdited = true } }
         }
-        model?.focusCanvas = { [weak self] in self?.takeFocus() }
+        model?.canvasFocusHandler = { [weak self] force in self?.takeFocus(force: force) }
         let appearance = effectiveAppearance
         // Arrows work as soon as the window opens, without a click: SwiftUI may focus the header's text field by
         // default, so the canvas takes focus again once the window has settled.

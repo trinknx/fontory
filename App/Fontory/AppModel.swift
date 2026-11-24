@@ -758,9 +758,10 @@ final class AppModel {
     /// The Compare window's model (remembered settings in `UserDefaults.standard`).
     let compare = CompareModel()
 
-    /// What ⌥⌘K compares: an open family page's representative against the Quick Collection's other families; else 2+ selected faces (browser order) → the first against the rest; one selected face or an
-    /// open family page (its representative) against the Quick Collection's other families; else the Quick
-    /// Collection's first face against the rest.
+    /// What ⌥⌘K compares. An open family page wins over any browser selection: A is the style being viewed (the
+    /// single face selected on the page, else the family's representative) against the Quick Collection's other
+    /// families. Otherwise 2+ selected faces (browser order) → the first against the rest; one selected face
+    /// against the Quick Collection's other families; else the Quick Collection's first face against the rest.
     var compareSource: (reference: Int64?, candidates: [Int64]) {
         let quick = quickCollectionIDs.sorted()
         // An open family page wins over any browser selection (as in `layoutsSourceFaceIDs`).
@@ -768,7 +769,11 @@ final class AppModel {
             let ordered = selectionInBrowserOrder
             return (ordered.first, Array(ordered.dropFirst()))
         }
-        let single = detail?.representativeID ?? selection.first
+        let single: Int64? = if let detail {
+            detailSelection.count == 1 ? detailSelection.first : detail.representativeID
+        } else {
+            selection.first
+        }
         if let single {
             var others = quick.filter { $0 != single }
             if let store = backend?.store, !others.isEmpty,
@@ -1853,6 +1858,11 @@ final class AppModel {
     }
 
     func refreshNowForSmoke() async { await refreshNow() }
+
+    func setDetailForSmoke(_ value: FamilyDetail?, selection ids: Set<Int64> = []) {
+        detail = value
+        detailSelection = ids
+    }
 
     /// Waits until no scan runs.
     func waitForScansForSmoke() async {

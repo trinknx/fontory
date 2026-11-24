@@ -227,8 +227,16 @@ public enum CompareRenderer {
                       ink: ink)
     }
 
-    private static func appendGlyphs(of line: CTLine, font side: CTFont, to path: CGMutablePath, offsetX: Double) {
-        let sideName = CTFontCopyPostScriptName(side) as String
+    /// Whether two CTFonts are the same face: by font file URL (a variable instance's PostScript name can differ
+    /// from the base font's), falling back to the PostScript name only when a URL is missing.
+    static func isSameFace(_ a: CTFont, _ b: CTFont) -> Bool {
+        let urlA = CTFontCopyAttribute(a, kCTFontURLAttribute) as? URL
+        let urlB = CTFontCopyAttribute(b, kCTFontURLAttribute) as? URL
+        if let urlA, let urlB { return urlA == urlB }
+        return CTFontCopyPostScriptName(a) as String == CTFontCopyPostScriptName(b) as String
+    }
+
+    static func appendGlyphs(of line: CTLine, font side: CTFont, to path: CGMutablePath, offsetX: Double) {
         let runs = CTLineGetGlyphRuns(line) as? [CTRun] ?? []
         for run in runs {
             let count = CTRunGetGlyphCount(run)
@@ -241,7 +249,7 @@ public enum CompareRenderer {
             guard let runFont = attributes[kCTFontAttributeName as String] else { continue }
             let font = runFont as! CTFont   // swiftlint:disable:this force_cast
             // CoreText font fallback must never draw a glyph the font itself lacks.
-            guard CTFontCopyPostScriptName(font) as String == sideName else { continue }
+            guard isSameFace(font, side) else { continue }
             for (glyph, position) in zip(glyphs, positions) {
                 guard let glyphPath = CTFontCreatePathForGlyph(font, glyph, nil) else { continue }
                 path.addPath(glyphPath, transform: CGAffineTransform(translationX: position.x + offsetX, y: position.y))
