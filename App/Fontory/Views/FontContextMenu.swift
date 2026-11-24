@@ -14,6 +14,7 @@ enum FontContextMenu {
         menu.addItem(quickCollectionItem(for: ids, model: model))
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem("Reveal in Finder") { model.revealInFinder(ids) })
+        menu.addItem(ClosureMenuItem("Export Fonts…") { Task { await model.exportFonts(faceIDs: ids, suggestedName: "Fonts") } })
         menu.addItem(ClosureMenuItem("Copy Details") { model.copyDetails(ids) })
         if ids.count == 1, let id = ids.first {
             menu.addItem(.separator())

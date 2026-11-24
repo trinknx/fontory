@@ -199,6 +199,8 @@ private struct TagMenu: View {
         Button("Activate All") { Task { await model.activateTag(tag.id, on: true) } }
         Button("Deactivate All") { Task { await model.activateTag(tag.id, on: false) } }
         Divider()
+        Button("Export Fonts…") { Task { await model.exportTag(tag.id) } }
+        Divider()
         Button("Delete…") { model.confirmDeleteTag(tag.id) }
     }
 }
@@ -213,6 +215,8 @@ private struct QuickCollectionRow: View {
             .tag(SidebarItem.scope(.quickCollection))
             .contextMenu {
                 Button("Save as Tag…") { promptSaveQuickCollectionAsTag(model: model) }
+                    .disabled(model.quickCollectionIDs.isEmpty)
+                Button("Export Fonts…") { Task { await model.exportQuickCollection() } }
                     .disabled(model.quickCollectionIDs.isEmpty)
                 Button("Clear…") { model.confirmClearQuickCollection() }
                     .disabled(model.quickCollectionIDs.isEmpty)

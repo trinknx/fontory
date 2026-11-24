@@ -64,6 +64,9 @@ struct FontoryApp: App {
                 }
                 .keyboardShortcut("j")
                 .disabled(!model.isBrowserKey || model.quickCollectionTargetSet.isEmpty)
+                Button("Export Fonts…") { if model.browserIsKey { Task { await model.exportSelection() } } }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+                    .disabled(!model.isBrowserKey || (model.selection.isEmpty && (model.detail == nil || model.detailSelection.isEmpty)))
                 Divider()
                 Button("Find Duplicates") { model.applySidebarSelection([.duplicates], modifiers: []) }
                     .keyboardShortcut("d", modifiers: [.command, .shift])

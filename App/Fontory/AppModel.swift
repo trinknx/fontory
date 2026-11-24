@@ -684,6 +684,17 @@ final class AppModel {
     /// Note write batches started (for the smoke check of the debounce).
     @ObservationIgnored var noteWriteCount = 0
 
+    // MARK: Export (actions in AppModel+Export.swift)
+
+    /// The running export's progress, set only for a large export (more than 50 files); `ExportSheet` shows it.
+    var exportProgress: (done: Int, total: Int)?
+    @ObservationIgnored var exportCancel = ExportCancelFlag()
+    /// The last export's outcome (the smoke run reads it).
+    @ObservationIgnored var lastExportResult: ExportResult?
+    /// Smoke seams: the destination folder and options that replace the folder panel and offline question.
+    @ObservationIgnored var exportDestinationOverride: URL?
+    @ObservationIgnored var exportOptionsOverride: (byFamily: Bool, zip: Bool)?
+
     // MARK: Backups (actions in AppModel+Backup.swift)
 
     /// Where automatic and safety backups go: `~/Library/Application Support/Fontory/Backups` (the path only; it is

@@ -42,6 +42,7 @@ struct MainWindow: View {
         .toolbar { BrowserToolbar(model: model) }
         .frame(minWidth: 820, minHeight: 480)
         .modelAlert(model, inSettings: false)
+        .sheet(isPresented: Binding(get: { model.exportProgress != nil }, set: { _ in })) { ExportSheet() }
         .sheet(item: $model.tagPanel) { TagPanel(model: model, request: $0) }
         .sheet(item: $model.smartTagEditor) { SmartTagEditor(editor: $0, model: model) }
         .alert("Save Preview Text as Preset", isPresented: $model.isNamingPreset) {

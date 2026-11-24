@@ -76,6 +76,12 @@ struct FamilyDetailView: View {
                     .truncationMode(.tail)
                     .textSelection(.enabled)
                 Spacer(minLength: 0)
+                Button {
+                    Task { await model.exportFamily(detail) }
+                } label: {
+                    Label("Export…", systemImage: "square.and.arrow.up")
+                }
+                .help("Export this family’s font files")
             }
             FamilyHeaderPreview(model: model, faceID: detail.representativeID, rowsVersion: model.rowsVersion,
                                 preview: model.preview)

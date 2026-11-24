@@ -51,6 +51,7 @@ enum OrganizationSmoke {
             await smartEditorSteps(model, backend: backend)
             await reviewFixSteps(model, backend: backend)
             await filterSteps(model, backend: backend, folder: dir)
+            await exportSteps(model, faces: faces, folder: dir)
             await duplicateSteps()
             await backupSteps()
         } catch {
@@ -1128,6 +1129,43 @@ enum OrganizationSmoke {
 
     /// A temporary library (its own registrar and settings suite) with copies of a system font: an OTF-named copy, a TTF
     /// copy, a copy in a subfolder (for the Trash) and a padded copy (same font, different file).
+    /// Export (spec §19) with the panels skipped: a tag's files, the Quick Collection as a ZIP, a missing file counted.
+    private static func exportSteps(_ model: AppModel, faces: [String: Int64], folder: URL) async {
+        let fm = FileManager.default
+        guard let serif = faces["Smoke Serif"], let sans = faces["Smoke Sans"], let mono = faces["Smoke Mono"] else {
+            check(false, "export: faces missing")
+            return
+        }
+        // Real files for Serif and Sans; Mono's file does not exist.
+        for name in ["SmokeSerif.otf", "SmokeSans.otf"] {
+            try? Data("font \(name)".utf8).write(to: folder.appendingPathComponent(name))
+        }
+        try? fm.removeItem(at: folder.appendingPathComponent("SmokeMono.otf"))
+        let out = folder.appendingPathComponent("ExportOut", isDirectory: true)
+        try? fm.createDirectory(at: out, withIntermediateDirectories: true)
+        model.exportDestinationOverride = out
+        model.exportOptionsOverride = (byFamily: false, zip: false)
+        guard let tag = await model.createTag(name: "ExportTag", parentID: nil) else { check(false, "export: create tag"); return }
+        await model.setTag(tag, onFaces: [serif, sans], included: true)
+        await model.exportTag(tag)
+        let copied = ((try? fm.contentsOfDirectory(atPath: out.path)) ?? []).sorted()
+        check(copied == ["SmokeSans.otf", "SmokeSerif.otf"], "export: a tag's files are copied into the destination", "\(copied)")
+        check(model.lastExportResult?.copied == 2 && model.lastExportResult?.skipped == 0, "export: the tag export reports 2 copied", "\(String(describing: model.lastExportResult))")
+        check(model.alert == nil, "export: no alert while the destination is overridden", model.alert?.message ?? "")
+
+        await model.toggleQuickCollection([serif, sans, mono])
+        model.exportOptionsOverride = (byFamily: true, zip: true)
+        await model.exportQuickCollection()
+        let zip = out.appendingPathComponent("Quick Collection.zip")
+        check(fm.fileExists(atPath: zip.path), "export: the Quick Collection with ZIP produces Quick Collection.zip",
+              "\(((try? fm.contentsOfDirectory(atPath: out.path)) ?? []))")
+        check(model.lastExportResult?.copied == 2 && model.lastExportResult?.skipped == 1 && model.lastExportResult?.output == zip,
+              "export: the missing file is skipped and counted", "\(String(describing: model.lastExportResult))")
+        check(model.exportProgress == nil, "export: the progress sheet is closed afterwards")
+        model.exportDestinationOverride = nil
+        model.exportOptionsOverride = nil
+    }
+
     private static func duplicateSteps() async {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("FontoryDuplicatesSmoke-\(UUID().uuidString)", isDirectory: true)
