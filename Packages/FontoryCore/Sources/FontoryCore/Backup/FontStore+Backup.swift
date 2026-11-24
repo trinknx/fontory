@@ -13,7 +13,7 @@ extension FontStore {
             while try ls.step() {
                 let id = ls.int64(0)
                 indexByID[id] = locations.count
-                locations.append(.init(index: locations.count, kind: Int(ls.int64(1)), volumeUUID: ls.text(2),
+                locations.append(.init(index: locations.count, id: id, kind: Int(ls.int64(1)), volumeUUID: ls.text(2),
                                        relativePath: ls.text(3), displayName: ls.text(4), lastKnownPath: ls.text(5),
                                        members: nil))
             }
@@ -210,9 +210,11 @@ extension FontStore {
                     ins.reset()
                     tagMap[tag.id] = database.lastInsertRowID
                 }
-                // NEEDS_CONTEXT: the manifest does not record the backed-up library's location ids, so a location
-                // value in a rule cannot be mapped yet; every one becomes the tombstone.
-                let locationByOriginalID: [Int64: Int64] = [:]
+                // Rule location values are the backed-up library's ids: backup id -> index -> current id.
+                var locationByOriginalID: [Int64: Int64] = [:]
+                for loc in m.locations {
+                    if let old = loc.id, let current = locationMap[loc.index] { locationByOriginalID[old] = current }
+                }
                 let ruleUp = try database.prepare("UPDATE tags SET rule_json = ? WHERE id = ?")
                 for tag in tagOrder {
                     guard let json = tag.rule else { continue }

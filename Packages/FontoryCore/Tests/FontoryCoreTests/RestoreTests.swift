@@ -151,6 +151,9 @@ import Testing
         let m = try manifest(f)
 
         let g = try Fixture.make()
+        try g.store.deleteLocation(g.locA.id)  // re-added below with a new id, so ids differ from the backup's
+        let newA = try g.store.upsertLocation(kind: .folder, volumeUUID: "VOL-A", relativePath: "Fonts", displayName: "A", lastKnownPath: "/Volumes/A/Fonts")
+        #expect(newA.id != f.locA.id)
         var map = try g.store.locationMap(for: m)
         map.removeValue(forKey: m.locations.first { $0.volumeUUID == "VOL-B" }!.index)
         _ = try g.store.restore(m, locationMap: map)
@@ -163,9 +166,7 @@ import Testing
         #expect(restored.conditions[0].value == .int(newTarget))
         #expect(restored.conditions[2].value == .int(SmartRule.deletedID))
         #expect(restored.conditions[3] == rule.conditions[3])
-        withKnownIssue("manifest locations carry no original location id (NEEDS_CONTEXT)") {
-            #expect(restored.conditions[1].value == .int(g.locA.id))
-        }
+        #expect(restored.conditions[1].value == .int(newA.id))
     }
 
     @Test func missingLocationFacesNotFound() throws {

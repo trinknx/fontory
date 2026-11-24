@@ -20,6 +20,9 @@ public struct BackupManifest: Codable, Sendable, Equatable {
 
     public struct Location: Codable, Sendable, Equatable {
         public var index: Int
+        /// The backed-up library's location id, so location ids inside smart rules can be remapped.
+        /// Optional: manifests written before it was added still decode.
+        public var id: Int64?
         public var kind: Int
         public var volumeUUID: String
         public var relativePath: String

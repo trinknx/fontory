@@ -47,6 +47,8 @@ import Testing
         #expect(m.tags.first { $0.id == child }?.parentID == parent)
         #expect(m.tags.first { $0.id == smart }?.rule == rule)
         #expect(m.settings.skipDuplicatesOnImport)
+        #expect(m.locations.first { $0.volumeUUID == "VOL-A" }?.id == f.locA.id)
+        #expect(m.locations.first { $0.volumeUUID == "VOL-B" }?.id == f.locB.id)
         #expect(m.settings.locationRank == [m.locations.first { $0.volumeUUID == "VOL-B" }!.index, m.locations.first { $0.volumeUUID == "VOL-A" }!.index])
     }
 
