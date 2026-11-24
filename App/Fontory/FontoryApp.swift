@@ -29,6 +29,22 @@ struct FontoryApp: App {
                 Button("Back Up Library…") { model.showBackUpPanel() }
                 RestoreLibraryMenuItem(model: model)
             }
+            // Export and Print act on the Layouts window when it is key. The standard Print item (⌘P) is replaced:
+            // the browser has no printing and no other ⌘P item (Preview Options is ⌥⌘P).
+            CommandGroup(replacing: .printItem) {
+                Button("Export PDF…") {
+                    if model.layouts.windowIsKey { Task { await model.layouts.exportPDFWithPanel() } }
+                }
+                .disabled(!model.layouts.isKey || !model.layouts.canExport)
+                Button("Export PDF for Each Candidate…") {
+                    if model.layouts.windowIsKey { Task { await model.layouts.exportPDFForEachCandidateWithPanel() } }
+                }
+                .disabled(!model.layouts.isKey || !model.layouts.canExportCandidates)
+                Divider()
+                Button("Print…") { if model.layouts.windowIsKey { model.layouts.printLayout() } }
+                    .keyboardShortcut("p")
+                    .disabled(!model.layouts.isKey || !model.layouts.canExport)
+            }
             CommandGroup(after: .undoRedo) {
                 // ⌘Z itself reaches it through the key monitor below (only in the browser, outside text fields),
                 // so the standard Undo keeps working for text.

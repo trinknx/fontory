@@ -154,6 +154,24 @@ import Testing
         #expect(box.size == CGSize(width: 600, height: 400))
     }
 
+    @Test func cancelledPDFWritesNothing() throws {
+        let tmp = try TempFonts()
+        defer { tmp.cleanup() }
+        let docs = (0..<5).map { _ in doc([]) }
+        let url = tmp.root.appendingPathComponent("cancel.pdf")
+        var asked: [Int] = []
+        #expect(throws: CancellationError.self) {
+            try LayoutRenderer.pdf(docs, fonts: [:], to: url) { i, n in
+                asked.append(i)
+                return i < 2 && n == 5
+            }
+        }
+        #expect(asked == [0, 1, 2])
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+        let left = (try? FileManager.default.contentsOfDirectory(atPath: tmp.root.path)) ?? []
+        #expect(!left.contains { $0.hasSuffix(".pdf") })
+    }
+
     @Test func documentsForEachCandidateUseClosestStyle() {
         let blockFont = reference("Old-Bold", "Old")
         let a = reference("A-Regular", "A"), b = reference("B-Regular", "B")

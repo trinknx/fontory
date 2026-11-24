@@ -98,10 +98,18 @@ public enum LayoutRenderer {
     }
 
     /// Writes a vector PDF with one page per document, each at its `pageSize`. The file is replaced atomically.
-    public static func pdf(_ docs: [LayoutDocument], fonts: [FontReference: ResolvedFont], to url: URL) throws {
+    /// `shouldContinue(pageIndex, pageCount)` is asked before each page; when it returns false nothing is written
+    /// and `CancellationError` is thrown (progress and Cancel for long exports).
+    public static func pdf(_ docs: [LayoutDocument], fonts: [FontReference: ResolvedFont], to url: URL,
+                           shouldContinue: ((_ pageIndex: Int, _ pageCount: Int) -> Bool)? = nil) throws {
         let temp = url.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).pdf")
         guard let ctx = CGContext(temp as CFURL, mediaBox: nil, nil) else { throw LayoutRenderError.cannotCreatePDF(url) }
-        for doc in docs {
+        for (index, doc) in docs.enumerated() {
+            if let shouldContinue, !shouldContinue(index, docs.count) {
+                ctx.closePDF()
+                try? FileManager.default.removeItem(at: temp)
+                throw CancellationError()
+            }
             var box = CGRect(x: 0, y: 0, width: max(1, doc.pageSize.w), height: max(1, doc.pageSize.h))
             let boxData = Data(bytes: &box, count: MemoryLayout<CGRect>.size) as CFData
             ctx.beginPDFPage([kCGPDFContextMediaBox: boxData] as CFDictionary)

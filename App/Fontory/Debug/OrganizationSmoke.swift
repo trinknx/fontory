@@ -2258,6 +2258,98 @@ enum OrganizationSmoke {
         check(opened && Set(model.layoutsSourceFaceIDs) == Set(treb), "pairing: on the family page ⌘K uses its family",
               "\(model.layoutsSourceFaceIDs)")
         model.closeFamilyDetail()
+
+        await layoutExportSteps(layouts)
+    }
+
+    // MARK: Wave 3C task 8: PDF export and print
+
+    /// PDF export (one page, one page per candidate, 30 candidates with progress and Cancel), the save-panel seam,
+    /// the print operation's paper size and view, and that everything lands in a temp folder. Runs on the layout
+    /// the Pairing Studio steps leave open (3 candidates).
+    private static func layoutExportSteps(_ layouts: LayoutsModel) async {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("FontoryExportSmoke-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: dir) }
+        do { try fm.createDirectory(at: dir, withIntermediateDirectories: true) } catch { check(false, "export: temp folder"); return }
+        func names() -> [String] { ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).sorted() }
+        func pdf(_ name: String) -> CGPDFDocument? { CGPDFDocument(dir.appendingPathComponent(name) as CFURL) }
+        guard let doc = layouts.current else { check(false, "export: a layout is open"); return }
+        let candidateCount = Set(layouts.candidates.map { $0.family.lowercased() }).count
+        check(candidateCount == 3, "export: the open layout has 3 candidate families", "\(candidateCount)")
+
+        do { try await layouts.exportPDF(to: dir.appendingPathComponent("one.pdf")) } catch { check(false, "export: one page", "\(error)") }
+        let one = pdf("one.pdf")
+        let box = one?.page(at: 1)?.getBoxRect(.mediaBox)
+        check(one?.numberOfPages == 1 && box?.size == CGSize(width: doc.pageSize.w, height: doc.pageSize.h),
+              "export: Export PDF writes 1 page of the page size", "\(String(describing: one?.numberOfPages)) \(String(describing: box))")
+
+        do { try await layouts.exportPDFForEachCandidate(to: dir.appendingPathComponent("three.pdf")) } catch { check(false, "export: candidates", "\(error)") }
+        let three = pdf("three.pdf")
+        check(three?.numberOfPages == 3 && three?.page(at: 3)?.getBoxRect(.mediaBox).size == CGSize(width: doc.pageSize.w, height: doc.pageSize.h),
+              "export: with 3 candidates the per-candidate export writes a 3-page PDF", "\(String(describing: three?.numberOfPages))")
+        check(layouts.exportProgress == nil, "export: no progress sheet for 3 candidates")
+
+        // The save-panel seam, and the default names.
+        check(LayoutsModel.exportFileName(layoutName: "Poster", forCandidates: false) == "Poster.pdf"
+              && LayoutsModel.exportFileName(layoutName: "Poster", forCandidates: true) == "Poster — Candidates.pdf"
+              && LayoutsModel.exportFileName(layoutName: "a/b", forCandidates: false) == "a-b.pdf",
+              "export: default names are the layout name, plus “ — Candidates”")
+        layouts.exportDestinationOverride = dir.appendingPathComponent("seam.pdf")
+        await layouts.exportPDFWithPanel()
+        layouts.exportDestinationOverride = dir.appendingPathComponent("seam-candidates.pdf")
+        await layouts.exportPDFForEachCandidateWithPanel()
+        layouts.exportDestinationOverride = nil
+        check(pdf("seam.pdf")?.numberOfPages == 1 && pdf("seam-candidates.pdf")?.numberOfPages == 3,
+              "export: the destination override skips the panels")
+
+        // Print: the operation's paper is the page; the view draws the page.
+        if let op = layouts.printOperation() {
+            let paper = op.printInfo.paperSize
+            check(paper.width == doc.pageSize.w && paper.height == doc.pageSize.h && op.printInfo.topMargin == 0 && op.printInfo.leftMargin == 0,
+                  "print: paper size is the page size with no margins", "\(paper)")
+            let data = op.view?.dataWithPDF(inside: op.view?.bounds ?? .zero)
+            let printed = data.flatMap { CGDataProvider(data: $0 as CFData) }.flatMap { CGPDFDocument($0) }
+            check(op.view?.bounds.size == CGSize(width: doc.pageSize.w, height: doc.pageSize.h) && printed?.numberOfPages == 1,
+                  "print: the print view draws the page")
+        } else {
+            check(false, "print: an operation is made for the open layout")
+        }
+
+        // No candidates: the per-candidate export is unavailable.
+        let savedCandidates = layouts.candidates
+        layouts.apply { $0.candidates = [] }
+        check(!layouts.canExportCandidates, "export: with no candidates the per-candidate item is disabled")
+        var threw = false
+        do { try await layouts.exportPDFForEachCandidate(to: dir.appendingPathComponent("none.pdf")) } catch { threw = true }
+        check(threw && !fm.fileExists(atPath: dir.appendingPathComponent("none.pdf").path), "export: with no candidates nothing is written")
+        layouts.undo()
+        check(layouts.candidates == savedCandidates && layouts.canExportCandidates, "export: candidates come back with undo")
+
+        // 30 candidates: a progress sheet, Cancel writes nothing, a full run writes 30 pages.
+        let fakes = (0..<27).map { FontReference(postScriptName: "SmokeFake\($0)-Regular", family: "Smoke Fake \($0)") }
+        layouts.apply { $0.candidates += fakes }
+        layouts.exportPageDelay = 0.03
+        let cancelled = dir.appendingPathComponent("cancelled.pdf")
+        var cancelledError = false
+        let task = Task { @MainActor in
+            do { try await layouts.exportPDFForEachCandidate(to: cancelled) } catch is CancellationError { cancelledError = true } catch {}
+        }
+        let shown = await eventually(within: .seconds(5)) { (layouts.exportProgress?.total ?? 0) == 30 && (layouts.exportProgress?.done ?? 0) >= 2 }
+        check(shown, "export: 30 candidates show a progress sheet", "\(String(describing: layouts.exportProgress))")
+        layouts.cancelExport()
+        await task.value
+        check(cancelledError && !fm.fileExists(atPath: cancelled.path) && layouts.exportProgress == nil,
+              "export: Cancel ends the export, writes no file and closes the sheet")
+        layouts.exportPageDelay = 0
+        do { try await layouts.exportPDFForEachCandidate(to: dir.appendingPathComponent("thirty.pdf")) } catch { check(false, "export: 30", "\(error)") }
+        check(pdf("thirty.pdf")?.numberOfPages == 30 && layouts.exportProgress == nil, "export: 30 candidates write a 30-page PDF",
+              "\(String(describing: pdf("thirty.pdf")?.numberOfPages))")
+        layouts.undo()
+        check(layouts.candidates == savedCandidates, "export: the added test candidates are undone")
+
+        check(names() == ["one.pdf", "seam-candidates.pdf", "seam.pdf", "thirty.pdf", "three.pdf"],
+              "export: only the expected files are in the temp folder, no leftovers", "\(names())")
     }
 
     // MARK: Wave 3C task 6: block editing and inspector

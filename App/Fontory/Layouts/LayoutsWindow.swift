@@ -46,6 +46,9 @@ struct LayoutsWindow: View {
         } message: {
             Text(layouts.errorMessage ?? "")
         }
+        .sheet(isPresented: Binding(get: { layouts.exportProgress != nil }, set: { _ in })) {
+            ExportProgressSheet(layouts: layouts)
+        }
         .task { await layouts.reloadLists() }
         .onDisappear { Task { await layouts.flush() } }
         .frame(minWidth: 800, minHeight: 500)
@@ -196,5 +199,29 @@ private struct LayoutsWindowReader: NSViewRepresentable {
                 })
             }
         }
+    }
+}
+
+/// Shown while a long PDF export runs.
+private struct ExportProgressSheet: View {
+    let layouts: LayoutsModel
+
+    var body: some View {
+        let progress = layouts.exportProgress ?? ExportProgress(done: 0, total: 1)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Exporting PDF").font(.headline)
+            ProgressView(value: Double(progress.done), total: Double(max(1, progress.total)))
+            Text("Page \(min(progress.done + 1, progress.total)) of \(progress.total)")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            HStack {
+                Spacer()
+                Button("Cancel") { layouts.cancelExport() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 320)
+        .interactiveDismissDisabled()
     }
 }

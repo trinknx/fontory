@@ -87,6 +87,16 @@ final class LayoutsModel {
     /// Cycling and candidate changes run one after another, each on the result of the one before (quick repeats).
     @ObservationIgnored var pairingChain: Task<Void, Never>?
 
+    // MARK: Export
+
+    /// Set while a long PDF export (more than 10 pages) runs; the window shows a progress sheet with Cancel.
+    var exportProgress: ExportProgress?
+    /// The smoke run's stand-in for the save panels: the destination used without asking.
+    @ObservationIgnored var exportDestinationOverride: URL?
+    /// Smoke only: seconds to wait after each page, so a cancel can land mid-export.
+    @ObservationIgnored var exportPageDelay: TimeInterval = 0
+    @ObservationIgnored var exportJob: Task<Void, Error>?
+
     // MARK: Zoom
 
     /// The explicit zoom (view points per page point), used when `zoomsToFit` is off.
