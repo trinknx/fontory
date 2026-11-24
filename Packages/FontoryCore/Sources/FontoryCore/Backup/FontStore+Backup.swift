@@ -6,6 +6,9 @@ extension FontStore {
     public func makeBackupManifest(created: Date, appVersion: String, locationRank: [Int64],
                                    skipDuplicatesOnImport: Bool) throws -> BackupManifest {
         try reader.withLock {
+            // One read transaction, so every statement sees the same snapshot; always ended.
+            try reader.execute("BEGIN")
+            defer { try? reader.execute("ROLLBACK") }
             // Locations
             var locations: [BackupManifest.Location] = []
             var indexByID: [Int64: Int] = [:]

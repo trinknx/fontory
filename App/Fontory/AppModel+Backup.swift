@@ -267,6 +267,9 @@ extension AppModel {
         }
         // Tags, notes and the Quick Collection read before the restore are stale.
         tagWriteEpoch += 1
+        // The undo's old names and an open rename sheet's face ids predate the restore.
+        familyUndo = nil
+        familyNameRequest = nil
         quickCollectionGeneration += 1
         savedNotes = [:]
         pendingNotes = [:]

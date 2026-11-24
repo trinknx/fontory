@@ -867,9 +867,9 @@ final class AppModel {
         await quickCollectionWriteChain?.value
         await stopFaceBackfill()
         await stopDuplicateSearch()
-        // Bounded, so activation shutdown still fits the 5 s quit budget.
-        await writeAutomaticBackup(within: Self.quitBackupBudget)
+        // Activation shutdown first (it has the 5 s quit budget); the bounded backup, with the flushed notes, follows.
         await backend?.activation.prepareForQuit()
+        await writeAutomaticBackup(within: Self.quitBackupBudget)
     }
 
     private static let previewSaveDelay: Duration = .milliseconds(300)

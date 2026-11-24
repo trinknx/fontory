@@ -1627,6 +1627,14 @@ enum OrganizationSmoke {
         check(undone == "Smoke Serif", "family: undo puts back Smoke Serif", undone ?? "nil")
         check(!model.canUndoFamilyEdit && model.editedFamilies.isEmpty, "family: one level of undo, no edited mark left")
 
+        // A no-op rename (same name again) keeps the real undo.
+        await model.renameFamily(faceIDs: [serif], to: "Smoke Book")
+        await model.renameFamily(faceIDs: [serif], to: "Smoke Book")
+        check(model.canUndoFamilyEdit, "family: a no-op rename keeps the undo")
+        await model.undoLastFamilyEdit()
+        let undoneAfterNoOp = await gridName(serif)
+        check(undoneAfterNoOp == "Smoke Serif", "family: undo after a no-op rename still restores the first edit", undoneAfterNoOp ?? "nil")
+
         // Merge.
         await model.mergeFamilies(["smoke serif", "smoke sans"], into: "Smoke")
         var g = families()
@@ -1833,8 +1841,11 @@ enum OrganizationSmoke {
         model.dismissRestore()
         check(model.restoreState == nil, "backup: dismissing the failure closes the sheet")
 
-        // Full restore, with activation.
+        // Full restore, with activation. A family edit made first must not stay undoable afterwards.
+        await model.renameFamily(faceIDs: [courier], to: "Smoke Undo Probe")
+        check(model.canUndoFamilyEdit, "backup: a family edit is undoable before the restore")
         await model.beginRestore(from: manual, restoreActivation: true)
+        check(!model.canUndoFamilyEdit && model.familyNameRequest == nil, "backup: a restore clears the family undo")
         guard case .finished(let result) = model.restoreState else {
             check(false, "backup: restore finishes", "\(String(describing: model.restoreState))"); return
         }

@@ -29,7 +29,8 @@ struct FamilyNameSheet: View {
 
     /// A rename may be blank (it clears the override, back to the original names); merge and split need a name.
     private var canSave: Bool {
-        request.kind == .rename || !effectiveName.isEmpty
+        if request.kind == .rename { return effectiveName != request.initialName }
+        return !effectiveName.isEmpty
     }
 
     private var showsField: Bool {

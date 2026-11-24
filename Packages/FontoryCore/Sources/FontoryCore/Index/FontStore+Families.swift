@@ -13,11 +13,16 @@ extension FontStore {
             try database.transaction {
                 var previous: [Int64: String?] = [:]
                 var updates: [Int64: String?] = [:]
+                var changesAnything = false
                 for id in Set(faceIDs).sorted() {
                     guard let (family, custom) = try familyColumns(id) else { continue }
                     previous[id] = custom
-                    updates[id] = (trimmed.isEmpty || trimmed == family) ? nil : trimmed
+                    let new: String? = (trimmed.isEmpty || trimmed == family) ? nil : trimmed
+                    updates[id] = new
+                    if new != custom { changesAnything = true }
                 }
+                // A no-op returns nothing, so the caller keeps its previous undo.
+                guard changesAnything else { return [:] }
                 try applyCustomFamilies(updates)
                 return previous
             }
