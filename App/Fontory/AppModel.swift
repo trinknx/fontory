@@ -1078,7 +1078,6 @@ final class AppModel {
     var userLocations: [LocationRecord] { locations.filter { !$0.kind.isReadOnly && !$0.autoIndexed } }
     /// The standard font folders (System, Computer, User). Auto-indexed folders are not listed: their fonts are in
     /// the System and User views.
-    var installedLocations: [LocationRecord] { locations.filter { $0.kind.isReadOnly && !$0.autoIndexed } }
     /// Every location but the auto-indexed ones (Settings).
     var listedLocations: [LocationRecord] { locations.filter { !$0.autoIndexed } }
 

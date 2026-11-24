@@ -10,7 +10,7 @@ struct SidebarView: View {
     var body: some View {
         @Bindable var model = model
         List(selection: selection) {
-            Section("Library") {
+            Section {
                 libraryRow("All Fonts", "textformat", .all, model.counts.all)
                 libraryRow("System", "lock", .system, model.counts.system)
                     .help("Fonts that ship with macOS (read-only)")
@@ -22,8 +22,6 @@ struct SidebarView: View {
                     .help("Library fonts that are active nowhere")
                 libraryRow("Offline", "externaldrive.badge.xmark", .offline, model.counts.offline)
                 libraryRow("Last Import", "square.and.arrow.down", .recentImport, model.counts.lastImport)
-                libraryRow("Untagged", "square.dashed", .untagged, model.organizationCounts.untagged)
-                    .help("Fonts without any tag")
                 libraryRow("Quick Collection", "bookmark", .quickCollection, model.organizationCounts.quickCollection)
                     .contextMenu {
                         Button("Save as Tag…") { promptSaveQuickCollectionAsTag(model: model) }
@@ -38,6 +36,8 @@ struct SidebarView: View {
                 if let progress = model.faceBackfillProgress, progress.total > 0 {
                     FaceBackfillRow(progress: progress)
                 }
+            } header: {
+                LibraryHeader()
             }
 
             Section("Locations") {
@@ -47,23 +47,6 @@ struct SidebarView: View {
                         .selectionDisabled()
                 }
                 ForEach(model.userLocations) { LocationNode(location: $0) }
-            }
-
-            Section("Installed Fonts") {
-                // The eye is the switch: open when system fonts are shown, slashed when hidden. No checkbox.
-                Button {
-                    model.query.includeSystem.toggle()
-                } label: {
-                    Label(model.query.includeSystem ? "System Fonts Shown" : "System Fonts Hidden",
-                          systemImage: model.query.includeSystem ? "eye" : "eye.slash")
-                        .foregroundStyle(model.query.includeSystem ? .primary : .secondary)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .selectionDisabled()
-                .help(model.query.includeSystem ? "Click to hide system fonts" : "Click to show system fonts")
-                .accessibilityValue(model.query.includeSystem ? "Shown" : "Hidden")
-                ForEach(model.installedLocations) { LocationNode(location: $0) }
             }
 
             TagsSection()
@@ -93,6 +76,30 @@ struct SidebarView: View {
         Label(title, systemImage: symbol)
             .badge(count)
             .tag(SidebarItem.scope(scope))
+    }
+}
+
+/// "Library" with the system-fonts eye at the right: open when system fonts are shown, slashed when hidden.
+private struct LibraryHeader: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let shown = model.query.includeSystem
+        HStack {
+            Text("Library")
+            Spacer()
+            Button {
+                model.query.includeSystem.toggle()
+            } label: {
+                Image(systemName: shown ? "eye" : "eye.slash")
+                    .foregroundStyle(shown ? .secondary : .tertiary)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(shown ? "System fonts are shown. Click to hide them" : "System fonts are hidden. Click to show them")
+            .accessibilityLabel("System Fonts")
+            .accessibilityValue(shown ? "Shown" : "Hidden")
+        }
     }
 }
 
