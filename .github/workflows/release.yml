@@ -1,0 +1,62 @@
+# Builds Fontory and publishes a GitHub release when a version tag is pushed:
+#   git tag v0.3.1 && git push origin v0.3.1
+# "Run workflow" on the Actions tab builds without publishing (the zip and dmg are kept as a workflow artifact).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the build number is the commit count
+
+      - name: Select the newest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app | grep -v -i beta | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Core tests
+        run: swift test --package-path Packages/FontoryCore
+
+      - name: Build and package
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            scripts/build-release.sh "$GITHUB_REF_NAME"
+          else
+            scripts/build-release.sh
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Fontory
+          path: dist/*
+          retention-days: 14
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Fontory ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            --notes "Apple Silicon, macOS 14 or later. Ad-hoc signed: after copying Fontory to Applications, run
+          \`xattr -dr com.apple.quarantine /Applications/Fontory.app\` once, or right-click it and choose Open."

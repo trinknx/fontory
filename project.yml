@@ -15,6 +15,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: local.fontory.app
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ARCHS: arm64
         CODE_SIGN_IDENTITY: "-"
         ENABLE_APP_SANDBOX: NO
         ENABLE_HARDENED_RUNTIME: NO

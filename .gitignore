@@ -4,3 +4,4 @@ Fontory.xcodeproj/
 .DS_Store
 .swiftpm/
 .superpowers/
+dist/
