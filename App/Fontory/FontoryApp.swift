@@ -25,6 +25,9 @@ struct FontoryApp: App {
             CommandGroup(after: .newItem) {
                 Button("Add Fonts…") { model.showImportPanel() }
                     .keyboardShortcut("o")
+                Divider()
+                Button("Back Up Library…") { model.showBackUpPanel() }
+                RestoreLibraryMenuItem(model: model)
             }
             CommandGroup(before: .toolbar) {
                 // On the family page both close it and show the browser in that mode, whichever mode is current.
@@ -75,6 +78,19 @@ struct FontoryApp: App {
         MenuBarExtra("Fontory", systemImage: "textformat") {
             MenuBarContent()
                 .environment(model)
+        }
+    }
+}
+
+/// File ▸ Restore Library…: opens Settings on the Backups tab.
+private struct RestoreLibraryMenuItem: View {
+    let model: AppModel
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Button("Restore Library…") {
+            model.settingsTab = .backups
+            openSettings()
         }
     }
 }

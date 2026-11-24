@@ -52,6 +52,7 @@ enum OrganizationSmoke {
             await reviewFixSteps(model, backend: backend)
             await filterSteps(model, backend: backend, folder: dir)
             await duplicateSteps()
+            await backupSteps()
         } catch {
             check(false, "setup", "\(error)")
         }
@@ -1478,6 +1479,228 @@ enum OrganizationSmoke {
         let standardAfter = ["previewSettings", SettingsKey.duplicateLocationRank, SettingsKey.skipDuplicatesOnImport]
             .map { String(describing: UserDefaults.standard.object(forKey: $0)) }
         check(standardAfter == standardBefore, "duplicates: nothing written to the user's defaults")
+    }
+
+    // MARK: Wave 3b task 5: Backups
+
+    private static func customFamily(_ store: FontStore, _ faceID: Int64) -> String? {
+        (try? store.database.withLock { () -> String? in
+            let s = try store.database.prepare("SELECT custom_family FROM faces WHERE id = ?")
+            defer { s.reset() }
+            try s.bind([.int(faceID)])
+            return try s.step() && !s.isNull(0) ? s.text(0) : nil
+        }) ?? nil
+    }
+
+    private static func directTagNames(_ store: FontStore, _ faceID: Int64) -> Set<String> {
+        let tags = (try? store.tags()) ?? []
+        let ids = (try? store.tagIDs(forFaces: [faceID]))?[faceID] ?? []
+        return Set(tags.filter { ids.contains($0.id) }.map(\.name))
+    }
+
+    /// A temporary library (smoke registrar, its own settings suite and backup folder) with three real fonts in two
+    /// folders: automatic backups, a manual backup, restore (corrupt file, full restore, Cancel, quit).
+    private static func backupSteps() async {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FontoryBackupSmoke-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let suiteName = "local.fontory.smoke.backup.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else { check(false, "backup: settings suite"); return }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+        let keys = ["previewSettings", SettingsKey.duplicateLocationRank, SettingsKey.skipDuplicatesOnImport]
+        let standardBefore = keys.map { String(describing: UserDefaults.standard.object(forKey: $0)) }
+        // Read only: the listing of the real backup folder must not change.
+        let realBefore = BackupFiles(directory: AppModel.defaultBackupDirectory()).list().map(\.url.lastPathComponent)
+
+        let fonts = root.appendingPathComponent("Fonts", isDirectory: true)
+        let extra = root.appendingPathComponent("Extra", isDirectory: true)
+        let supplemental = URL(fileURLWithPath: "/System/Library/Fonts/Supplemental", isDirectory: true)
+        let backend: LibraryBackend
+        do {
+            try fm.createDirectory(at: fonts, withIntermediateDirectories: true)
+            try fm.createDirectory(at: extra, withIntermediateDirectories: true)
+            for name in ["Arial.ttf", "Georgia.ttf"] {
+                try fm.copyItem(at: supplemental.appendingPathComponent(name), to: fonts.appendingPathComponent(name))
+            }
+            try fm.copyItem(at: supplemental.appendingPathComponent("Courier New.ttf"), to: extra.appendingPathComponent("Courier New.ttf"))
+            backend = try LibraryBackend(databaseURL: root.appendingPathComponent("library.sqlite"), registrar: SmokeRegistrar())
+        } catch {
+            check(false, "backup: setup", "\(error)"); return
+        }
+        let store = backend.store
+        let model = AppModel()
+        model.settingsDefaults = suite
+        model.suppressesPreviewSaveForSmoke = true
+        model.backupDirectory = root.appendingPathComponent("Backups", isDirectory: true)
+        await model.attachBackendForSmoke(backend)
+        check(model.backupDirectory.path.hasPrefix(root.path), "backup: the smoke's backups go to its temp folder")
+
+        guard let fontsLoc = await model.runBackground({ try backend.addFolder(fonts) }),
+              let extraLoc = await model.runBackground({ try backend.addFolder(extra) }) else {
+            check(false, "backup: add the folders", model.alert?.message ?? ""); return
+        }
+        await model.reloadLocations()
+        model.rescan(fontsLoc.id)
+        model.rescan(extraLoc.id)
+        await model.waitForScansForSmoke()
+        let allIDs = (try? store.faceIDs(for: LibraryQuery(includeSystem: true))) ?? []
+        let byName = Dictionary(((try? store.rows(ids: allIDs)) ?? [:]).values.map { ($0.postScriptName, $0.id) }, uniquingKeysWith: { a, _ in a })
+        guard let arial = byName["ArialMT"], let georgia = byName["Georgia"], let courier = byName["CourierNewPSMT"] else {
+            check(false, "backup: faces indexed", "\(byName.keys.sorted())"); return
+        }
+
+        // Automatic backups: today's file, overwritten by the next run; retention prunes old ones only.
+        let files = BackupFiles(directory: model.backupDirectory)
+        let today = files.dailyURL(for: Date())
+        await model.writeAutomaticBackup()
+        var listed = files.list()
+        check(listed.count == 1 && listed.first?.url.lastPathComponent == today.lastPathComponent && listed.first?.isSafety == false,
+              "backup: an automatic backup writes today's file", "\(listed.map(\.url.lastPathComponent))")
+        guard let keep = await model.createTag(name: "Smoke Keep", parentID: nil) else { check(false, "backup: create tag"); return }
+        await model.setTag(keep, onFaces: [arial], included: true)
+        let old = model.backupDirectory.appendingPathComponent("Fontory 2000-01-01.fontorybackup")
+        let other = model.backupDirectory.appendingPathComponent("notes.txt")
+        try? Data("old".utf8).write(to: old)
+        try? Data("keep".utf8).write(to: other)
+        await model.writeAutomaticBackup()
+        listed = files.list()
+        let everything = (try? fm.contentsOfDirectory(atPath: model.backupDirectory.path)) ?? []
+        let todayTags = (try? BackupArchive.read(today))?.tags.map(\.name) ?? []
+        check(listed.count == 1 && Set(everything) == [today.lastPathComponent, "notes.txt"] && todayTags == ["Smoke Keep"],
+              "backup: a second automatic backup overwrites today's file (still one file), prunes old ones, leaves other files",
+              "\(everything) tags \(todayTags)")
+        check(model.backupEntries.map(\.url.lastPathComponent) == [today.lastPathComponent], "backup: backupEntries refreshed after a write",
+              "\(model.backupEntries.map(\.url.lastPathComponent))")
+
+        // User data: tag (above), note, Quick Collection, custom family, activation, location rank.
+        model.editNote("Backup note", faceID: arial)
+        await model.flushNotes()
+        await model.setQuickCollection([georgia, courier], included: true)
+        _ = await model.runBackground { try store.setCustomFamily("Smoke Family", faceIDs: [georgia]) }
+        _ = await backend.activation.set([arial], to: .on, force: true)
+        model.duplicateLocationRank = [extraLoc.id, fontsLoc.id]
+        let manual = root.appendingPathComponent("Manual.fontorybackup")
+        do {
+            try await model.backUp(to: manual)
+        } catch {
+            check(false, "backup: Back Up Now", "\(error)")
+        }
+        let manifest = try? BackupArchive.read(manual)
+        check(manifest?.faces.count == 3 && manifest?.tags.map(\.name) == ["Smoke Keep"], "backup: Back Up Now writes the chosen file",
+              "\(String(describing: manifest?.faces.map(\.postScriptName)))")
+
+        // Clear everything.
+        _ = await model.runBackground {
+            try store.deleteTag(keep)
+            try store.setNote(nil, faceID: arial)
+            try store.clearQuickCollection()
+            try store.clearCustomFamilies(faceIDs: [georgia])
+        }
+        _ = await backend.activation.set([arial], to: .off, force: true)
+        _ = await backend.activation.set([courier], to: .on, force: true)
+        model.duplicateLocationRank = []
+        await model.afterTagChange()
+        await model.loadQuickCollection()
+        check((try? store.tags())?.isEmpty == true && customFamily(store, georgia) == nil && model.quickCollectionIDs.isEmpty,
+              "backup: the library is cleared before the restore")
+
+        // A corrupt file: .failed, no safety backup, nothing changed.
+        let corrupt = root.appendingPathComponent("Corrupt.fontorybackup")
+        try? Data("this is not a zip".utf8).write(to: corrupt)
+        let entriesBefore = files.list()
+        await model.beginRestore(from: corrupt, restoreActivation: true)
+        var failed = false
+        if case .failed = model.restoreState { failed = true }
+        check(failed && files.list() == entriesBefore && (try? store.tags())?.isEmpty == true
+              && (try? store.rows(ids: [courier]))?[courier]?.activation == .on,
+              "backup: restoring a corrupt file fails, writes no safety backup and changes nothing", "\(String(describing: model.restoreState))")
+        model.dismissRestore()
+        check(model.restoreState == nil, "backup: dismissing the failure closes the sheet")
+
+        // Full restore, with activation.
+        await model.beginRestore(from: manual, restoreActivation: true)
+        guard case .finished(let result) = model.restoreState else {
+            check(false, "backup: restore finishes", "\(String(describing: model.restoreState))"); return
+        }
+        check(result.tagCount == 1 && result.restoredFaceCount == 3 && result.notFound.isEmpty,
+              "backup: the summary counts 1 tag and 3 fonts", "\(result)")
+        let rows = (try? store.rows(ids: [arial, courier])) ?? [:]
+        check(directTagNames(store, arial) == ["Smoke Keep"] && model.tags.map(\.name) == ["Smoke Keep"],
+              "backup: the tag survives a restore", "\(directTagNames(store, arial))")
+        let info = await model.faceInfo(arial)
+        check(info?.note == "Backup note" && model.note(for: arial, stored: info?.note) == "Backup note", "backup: the note survives a restore")
+        check(model.quickCollectionIDs == [georgia, courier] && (try? store.quickCollectionFaceIDs()) == [georgia, courier], "backup: the Quick Collection survives a restore")
+        check(customFamily(store, georgia) == "Smoke Family", "backup: the custom family survives a restore")
+        check(rows[arial]?.activation == .on && rows[courier]?.activation == .off,
+              "backup: Also restore activation activates saved faces and deactivates the others",
+              "arial \(String(describing: rows[arial]?.activation)) courier \(String(describing: rows[courier]?.activation))")
+        let storedRank = (suite.array(forKey: SettingsKey.duplicateLocationRank) as? [NSNumber])?.map(\.int64Value)
+        check(model.duplicateLocationRank == [extraLoc.id, fontsLoc.id] && storedRank == [extraLoc.id, fontsLoc.id],
+              "backup: the location rank is restored (in the smoke's own settings)", "\(model.duplicateLocationRank)")
+        let safety = model.backupEntries.filter(\.isSafety)
+        check(safety.count == 1 && (try? BackupArchive.read(safety[0].url))?.tags.isEmpty == true,
+              "backup: a safety backup of the library before the restore is listed", "\(model.backupEntries.map(\.url.lastPathComponent))")
+        model.dismissRestore()
+
+        // Cancel during scanning: the missing Extra folder is re-added and stays; nothing is applied.
+        _ = await model.runBackground {
+            try store.deleteLocation(extraLoc.id)
+            try store.deleteTag(store.tags().first { $0.name == "Smoke Keep" }!.id)
+        }
+        await model.reloadLocations()
+        model.holdsRestoreScanForSmoke = true
+        let restore = Task { await model.beginRestore(from: manual, restoreActivation: false) }
+        var sawScanning = false
+        for _ in 0..<500 {
+            if case .scanning = model.restoreState { sawScanning = true; break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        model.cancelRestore()
+        await restore.value
+        model.holdsRestoreScanForSmoke = false
+        await model.waitForScansForSmoke()
+        let readded = model.locations.first { $0.lastKnownPath == extra.standardizedFileURL.path || $0.displayName == "Extra" }
+        check(sawScanning && model.restoreState == nil && (try? store.tags())?.isEmpty == true && (try? store.quickCollectionFaceIDs()) == [georgia],
+              "backup: Cancel during scanning applies nothing", "\(String(describing: model.restoreState))")
+        check(readded != nil, "backup: a location re-added before Cancel stays in the library")
+        check(model.backupEntries.filter(\.isSafety).count == 2, "backup: each restore writes its own safety backup",
+              "\(model.backupEntries.map(\.url.lastPathComponent))")
+
+        // A missing folder that is reachable is re-added and scanned before the data is applied.
+        if let readded { _ = await model.runBackground { try store.deleteLocation(readded.id) } }
+        await model.reloadLocations()
+        await model.beginRestore(from: manual, restoreActivation: false)
+        let extraAgain = model.locations.first { $0.displayName == "Extra" }
+        let courierAgain = extraAgain.flatMap { indexedPaths(store, $0.id)["Courier New.ttf"] }
+            .flatMap { fileID in (try? store.rows(ids: (try? store.faceIDs(for: LibraryQuery(includeSystem: true))) ?? []))?.values.first { $0.fileID == fileID }?.id }
+        if case .finished(let r) = model.restoreState {
+            check(r.restoredFaceCount == 3 && r.unreachableLocations.isEmpty && courierAgain.map { model.quickCollectionIDs.contains($0) } == true,
+                  "backup: a removed reachable folder is re-added and scanned, and its fonts get their data back", "\(r)")
+        } else {
+            check(false, "backup: restore with a re-added folder", "\(String(describing: model.restoreState))")
+        }
+        model.dismissRestore()
+
+        // Quitting cancels a running restore and writes today's backup.
+        if let extraAgain { _ = await model.runBackground { try store.deleteLocation(extraAgain.id) } }
+        _ = await model.runBackground { try store.deleteTag(store.tags().first { $0.name == "Smoke Keep" }!.id) }
+        await model.reloadLocations()
+        model.holdsRestoreScanForSmoke = true
+        let quitting = Task { await model.beginRestore(from: manual, restoreActivation: false) }
+        for _ in 0..<500 {
+            if case .scanning = model.restoreState { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        await model.prepareForQuit()
+        await quitting.value
+        model.holdsRestoreScanForSmoke = false
+        check(model.restoreState == nil && (try? store.tags())?.isEmpty == true && (try? BackupArchive.read(today))?.tags.isEmpty == true,
+              "backup: quitting cancels the restore and writes today's backup")
+
+        let standardAfter = keys.map { String(describing: UserDefaults.standard.object(forKey: $0)) }
+        check(standardAfter == standardBefore, "backup: nothing written to the user's defaults")
+        let realAfter = BackupFiles(directory: AppModel.defaultBackupDirectory()).list().map(\.url.lastPathComponent)
+        check(realAfter == realBefore, "backup: nothing written to the real backup folder")
     }
 }
 #endif

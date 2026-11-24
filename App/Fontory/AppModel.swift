@@ -546,7 +546,7 @@ final class AppModel {
     // MARK: Locations
 
     private(set) var locations: [LocationRecord] = []
-    private(set) var scanProgress: [Int64: ScanProgress] = [:]
+    var scanProgress: [Int64: ScanProgress] = [:]
     /// Per location: faces with activation, tags or notes that scans removed because their files are gone (or that
     /// Duplicates removed from the library or moved to the Trash), accumulated
     /// until the user dismisses the notice (so a later clean rescan does not hide it).
@@ -684,6 +684,27 @@ final class AppModel {
     /// Note write batches started (for the smoke check of the debounce).
     @ObservationIgnored var noteWriteCount = 0
 
+    // MARK: Backups (actions in AppModel+Backup.swift)
+
+    /// Where automatic and safety backups go: `~/Library/Application Support/Fontory/Backups` (the path only; it is
+    /// created on the first write). The smoke run points it at its temporary directory.
+    @ObservationIgnored var backupDirectory: URL = AppModel.defaultBackupDirectory()
+    /// The backups in `backupDirectory`, newest first (Settings → Backups).
+    var backupEntries: [BackupFiles.Entry] = []
+    /// The running restore's progress; nil when none is shown.
+    var restoreState: RestoreState?
+    /// Settings → Backups: "Also restore activation" (session only, default off).
+    var restoreActivation = false
+    /// The Settings tab shown (File ▸ Restore Library… opens Backups).
+    var settingsTab: SettingsTab = .general
+    /// The running restore, and whether Cancel (or quitting) asked it to stop before applying.
+    @ObservationIgnored var restoreTask: Task<Void, Never>?
+    @ObservationIgnored var restoreCancelled = false
+    #if DEBUG
+    /// Set by the smoke run: the restore stays in `.scanning` until it is cancelled or this is cleared.
+    @ObservationIgnored var holdsRestoreScanForSmoke = false
+    #endif
+
     // MARK: Private
 
     @ObservationIgnored private(set) var backend: LibraryBackend?
@@ -780,6 +801,8 @@ final class AppModel {
         refreshCounts()
         await refreshNow()
         isReady = true
+        // Today's automatic backup when it is missing, behind the launch.
+        scheduleLaunchBackup()
 
         // 4. Online/offline must be known before anything builds file URLs from last_known_path.
         await runBackground { _ = try backend.refreshOnlineState() }
@@ -813,11 +836,14 @@ final class AppModel {
     }
 
     func prepareForQuit() async {
+        cancelRestore()
         flushPreviewSave()
         await flushNotes()
         await quickCollectionWriteChain?.value
         await stopFaceBackfill()
         await stopDuplicateSearch()
+        // Bounded, so activation shutdown still fits the 5 s quit budget.
+        await writeAutomaticBackup(within: Self.quitBackupBudget)
         await backend?.activation.prepareForQuit()
     }
 
@@ -1293,7 +1319,7 @@ final class AppModel {
 
     // MARK: Folder watching
 
-    private func updateWatchers() {
+    func updateWatchers() {
         let watched = locations.filter { $0.online && !$0.autoIndexed && ($0.kind == .folder || $0.kind == .userInstalled) }
         let wanted = Dictionary(watched.map { ($0.id, $0.lastKnownPath) },
                                 uniquingKeysWith: { a, _ in a })
@@ -1680,6 +1706,9 @@ final class AppModel {
         while let task = scanTasks.values.first { await task.value }
     }
     #endif
+
+    /// A scan of the location is running.
+    func isScanning(_ id: Int64) -> Bool { scanTasks[id] != nil }
 
     // MARK: Helpers
 

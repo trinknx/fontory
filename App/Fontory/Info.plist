@@ -16,6 +16,23 @@
 		</dict>
 		<dict>
 			<key>UTTypeIdentifier</key>
+			<string>local.fontory.backup</string>
+			<key>UTTypeDescription</key>
+			<string>Fontory Backup</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>fontorybackup</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
 			<string>local.fontory.face-ids</string>
 			<key>UTTypeDescription</key>
 			<string>Fontory Fonts</string>

@@ -1,21 +1,37 @@
 import FontoryCore
 import SwiftUI
 
+enum SettingsTab: Hashable, Sendable {
+    case general, locations, duplicates, backups
+}
+
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        TabView {
+        @Bindable var model = model
+        TabView(selection: $model.settingsTab) {
             GeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(SettingsTab.general)
             LocationSettings()
                 .tabItem { Label("Locations", systemImage: "folder") }
+                .tag(SettingsTab.locations)
             DuplicateSettings()
                 .tabItem { Label("Duplicates", systemImage: "doc.on.doc") }
+                .tag(SettingsTab.duplicates)
+            BackupsSettingsView()
+                .tabItem { Label("Backups", systemImage: "clock.arrow.circlepath") }
+                .tag(SettingsTab.backups)
         }
         .frame(width: 560, height: 460)
         // One presenter for every tab.
         .modelAlert(model, inSettings: true)
+        // Every restore starts here (the File menu's Restore Library… opens the Backups tab).
+        .sheet(isPresented: Binding(get: { model.restoreState != nil }, set: { if !$0 { model.dismissRestore() } })) {
+            RestoreSheet()
+                .environment(model)
+        }
     }
 }
 
