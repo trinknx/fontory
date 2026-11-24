@@ -10,10 +10,14 @@ final class BlockTextEditor: NSTextView {
     /// canvas takes the focus back; when focus moved elsewhere it is left there.
     var onEnd: ((_ text: String, _ refocus: Bool) -> Void)?
     let blockID: UUID
+    /// The font the editor is styled for.
+    var blockFont: FontReference { block.font }
     private var ended = false
     private var block: LayoutBlock
     private var zoom: CGFloat
     private var foreground: NSColor
+    /// The block's own font once loaded (any size); nil while the system font stands in.
+    private var loadedFont: NSFont?
 
     init(block: LayoutBlock, document: LayoutDocument, zoom: CGFloat, frame: CGRect) {
         blockID = block.id
@@ -42,15 +46,38 @@ final class BlockTextEditor: NSTextView {
         backgroundColor = Self.color(document.background) ?? .white
         insertionPointColor = foreground
         string = block.text
-        applyStyle(font: NSFont.systemFont(ofSize: max(1, block.size * zoom)))
+        applyStyle()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    /// Restyles the text with `font` (the block's resolved font once it has loaded).
-    func applyStyle(font: NSFont) {
+    /// Uses the block's resolved font (loaded off the main thread) from now on.
+    func setLoadedFont(_ font: NSFont) {
+        loadedFont = font
+        applyStyle()
+    }
+
+    /// Follows the block's style and the canvas zoom while editing (⌘+/⌘−, inspector changes); the text typed so
+    /// far is kept. A font change drops the loaded font until the owner loads the new one.
+    func update(block new: LayoutBlock, document: LayoutDocument, zoom newZoom: CGFloat) {
+        var a = block, b = new
+        a.text = ""; b.text = ""; a.frame = b.frame
+        let color = Self.color(new.color ?? document.foreground) ?? .black
+        guard a != b || zoom != newZoom || color != foreground else { return }
+        if new.font != block.font { loadedFont = nil }
+        block = new
+        zoom = newZoom
+        foreground = color
+        insertionPointColor = color
+        backgroundColor = Self.color(document.background) ?? .white
+        applyStyle()
+    }
+
+    /// Restyles all the text at the block's size × zoom.
+    private func applyStyle() {
         let size = max(1, block.size * zoom)
+        let font = loadedFont.map { $0.withSize(size) } ?? NSFont.systemFont(ofSize: size)
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = switch block.alignment {
         case .left: .left

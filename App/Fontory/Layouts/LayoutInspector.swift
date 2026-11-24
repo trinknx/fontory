@@ -81,11 +81,11 @@ private struct BlockSection: View {
         Section("Text") {
             LabeledContent("Size") {
                 HStack(spacing: 4) {
-                    TextField("Size", value: Binding(get: { block.size }, set: { layouts.setSize($0) }), format: .number)
+                    TextField("Size", value: Binding(get: { block.size }, set: { layouts.setSize($0, for: block.id) }), format: .number)
                         .labelsHidden()
                         .multilineTextAlignment(.trailing)
                         .frame(width: 56)
-                    Stepper("Size", value: Binding(get: { block.size }, set: { layouts.setSize($0) }),
+                    Stepper("Size", value: Binding(get: { block.size }, set: { layouts.setSize($0, for: block.id) }),
                             in: LayoutsModel.sizeRange, step: 1)
                         .labelsHidden()
                     Text("pt").foregroundStyle(.secondary)
@@ -93,12 +93,12 @@ private struct BlockSection: View {
             }
             LabeledContent("Line Height") {
                 HStack(spacing: 4) {
-                    TextField("Line Height", value: Binding(get: { block.lineHeight }, set: { layouts.setLineHeight($0) }),
+                    TextField("Line Height", value: Binding(get: { block.lineHeight }, set: { layouts.setLineHeight($0, for: block.id) }),
                               format: .number.precision(.fractionLength(0...2)))
                         .labelsHidden()
                         .multilineTextAlignment(.trailing)
                         .frame(width: 56)
-                    Stepper("Line Height", value: Binding(get: { block.lineHeight }, set: { layouts.setLineHeight($0) }),
+                    Stepper("Line Height", value: Binding(get: { block.lineHeight }, set: { layouts.setLineHeight($0, for: block.id) }),
                             in: LayoutsModel.lineHeightRange, step: 0.05)
                         .labelsHidden()
                     Text("×").foregroundStyle(.secondary)
@@ -106,17 +106,17 @@ private struct BlockSection: View {
             }
             LabeledContent("Tracking") {
                 HStack(spacing: 4) {
-                    TextField("Tracking", value: Binding(get: { block.tracking }, set: { layouts.setTracking($0) }), format: .number)
+                    TextField("Tracking", value: Binding(get: { block.tracking }, set: { layouts.setTracking($0, for: block.id) }), format: .number)
                         .labelsHidden()
                         .multilineTextAlignment(.trailing)
                         .frame(width: 56)
-                    Stepper("Tracking", value: Binding(get: { block.tracking }, set: { layouts.setTracking($0) }),
+                    Stepper("Tracking", value: Binding(get: { block.tracking }, set: { layouts.setTracking($0, for: block.id) }),
                             in: LayoutsModel.trackingRange, step: 10)
                         .labelsHidden()
                     Text("‰ em").foregroundStyle(.secondary)
                 }
             }
-            Picker("Alignment", selection: Binding(get: { block.alignment }, set: { layouts.setAlignment($0) })) {
+            Picker("Alignment", selection: Binding(get: { block.alignment }, set: { layouts.setAlignment($0, for: block.id) })) {
                 Image(systemName: "text.alignleft").help("Left").tag(LayoutAlignment.left)
                 Image(systemName: "text.aligncenter").help("Centre").tag(LayoutAlignment.center)
                 Image(systemName: "text.alignright").help("Right").tag(LayoutAlignment.right)
@@ -126,7 +126,7 @@ private struct BlockSection: View {
             LabeledContent("Colour") {
                 HStack {
                     if block.color != nil {
-                        Button("Default") { layouts.setColor(nil) }
+                        Button("Default") { layouts.setColor(nil, for: block.id) }
                             .controlSize(.small)
                             .help("Use the layout's text colour")
                     }
@@ -135,7 +135,8 @@ private struct BlockSection: View {
                 }
             }
             if block.kind == .waterfall {
-                SizesField(layouts: layouts, sizes: block.sizes)
+                SizesField(layouts: layouts, blockID: block.id, sizes: block.sizes)
+                    .id(block.id)
             }
         }
     }
@@ -155,7 +156,7 @@ private struct BlockSection: View {
             let hex = block.color ?? foreground
             return LayoutColor.cgColor(hex).flatMap { NSColor(cgColor: $0) }.map(Color.init(nsColor:)) ?? .black
         }, set: { color in
-            if let hex = Self.hex(NSColor(color)) { layouts.setColor(hex) }
+            if let hex = Self.hex(NSColor(color)) { layouts.setColor(hex, for: block.id) }
         })
     }
 
@@ -170,6 +171,7 @@ private struct BlockSection: View {
 /// The waterfall sizes as a comma-separated field; a value that doesn't parse is reverted.
 private struct SizesField: View {
     let layouts: LayoutsModel
+    let blockID: UUID
     let sizes: [Double]
     @State private var text = ""
 
@@ -182,7 +184,7 @@ private struct SizesField: View {
     }
 
     private func commit() {
-        if !layouts.setSizes(text) || LayoutsModel.parseSizes(text) == sizes {
+        if !layouts.setSizes(text, for: blockID) || LayoutsModel.parseSizes(text) == sizes {
             text = LayoutsModel.formatSizes(sizes)
         }
     }

@@ -35,10 +35,11 @@ struct FontoryApp: App {
                 Button("Undo Family Edit") { if model.browserIsKey { Task { await model.undoLastFamilyEdit() } } }
                     .disabled(!model.isBrowserKey || !model.canUndoFamilyEdit)
                 // Likewise ⌘Z / ⇧⌘Z reach these in the Layouts window outside text fields.
-                Button("Undo Layout Edit") { if model.layouts.windowIsKey { model.layouts.undo() } }
-                    .disabled(!model.layouts.isKey || !model.layouts.canUndo)
-                Button("Redo Layout Edit") { if model.layouts.windowIsKey { model.layouts.redo() } }
-                    .disabled(!model.layouts.isKey || !model.layouts.canRedo)
+                // Disabled while the in-place text editor is open: it has its own undo, and would commit over the result.
+                Button("Undo Layout Edit") { if model.layouts.windowIsKey, !model.layouts.isEditingText { model.layouts.undo() } }
+                    .disabled(!model.layouts.isKey || !model.layouts.canUndo || model.layouts.isEditingText)
+                Button("Redo Layout Edit") { if model.layouts.windowIsKey, !model.layouts.isEditingText { model.layouts.redo() } }
+                    .disabled(!model.layouts.isKey || !model.layouts.canRedo || model.layouts.isEditingText)
             }
             CommandGroup(before: .toolbar) {
                 // On the family page both close it and show the browser in that mode, whichever mode is current.

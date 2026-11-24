@@ -39,6 +39,11 @@ final class LayoutsModel {
     var isDirty = false
     /// The selected block (the canvas overlay draws it; the inspector shows it).
     var selectedBlockID: UUID?
+    /// The in-place text editor is open (its text is not in `current` yet). Undo/Redo Layout Edit are disabled.
+    var isEditingText = false
+    /// Commits the in-place editor's text into `current` and closes it; set by the canvas while editing. Called
+    /// before anything saves or replaces the document, so typed text is never lost.
+    @ObservationIgnored var commitPendingTextEdit: (() -> Void)?
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
     /// The open layout's candidate families, in order.
@@ -130,6 +135,7 @@ final class LayoutsModel {
 
     /// Opens a layout, saving the one open before.
     func open(_ url: URL) async {
+        commitPendingText()
         if url.standardizedFileURL == currentURL?.standardizedFileURL, current != nil { return }
         await flush()
         let library = library
@@ -158,6 +164,7 @@ final class LayoutsModel {
     }
 
     func rename(_ url: URL, to name: String) async {
+        commitPendingText()
         let isCurrent = url.standardizedFileURL == currentURL?.standardizedFileURL
         if isCurrent { await flush() }
         let library = library
@@ -192,6 +199,7 @@ final class LayoutsModel {
 
     /// Moves a layout file to the Trash (through `recycle`); the open layout is closed first.
     func delete(_ url: URL) async {
+        commitPendingText()
         if url.standardizedFileURL == currentURL?.standardizedFileURL {
             // Pending writes finish first so none recreates the file after it is trashed.
             autosaveTask?.cancel()
@@ -208,6 +216,7 @@ final class LayoutsModel {
     }
 
     private func createAndOpen(_ make: @escaping @Sendable (LayoutLibrary) throws -> URL) async {
+        commitPendingText()
         let library = library
         let result = await Task.detached(priority: .userInitiated) { () -> Result<URL, Error> in
             Result {
@@ -228,8 +237,17 @@ final class LayoutsModel {
         }
     }
 
+    /// Applies the in-place editor's text to the document it was opened on (before that document is saved or
+    /// replaced).
+    func commitPendingText() {
+        guard let commit = commitPendingTextEdit else { return }
+        commitPendingTextEdit = nil
+        commit()
+    }
+
     /// Forgets the open document's session state (undo, selection, render).
     private func closeCurrent() {
+        commitPendingText()
         undoStack = []
         redoStack = []
         liveEditBase = nil
@@ -359,6 +377,7 @@ final class LayoutsModel {
 
     /// Writes pending changes now and waits for every write (window close, switching layouts, quit).
     func flush() async {
+        commitPendingText()
         if autosaveTask != nil {
             autosaveTask?.cancel()
             autosaveTask = nil
@@ -498,11 +517,6 @@ extension LayoutsModel {
         }, coalescing: coalescing)
     }
 
-    private func updateSelected(coalescing: String? = nil, _ edit: (inout LayoutBlock) -> Void) {
-        guard let id = selectedBlockID else { return }
-        updateBlock(id, coalescing: coalescing, edit)
-    }
-
     // MARK: Move and resize (live edits between beginLiveEdit and endLiveEdit)
 
     /// Moves a block to `start` offset by `delta` page points.
@@ -542,36 +556,37 @@ extension LayoutsModel {
         updateBlock(id) { $0.text = text }
     }
 
-    func setSize(_ size: Double) {
+    func setSize(_ size: Double, for id: UUID) {
         guard size.isFinite else { return }
-        updateSelected { $0.size = min(Self.sizeRange.upperBound, max(Self.sizeRange.lowerBound, size)) }
+        updateBlock(id) { $0.size = min(Self.sizeRange.upperBound, max(Self.sizeRange.lowerBound, size)) }
     }
 
-    func setLineHeight(_ value: Double) {
+    func setLineHeight(_ value: Double, for id: UUID) {
         guard value.isFinite else { return }
-        updateSelected { $0.lineHeight = min(Self.lineHeightRange.upperBound, max(Self.lineHeightRange.lowerBound, value)) }
+        updateBlock(id) { $0.lineHeight = min(Self.lineHeightRange.upperBound, max(Self.lineHeightRange.lowerBound, value)) }
     }
 
-    func setTracking(_ value: Double) {
+    func setTracking(_ value: Double, for id: UUID) {
         guard value.isFinite else { return }
-        updateSelected { $0.tracking = min(Self.trackingRange.upperBound, max(Self.trackingRange.lowerBound, value)) }
+        updateBlock(id) { $0.tracking = min(Self.trackingRange.upperBound, max(Self.trackingRange.lowerBound, value)) }
     }
 
-    func setAlignment(_ alignment: LayoutAlignment) {
-        updateSelected { $0.alignment = alignment }
+    func setAlignment(_ alignment: LayoutAlignment, for id: UUID) {
+        updateBlock(id) { $0.alignment = alignment }
     }
 
-    /// A `#RRGGBB` colour, or nil for the layout's foreground. Changes in quick succession are one undo step.
-    func setColor(_ hex: String?) {
+    /// A `#RRGGBB` colour, or nil for the layout's foreground. Changes to one block in quick succession are one
+    /// undo step.
+    func setColor(_ hex: String?, for id: UUID) {
         guard hex.map(LayoutColor.isValid) ?? true else { return }
-        updateSelected(coalescing: "color") { $0.color = hex }
+        updateBlock(id, coalescing: "color-\(id.uuidString)") { $0.color = hex }
     }
 
     /// Sets the waterfall sizes from a comma-separated field; false (and nothing changed) when it doesn't parse.
     @discardableResult
-    func setSizes(_ text: String) -> Bool {
+    func setSizes(_ text: String, for id: UUID) -> Bool {
         guard let sizes = Self.parseSizes(text) else { return false }
-        updateSelected { $0.sizes = sizes }
+        updateBlock(id) { $0.sizes = sizes }
         return true
     }
 

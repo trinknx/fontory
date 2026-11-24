@@ -2087,7 +2087,16 @@ enum OrganizationSmoke {
         await layouts.duplicate(renamed)
         check(layouts.items.map(\.name).contains("Renamed 2") && layouts.currentURL?.lastPathComponent == "Renamed 2.json",
               "layouts: duplicate makes Renamed 2 and opens it", "\(layouts.items.map(\.name))")
+        // Text pending in the editor goes into the layout it was typed in before another layout opens.
+        let dupURL = layouts.currentURL
+        if let dupBlock = layouts.current?.blocks.first?.id {
+            layouts.commitPendingTextEdit = { layouts.setText("Typed before switching", for: dupBlock) }
+        }
         await layouts.open(renamed)
+        let library = LayoutLibrary(layoutsDirectory: layouts.layoutsDirectory, templatesDirectory: layouts.templatesDirectory)
+        check(dupURL.flatMap { try? library.load($0) }?.blocks.first?.text == "Typed before switching"
+              && layouts.current?.blocks.first?.text != "Typed before switching" && layouts.currentURL == renamed,
+              "layouts: opening another layout commits the editor's text to the original first")
 
         // Delete through the fake recycler.
         guard let firstURL = first else { return }
@@ -2172,11 +2181,11 @@ enum OrganizationSmoke {
         layouts.undo()
         check(current()?.text == block.text, "editing: text undoes")
         let fields: [(String, () -> Void, (LayoutBlock) -> Bool)] = [
-            ("size", { layouts.setSize(61) }, { $0.size == 61 }),
-            ("tracking", { layouts.setTracking(-25) }, { $0.tracking == -25 }),
-            ("line height", { layouts.setLineHeight(1.5) }, { $0.lineHeight == 1.5 }),
-            ("alignment", { layouts.setAlignment(block.alignment == .right ? .center : .right) }, { $0.alignment != block.alignment }),
-            ("colour", { layouts.setColor("#FF0000") }, { $0.color == "#FF0000" }),
+            ("size", { layouts.setSize(61, for: id) }, { $0.size == 61 }),
+            ("tracking", { layouts.setTracking(-25, for: id) }, { $0.tracking == -25 }),
+            ("line height", { layouts.setLineHeight(1.5, for: id) }, { $0.lineHeight == 1.5 }),
+            ("alignment", { layouts.setAlignment(block.alignment == .right ? .center : .right, for: id) }, { $0.alignment != block.alignment }),
+            ("colour", { layouts.setColor("#FF0000", for: id) }, { $0.color == "#FF0000" }),
         ]
         for (name, set, holds) in fields {
             set()
@@ -2184,14 +2193,31 @@ enum OrganizationSmoke {
             layouts.undo()
             check(current() == block, "editing: \(name) undoes")
         }
-        layouts.setSize(-4)
+        // Inspector values name their block: a value committing after the selection moved still hits it.
+        layouts.select(nil)
+        layouts.setTracking(40, for: id)
+        check(current()?.tracking == 40, "editing: an inspector value applies to its own block, not the selection")
+        layouts.undo()
+        // Colour changes coalesce per block: A then B within a second are two undo steps.
+        if let other = layouts.current?.blocks.first(where: { $0.id != id }) {
+            layouts.setColor("#00FF00", for: id)
+            layouts.setColor("#0000FF", for: id)
+            layouts.setColor("#00FF00", for: other.id)
+            layouts.undo()
+            check(current()?.color == "#0000FF" && layouts.current?.blocks.first { $0.id == other.id }?.color == other.color,
+                  "editing: colour changes to another block are a separate undo step")
+            layouts.undo()
+            check(current() == block, "editing: quick colour changes to one block are one undo step")
+        }
+        layouts.select(id)
+        layouts.setSize(-4, for: id)
         check(current()?.size == LayoutsModel.sizeRange.lowerBound, "editing: size is clamped", "\(String(describing: current()?.size))")
         layouts.undo()
         check(LayoutsModel.parseSizes("12, 16,24 ,  36.5") == [12, 16, 24, 36.5] && LayoutsModel.parseSizes("12, big") == nil
               && LayoutsModel.parseSizes(" ") == nil, "editing: waterfall sizes parse from a comma-separated field")
-        check(layouts.setSizes("10, 20") && current()?.sizes == [10, 20], "editing: waterfall sizes apply")
+        check(layouts.setSizes("10, 20", for: id) && current()?.sizes == [10, 20], "editing: waterfall sizes apply")
         layouts.undo()
-        check(!layouts.setSizes("x") && current() == block, "editing: bad waterfall sizes are refused")
+        check(!layouts.setSizes("x", for: id) && current() == block, "editing: bad waterfall sizes are refused")
         let showMissing = layouts.current?.showMissing
         layouts.setShowMissing(!(showMissing ?? true))
         check(layouts.current?.showMissing == !(showMissing ?? true), "editing: Show Missing Characters toggles")
@@ -2241,6 +2267,27 @@ enum OrganizationSmoke {
         layouts.select(newID)
         layouts.deleteSelectedBlock()
         check(layouts.current?.blocks.count == count, "editing: the test block is removed")
+
+        // Text still in the in-place editor (simulated through the canvas's commit hook) is saved by a flush.
+        if let url = layouts.currentURL {
+            layouts.commitPendingTextEdit = { layouts.setText("Typed, not yet committed", for: id) }
+            await layouts.flush()
+            check(layouts.commitPendingTextEdit == nil && current()?.text == "Typed, not yet committed"
+                  && ((try? String(contentsOf: url, encoding: .utf8))?.contains("Typed, not yet committed") ?? false),
+                  "editing: a flush (quit, window close) commits and saves the editor's pending text")
+            layouts.undo()
+        }
+
+        // PageTransform: view ↔ page round trip.
+        let frame = LayoutFrame(x: 12.5, y: 40, w: 300, h: 100)
+        let roundTrips = [0.05, 1, 8].allSatisfy { (zoom: CGFloat) in
+            let t = PageTransform(origin: CGPoint(x: 37, y: 19), zoom: zoom)
+            let r = t.viewRect(frame)
+            let p = t.pagePoint(r.origin), q = t.pagePoint(CGPoint(x: r.maxX, y: r.maxY))
+            return abs(p.x - 12.5) < 1e-9 && abs(p.y - 40) < 1e-9 && abs(q.x - 312.5) < 1e-9 && abs(q.y - 140) < 1e-9
+                && abs(r.width - 300 * zoom) < 1e-9 && t.pageDelta(CGSize(width: 10 * zoom, height: -4 * zoom)) == CGSize(width: 10, height: -4)
+        }
+        check(roundTrips, "editing: the canvas's page ↔ view mapping round-trips at 5 %, 100 % and 800 %")
     }
 
     /// Polls (on the main actor) until `condition` holds or `budget` passes.

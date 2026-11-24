@@ -160,6 +160,12 @@ final class LayoutPageView: NSView {
         needsDisplay = true
     }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        // The window is closing (or the canvas leaving it): the typed text goes into the layout first.
+        if newWindow == nil { endEditing(refocus: false) }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         positionEditor()
@@ -251,9 +257,14 @@ final class LayoutPageView: NSView {
         guard let model, let doc = document else { return }
         endEditing(refocus: false)
         let editor = BlockTextEditor(block: block, document: doc, zoom: zoom, frame: transform.viewRect(block.frame))
-        editor.onEnd = { [weak self, weak editor] text, refocus in
-            guard let self, let editor else { return }
-            self.model?.setText(text, for: editor.blockID)
+        editor.onEnd = { [weak self, weak editor, weak model] text, refocus in
+            // Applied to the document the editor was opened on: the model calls the commit hook before it saves or
+            // replaces that document.
+            model?.commitPendingTextEdit = nil
+            model?.isEditingText = false
+            guard let editor else { return }
+            model?.setText(text, for: editor.blockID)
+            guard let self else { editor.removeFromSuperview(); return }
             if self.editor === editor { self.editor = nil }
             self.needsDisplay = true
             // Removed after the current event: this may run inside the editor's resignFirstResponder.
@@ -263,14 +274,22 @@ final class LayoutPageView: NSView {
             }
         }
         self.editor = editor
+        model.commitPendingTextEdit = { [weak editor] in editor?.finish(refocus: false) }
+        model.isEditingText = true
         addSubview(editor)
         window?.makeFirstResponder(editor)
         editor.selectAll(nil)
         needsDisplay = true
-        let size = max(1, block.size * zoom)
+        loadEditorFont(for: block)
+    }
+
+    /// Loads the block's font for the editor off the main thread (again after the font changes).
+    private func loadEditorFont(for block: LayoutBlock) {
+        guard let model, let editor else { return }
         Task { @MainActor [weak editor] in
-            guard let font = await model.editorFont(for: block, size: size), let editor, editor.superview != nil else { return }
-            editor.applyStyle(font: font)
+            guard let font = await model.editorFont(for: block, size: max(1, block.size * zoom)),
+                  let editor, editor.superview != nil, editor.blockFont == block.font else { return }
+            editor.setLoadedFont(font)
         }
     }
 
@@ -287,6 +306,10 @@ final class LayoutPageView: NSView {
         }
         let rect = transform.viewRect(edited.frame)
         if editor.frame != rect { editor.frame = rect }
+        guard let doc = document else { return }
+        let fontChanged = editor.blockFont != edited.font
+        editor.update(block: edited, document: doc, zoom: zoom)
+        if fontChanged { loadEditorFont(for: edited) }
     }
 
     // MARK: Drawing
