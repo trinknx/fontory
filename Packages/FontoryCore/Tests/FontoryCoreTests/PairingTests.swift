@@ -1,0 +1,146 @@
+import CoreText
+import Foundation
+import Testing
+@testable import FontoryCore
+
+@Suite struct PairingTests {
+    private func ref(_ ps: String, _ family: String, fp: String? = nil, v: [String: Double]? = nil) -> FontReference {
+        FontReference(postScriptName: ps, family: family, fingerprint: fp, variations: v)
+    }
+
+    private func style(_ ps: String, name: String, weight: Double, width: Double = 5, italic: Bool = false) -> PairingStyle {
+        PairingStyle(reference: ref(ps, "F"), name: name, weight: weight, width: width, isItalic: italic)
+    }
+
+    @Test func resolvesByFingerprintThenUniqueName() throws {
+        var f = try Fixture.make()
+        let b = try f.store.nextImportBatch()
+        // The same PostScript name in two files: only the fingerprint can tell them apart.
+        try f.add(f.locA.id, "Dup1.otf", [Fixture.face("Dup", family: "Dup", style: "Regular", weight: 400)], b)
+        try f.add(f.locA.id, "Dup2.otf", [Fixture.face("Dup", family: "Dup", style: "Regular", weight: 400)], b)
+        let byFP = ref("Dup", "Dup", fp: "fp-Dup2.otf")
+        let ambiguous = ref("Dup", "Dup")
+        let unique = ref("Beta-Black", "Beta", fp: "stale-fingerprint")
+        let gone = ref("Nope", "Nope", fp: "x")
+        let out = try f.store.resolve([byFP, ambiguous, unique, gone])
+        #expect(out[byFP]?.url?.lastPathComponent == "Dup2.otf")
+        #expect(out[byFP]?.isMissing == false)
+        #expect(out[ambiguous]?.faceID == nil && out[ambiguous]?.isMissing == true)
+        #expect(out[unique]?.faceID == f.faceIDs["Beta-Black"] && out[unique]?.isMissing == false)
+        #expect(out[gone]?.faceID == nil && out[gone]?.url == nil && out[gone]?.isMissing == true)
+        #expect(out.count == 4)
+    }
+
+    @Test func offlineIsMissingButKeepsReference() throws {
+        let f = try Fixture.make()
+        try f.store.setLocationOnline(f.locB.id, online: false, lastKnownPath: nil)
+        let r = ref("Beta-Regular", "Beta", fp: "fp-Beta-Regular.otf", v: ["wght": 500])
+        let out = try f.store.resolve([r])
+        #expect(out[r]?.reference == r)
+        #expect(out[r]?.isMissing == true)
+        #expect(out[r]?.url == nil)
+        #expect(out[r]?.faceID == f.faceIDs["Beta-Regular"])
+    }
+
+    @Test func referenceForFace() throws {
+        let f = try Fixture.make()
+        try f.store.setCustomFamily("Renamed", faceIDs: [f.faceIDs["Alpha-Bold"]!])
+        let r = try f.store.reference(forFace: f.faceIDs["Alpha-Bold"]!)
+        #expect(r == ref("Alpha-Bold", "Renamed", fp: "fp-Alpha-Bold.otf"))
+    }
+
+    @Test func candidatesAreFamilies() throws {
+        let f = try Fixture.make()
+        let beta = ["Beta-Light", "Beta-Regular", "Beta-Black"].map { f.faceIDs[$0]! }
+        let c = try f.store.candidateReferences(faceIDs: beta)
+        #expect(c.count == 1)
+        #expect(c[0].family == "Beta" && c[0].postScriptName == "Beta-Regular")
+        let mixed = try f.store.candidateReferences(faceIDs: [f.faceIDs["Beta-Black"]!, f.faceIDs["Alpha-Bold"]!, f.faceIDs["Beta-Light"]!])
+        #expect(mixed.map(\.family) == ["Beta", "Alpha"])
+    }
+
+    @Test func stylesOfFamily() throws {
+        let f = try Fixture.make()
+        let s = try f.store.styles(ofFamilyOf: ref("Alpha-Bold", "Alpha"))
+        #expect(s.map(\.reference.postScriptName) == ["Alpha-Regular", "Alpha-Italic", "Alpha-Bold"])
+        #expect(s.map(\.isItalic) == [false, true, false])
+        #expect(s.allSatisfy { $0.reference.fingerprint != nil })
+    }
+
+    @Test func mergeAppendsWithoutDuplicates() {
+        let a = ref("A-Regular", "Alpha"), b = ref("B-Regular", "Beta")
+        let out = PairingCycler.merge([a], adding: [ref("A-Bold", "ALPHA"), b, ref("B-Black", "beta")])
+        #expect(out == [a, b])
+        #expect(PairingCycler.merge([], adding: [a]) == [a])
+    }
+
+    @Test func nextFamilyWraps() {
+        let a = ref("A", "Alpha"), b = ref("B", "Beta"), c = ref("C", "Gamma")
+        let cs = [a, b, c]
+        #expect(PairingCycler.nextFamily(from: a, candidates: cs, step: 1) == b)
+        #expect(PairingCycler.nextFamily(from: c, candidates: cs, step: 1) == a)
+        #expect(PairingCycler.nextFamily(from: a, candidates: cs, step: -1) == c)
+        #expect(PairingCycler.nextFamily(from: ref("X", "gamma"), candidates: cs, step: 1) == a)
+        #expect(PairingCycler.nextFamily(from: ref("X", "Other"), candidates: cs, step: 1) == a)
+        #expect(PairingCycler.nextFamily(from: ref("X", "Other"), candidates: cs, step: -1) == c)
+        #expect(PairingCycler.nextFamily(from: a, candidates: [], step: 1) == nil)
+        #expect(PairingCycler.nextFamily(from: a, candidates: [a], step: 1) == a)
+    }
+
+    @Test func nextStyleWrapsWithItalicsOnlyFamily() {
+        let only = [style("I1", name: "Italic", weight: 400, italic: true)]
+        #expect(PairingCycler.nextStyle(current: only[0].reference, styles: only, step: 1) == only[0].reference)
+        #expect(PairingCycler.nextStyle(current: only[0].reference, styles: only, step: -1) == only[0].reference)
+        let two = only + [style("I2", name: "Bold Italic", weight: 700, italic: true)]
+        #expect(PairingCycler.nextStyle(current: two[1].reference, styles: two, step: 1) == two[0].reference)
+        #expect(PairingCycler.nextStyle(current: two[0].reference, styles: two, step: -1) == two[1].reference)
+        let cur = ref("Z", "F")
+        #expect(PairingCycler.nextStyle(current: cur, styles: [], step: 1) == cur)
+        #expect(PairingCycler.nextStyle(current: cur, styles: two, step: 1) == two[0].reference)
+    }
+
+    @Test func variableNamedInstancesAreStyles() throws {
+        guard FileManager.default.fileExists(atPath: TempFonts.sfns) else { return }
+        let temp = try TempFonts()
+        defer { temp.cleanup() }
+        let url = try temp.copy(TempFonts.sfns)
+        let font = try #require(FontFile.font(at: url, faceIndex: 0, size: 12))
+        let info = VariationInfo.read(font)
+        try #require(!info.instances.isEmpty)
+
+        let store = try FontStore(database: Database(path: ":memory:"))
+        let loc = try store.upsertLocation(kind: .folder, volumeUUID: "V", relativePath: "x", displayName: "x", lastKnownPath: temp.root.path)
+        let ps = CTFontCopyPostScriptName(font) as String
+        var face = Fixture.face(ps, family: "SFVar", style: "Regular", weight: 400)
+        face.isVariable = true
+        _ = try store.insertFile(FileRecord(locationID: loc.id, relativePath: "SFNS.ttf", size: 10, mtime: Date(), format: "ttf", fingerprint: "fp-sf"),
+                                 faces: [face], importBatch: try store.nextImportBatch())
+        let styles = try store.styles(ofFamilyOf: ref(ps, "SFVar"))
+        #expect(styles.count == 1 + info.instances.count)
+        let inst = styles.dropFirst()
+        #expect(inst.allSatisfy { $0.reference.postScriptName == ps && $0.reference.fingerprint == "fp-sf" && $0.reference.variations?["wght"] != nil })
+        // Cycling through everything wraps back to the start.
+        var cur = styles[0].reference
+        for _ in styles { cur = PairingCycler.nextStyle(current: cur, styles: styles, step: 1) }
+        #expect(cur == styles[0].reference)
+    }
+
+    @Test func closestStylePrefersItalicThenWeight() {
+        let styles = [
+            style("R", name: "Regular", weight: 400),
+            style("B", name: "Bold", weight: 700),
+            style("I", name: "Italic", weight: 400, italic: true),
+            style("BI", name: "Bold Italic", weight: 700, italic: true),
+            style("BIW", name: "Wide Bold Italic", weight: 700, width: 7, italic: true),
+        ]
+        let boldItalic = style("X", name: "", weight: 650, italic: true)
+        #expect(PairingCycler.closestStyle(to: boldItalic, in: styles).postScriptName == "BI")
+        let reg = style("X", name: "", weight: 500)
+        #expect(PairingCycler.closestStyle(to: reg, in: styles).postScriptName == "R")
+        let wideItalic = style("X", name: "", weight: 700, width: 8, italic: true)
+        #expect(PairingCycler.closestStyle(to: wideItalic, in: styles).postScriptName == "BIW")
+        // No italic in the family: weight decides.
+        let upright = Array(styles.prefix(2))
+        #expect(PairingCycler.closestStyle(to: boldItalic, in: upright).postScriptName == "B")
+    }
+}
