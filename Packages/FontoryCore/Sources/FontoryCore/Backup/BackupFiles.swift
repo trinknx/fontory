@@ -24,7 +24,9 @@ public struct BackupFiles: Sendable {
     private func formatter(_ format: String) -> DateFormatter {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.calendar = calendar
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = calendar.timeZone
+        f.calendar = gregorian
         f.timeZone = calendar.timeZone
         f.dateFormat = format
         return f

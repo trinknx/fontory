@@ -79,4 +79,17 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: old.path))
         #expect(FileManager.default.fileExists(atPath: kept.path))
     }
+
+    @Test func namesAreGregorianUnderNonGregorianCalendar() throws {
+        let dir = try tempDir()
+        var buddhist = Calendar(identifier: .buddhist)
+        buddhist.timeZone = cal.timeZone
+        let files = BackupFiles(directory: dir, calendar: buddhist)
+        let d = date(2026, 3, 5, 1, 30, 7)
+        #expect(files.dailyURL(for: d).lastPathComponent == "Fontory 2026-03-05.fontorybackup")
+        #expect(files.safetyURL(for: d).lastPathComponent == "Fontory before restore 2026-03-05 013007.fontorybackup")
+        try touch(BackupFiles(directory: dir, calendar: cal).dailyURL(for: d))
+        #expect(files.hasDaily(for: d))
+        #expect(files.list().first?.date == date(2026, 3, 5, 0, 0, 0))
+    }
 }
