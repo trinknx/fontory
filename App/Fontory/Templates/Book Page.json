@@ -27,7 +27,7 @@
         "postScriptName": "Georgia"
       },
       "frame": {
-        "h": 200,
+        "h": 150,
         "w": 324,
         "x": 48,
         "y": 150
@@ -46,10 +46,10 @@
         "postScriptName": "Georgia"
       },
       "frame": {
-        "h": 200,
+        "h": 220,
         "w": 324,
         "x": 48,
-        "y": 330
+        "y": 316
       },
       "id": "C3616F47-46B0-5F17-8561-D277DE9DF290",
       "kind": "text",

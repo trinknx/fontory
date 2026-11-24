@@ -61,14 +61,26 @@ extension FontStore {
     }
 
     /// Looks each reference up: fingerprint plus PostScript name first, then a PostScript name that is unique in
-    /// the library. Anything else is unresolved. An offline face keeps its `faceID` but has no `url`.
+    /// the library. Anything else is unresolved. "Unique" means one font file identity: copies of one file (rows
+    /// sharing `files.fingerprint`, e.g. the same font in two folders) count as a single font. Among copies an
+    /// online one is preferred, then the lowest face id. An offline face keeps its `faceID` but has no `url`.
     public func resolve(_ refs: [FontReference]) throws -> [FontReference: ResolvedFont] {
         try reader.withLock {
             var out: [FontReference: ResolvedFont] = [:]
             let byFingerprint = try reader.prepare(Self.locateColumns
-                + " WHERE files.fingerprint = ?1 AND faces.postscript_name = ?2 ORDER BY faces.id LIMIT 1")
+                + " WHERE files.fingerprint = ?1 AND faces.postscript_name = ?2"
+                + " ORDER BY locations.online DESC, faces.id LIMIT 1")
             defer { byFingerprint.reset() }
-            let byName = try reader.prepare(Self.locateColumns + " WHERE faces.postscript_name = ?1 LIMIT 2")
+            // The preferred copy of each fingerprint carrying the name; two rows mean two different fonts.
+            let byName = try reader.prepare(Self.locateColumns + """
+                 WHERE faces.id IN (
+                   SELECT (SELECT f2.id FROM faces f2 JOIN files fi2 ON fi2.id = f2.file_id
+                           JOIN locations l2 ON l2.id = fi2.location_id
+                           WHERE f2.postscript_name = ?1 AND fi2.fingerprint = fi.fingerprint
+                           ORDER BY l2.online DESC, f2.id LIMIT 1)
+                   FROM faces fa JOIN files fi ON fi.id = fa.file_id
+                   WHERE fa.postscript_name = ?1 GROUP BY fi.fingerprint LIMIT 2)
+                """)
             defer { byName.reset() }
             for ref in refs where out[ref] == nil {
                 var found: LocatedFace?

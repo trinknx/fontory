@@ -31,6 +31,50 @@ import Testing
         #expect(out.count == 4)
     }
 
+    /// Adds a file with an explicit fingerprint (copies of one font share it).
+    private func addCopy(_ f: Fixture, _ loc: Int64, _ path: String, ps: String, fingerprint: String) throws -> Int64 {
+        let file = FileRecord(locationID: loc, relativePath: path, size: 10, mtime: Date(timeIntervalSince1970: 1000),
+                              format: "otf", fingerprint: fingerprint)
+        _ = try f.store.insertFile(file, faces: [Fixture.face(ps, family: "Copy", style: "Regular", weight: 400)],
+                                   importBatch: try f.store.nextImportBatch())
+        let rows = try f.store.rows(ids: try f.store.faceIDs(for: LibraryQuery()))
+        return try #require(rows.values.filter { $0.postScriptName == ps }.map(\.id).max())
+    }
+
+    @Test func copiesOfOneFilePreferTheOnlineOne() throws {
+        let f = try Fixture.make()
+        // The offline copy is added first (lower face id), the online one second.
+        _ = try addCopy(f, f.locB.id, "Copy.otf", ps: "Copy-Regular", fingerprint: "fp-copy")
+        let online = try addCopy(f, f.locA.id, "Copy.otf", ps: "Copy-Regular", fingerprint: "fp-copy")
+        try f.store.setLocationOnline(f.locB.id, online: false, lastKnownPath: nil)
+        let byFP = ref("Copy-Regular", "Copy", fp: "fp-copy")
+        let byName = ref("Copy-Regular", "Copy")
+        let out = try f.store.resolve([byFP, byName])
+        #expect(out[byFP]?.faceID == online && out[byFP]?.isMissing == false)
+        #expect(out[byFP]?.url?.path == "/Volumes/A/Fonts/Copy.otf")
+        #expect(out[byName]?.faceID == online && out[byName]?.isMissing == false)
+    }
+
+    @Test func sameNameSameFingerprintResolves() throws {
+        let f = try Fixture.make()
+        let first = try addCopy(f, f.locA.id, "One/Same.otf", ps: "Same-Regular", fingerprint: "fp-same")
+        _ = try addCopy(f, f.locA.id, "Two/Same.otf", ps: "Same-Regular", fingerprint: "fp-same")
+        let r = ref("Same-Regular", "Copy")
+        let out = try f.store.resolve([r])
+        #expect(out[r]?.faceID == first && out[r]?.isMissing == false)
+        #expect(out[r]?.url?.lastPathComponent == "Same.otf")
+    }
+
+    @Test func sameNameDifferentFingerprintsStaysUnresolved() throws {
+        let f = try Fixture.make()
+        _ = try addCopy(f, f.locA.id, "One/Diff.otf", ps: "Diff-Regular", fingerprint: "fp-diff-1")
+        _ = try addCopy(f, f.locA.id, "Two/Diff.otf", ps: "Diff-Regular", fingerprint: "fp-diff-2")
+        _ = try addCopy(f, f.locB.id, "Diff.otf", ps: "Diff-Regular", fingerprint: "fp-diff-1")
+        let r = ref("Diff-Regular", "Copy")
+        let out = try f.store.resolve([r])
+        #expect(out[r]?.faceID == nil && out[r]?.isMissing == true)
+    }
+
     @Test func offlineIsMissingButKeepsReference() throws {
         let f = try Fixture.make()
         try f.store.setLocationOnline(f.locB.id, online: false, lastKnownPath: nil)
