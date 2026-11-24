@@ -42,6 +42,8 @@ final class CompareModel: CandidateStripSource {
     @ObservationIgnored private var scale: CGFloat = 1
     @ObservationIgnored private var renderTask: Task<Void, Never>?
     @ObservationIgnored private var renderPending = false
+    /// Bumped by every `open`: older queued or in-flight work checks it and drops its result.
+    @ObservationIgnored private var openGeneration = 0
     @ObservationIgnored private var pairingChain: Task<Void, Never>?
     @ObservationIgnored private var resolved: [FontReference: ResolvedFont] = [:]
     @ObservationIgnored private var familyStyleCache: [String: [PairingStyle]] = [:]
@@ -64,58 +66,73 @@ final class CompareModel: CandidateStripSource {
     /// Replaces A, B and the candidates: A is `referenceFaceID`'s face (else the first candidate's), the candidates
     /// are one per family of `candidateFaceIDs` except A's, and B is the first candidate's style closest to A.
     func open(referenceFaceID: Int64?, candidateFaceIDs: [Int64], text newText: String? = nil) async {
-        if let newText { setText(newText) }
-        var ids = candidateFaceIDs
-        let referenceID: Int64? = referenceFaceID ?? (ids.isEmpty ? nil : ids.removeFirst())
-        guard let referenceID, let store = fontStore() else {
-            a = nil; b = nil; candidates = []
-            emptyMessage = Self.noFontsMessage
-            renderedImage = nil; scene = nil
-            return
+        openGeneration += 1
+        let gen = openGeneration
+        await run { model in
+            guard gen == model.openGeneration else { return }
+            if let newText { model.setText(newText) }
+            var ids = candidateFaceIDs
+            let referenceID: Int64? = referenceFaceID ?? (ids.isEmpty ? nil : ids.removeFirst())
+            guard let referenceID, let store = model.fontStore() else { model.showEmpty(); return }
+            let found = await Task.detached(priority: .userInitiated) { () -> (FontReference, [FontReference])? in
+                guard let ref = try? store.reference(forFace: referenceID) else { return nil }
+                return (ref, (try? store.candidateReferences(faceIDs: ids)) ?? [])
+            }.value
+            guard gen == model.openGeneration else { return }
+            guard let (ref, refs) = found else { model.showEmpty(); return }
+            let list = PairingCycler.merge([], adding: refs).filter { $0.family.lowercased() != ref.family.lowercased() }
+            let first: FontReference?
+            if let candidate = list.first { first = await model.closestStyle(in: candidate, to: ref) } else { first = nil }
+            guard gen == model.openGeneration else { return }
+            model.emptyMessage = nil
+            model.a = ref
+            model.candidates = list
+            model.b = first
+            model.refreshRender()
         }
-        let found = await Task.detached(priority: .userInitiated) { () -> (FontReference, [FontReference])? in
-            guard let ref = try? store.reference(forFace: referenceID) else { return nil }
-            return (ref, (try? store.candidateReferences(faceIDs: ids)) ?? [])
-        }.value
-        guard let (ref, refs) = found else {
-            a = nil; b = nil; candidates = []
-            emptyMessage = Self.noFontsMessage
-            renderedImage = nil; scene = nil
-            return
-        }
-        emptyMessage = nil
-        a = ref
-        candidates = PairingCycler.merge([], adding: refs).filter { $0.family.lowercased() != ref.family.lowercased() }
-        if let first = candidates.first { b = await closestStyle(in: first, to: ref) } else { b = nil }
-        refreshRender()
+    }
+
+    private func showEmpty() {
+        a = nil; b = nil; candidates = []
+        emptyMessage = Self.noFontsMessage
+        renderedImage = nil; scene = nil
     }
 
     /// The family of A goes into the candidates (if not there), B's face becomes A and A's face becomes B.
+    /// A and B are read when the swap runs, after earlier cycling and opening finished.
     func swap() async {
-        guard let oldA = a, let oldB = b, let store = fontStore() else { return }
-        let representative = await Task.detached(priority: .userInitiated) { () -> FontReference? in
-            guard let face = (try? store.resolve([oldA]))?[oldA]?.faceID else { return nil }
-            return try? store.candidateReferences(faceIDs: [face]).first
-        }.value
-        candidates = PairingCycler.merge(candidates, adding: [representative ?? oldA])
-        a = oldB
-        b = oldA
-        refreshRender()
+        let gen = openGeneration
+        await run { model in
+            guard gen == model.openGeneration, let oldA = model.a, let oldB = model.b, let store = model.fontStore() else { return }
+            let representative = await Task.detached(priority: .userInitiated) { () -> FontReference? in
+                guard let face = (try? store.resolve([oldA]))?[oldA]?.faceID else { return nil }
+                return try? store.candidateReferences(faceIDs: [face]).first
+            }.value
+            guard gen == model.openGeneration else { return }
+            model.candidates = PairingCycler.merge(model.candidates, adding: [representative ?? oldA])
+            model.a = oldB
+            model.b = oldA
+            model.refreshRender()
+        }
     }
 
     // MARK: Text and options
 
-    /// Sets the text (remembered) and, when it is a custom one, pushes it to the front of the recent texts.
+    /// Sets the text (remembered); recents are not touched (see `commitText`).
     func setText(_ s: String) {
         text = s
         defaults.set(s, forKey: Key.text)
-        if !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !Self.presets.contains(s) {
-            recentTexts.removeAll { $0 == s }
-            recentTexts.insert(s, at: 0)
-            if recentTexts.count > Self.maxRecentTexts { recentTexts.removeLast(recentTexts.count - Self.maxRecentTexts) }
-            defaults.set(recentTexts, forKey: Key.recentTexts)
-        }
         refreshRender()
+    }
+
+    /// Sets the text and, when it is a custom one, pushes it to the front of the recent texts (Return, preset pick).
+    func commitText(_ s: String) {
+        setText(s)
+        guard !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !Self.presets.contains(s) else { return }
+        recentTexts.removeAll { $0 == s }
+        recentTexts.insert(s, at: 0)
+        if recentTexts.count > Self.maxRecentTexts { recentTexts.removeLast(recentTexts.count - Self.maxRecentTexts) }
+        defaults.set(recentTexts, forKey: Key.recentTexts)
     }
 
     func setOptions(_ o: CompareOptions) {
@@ -149,24 +166,31 @@ final class CompareModel: CandidateStripSource {
 
     /// ←/→ B's family, ↑/↓ B's style, ⇧↑/⇧↓ A's style.
     func cycle(_ key: CycleKey) {
+        let gen = openGeneration
         enqueue { model in
+            guard gen == model.openGeneration else { return }
             switch key {
             case .family(let step):
                 guard let a = model.a else { return }
                 let next = PairingCycler.nextFamily(from: model.b ?? a, candidates: model.candidates, step: step)
                 guard let next else { return }
                 let chosen = await model.closestStyle(in: next, to: a)
+                guard gen == model.openGeneration else { return }
                 model.b = chosen
                 model.refreshRender()
             case .style(let step):
                 guard let b = model.b else { return }
-                let next = PairingCycler.nextStyle(current: b, styles: await model.familyStyles(of: b), step: step)
+                let styles = await model.familyStyles(of: b)
+                guard gen == model.openGeneration else { return }
+                let next = PairingCycler.nextStyle(current: b, styles: styles, step: step)
                 guard next != b else { return }
                 model.b = next
                 model.refreshRender()
             case .referenceStyle(let step):
                 guard let a = model.a else { return }
-                let next = PairingCycler.nextStyle(current: a, styles: await model.familyStyles(of: a), step: step)
+                let styles = await model.familyStyles(of: a)
+                guard gen == model.openGeneration else { return }
+                let next = PairingCycler.nextStyle(current: a, styles: styles, step: step)
                 guard next != a else { return }
                 model.a = next
                 model.refreshRender()
@@ -265,13 +289,20 @@ final class CompareModel: CandidateStripSource {
 
     // MARK: Helpers
 
-    private func enqueue(_ work: @escaping @MainActor (CompareModel) async -> Void) {
+    @discardableResult
+    private func enqueue(_ work: @escaping @MainActor (CompareModel) async -> Void) -> Task<Void, Never> {
         let previous = pairingChain
-        pairingChain = Task { [weak self] in
+        let task = Task { [weak self] in
             await previous?.value
             guard let self else { return }
             await work(self)
         }
+        pairingChain = task
+        return task
+    }
+
+    private func run(_ work: @escaping @MainActor (CompareModel) async -> Void) async {
+        await enqueue(work).value
     }
 
     /// "Family Style" for the readout and the missing-font line.
@@ -318,9 +349,14 @@ extension CompareModel {
 
     /// B becomes that family, in its style closest to A.
     func pickCandidate(_ ref: FontReference) async {
-        let chosen = if let a { await closestStyle(in: ref, to: a) } else { ref }
-        b = chosen
-        refreshRender()
+        let gen = openGeneration
+        await run { model in
+            guard gen == model.openGeneration else { return }
+            let chosen = if let a = model.a { await model.closestStyle(in: ref, to: a) } else { ref }
+            guard gen == model.openGeneration else { return }
+            model.b = chosen
+            model.refreshRender()
+        }
     }
 
     func removeCandidate(_ ref: FontReference) {
@@ -330,13 +366,20 @@ extension CompareModel {
 
     /// Dragged or added fonts: their families (A's excluded) join the candidates; with no B yet the first becomes B.
     func addCandidates(faceIDs: [Int64]) async {
-        guard !faceIDs.isEmpty, let store = fontStore() else { return }
-        let refs = await Task.detached(priority: .userInitiated) { (try? store.candidateReferences(faceIDs: faceIDs)) ?? [] }.value
-        let own = a?.family.lowercased()
-        candidates = PairingCycler.merge(candidates, adding: refs.filter { $0.family.lowercased() != own })
-        if b == nil, let a, let first = candidates.first {
-            b = await closestStyle(in: first, to: a)
-            refreshRender()
+        guard !faceIDs.isEmpty else { return }
+        let gen = openGeneration
+        await run { model in
+            guard gen == model.openGeneration, let store = model.fontStore() else { return }
+            let refs = await Task.detached(priority: .userInitiated) { (try? store.candidateReferences(faceIDs: faceIDs)) ?? [] }.value
+            guard gen == model.openGeneration else { return }
+            let own = model.a?.family.lowercased()
+            model.candidates = PairingCycler.merge(model.candidates, adding: refs.filter { $0.family.lowercased() != own })
+            if model.b == nil, let a = model.a, let first = model.candidates.first {
+                let chosen = await model.closestStyle(in: first, to: a)
+                guard gen == model.openGeneration else { return }
+                model.b = chosen
+                model.refreshRender()
+            }
         }
     }
 

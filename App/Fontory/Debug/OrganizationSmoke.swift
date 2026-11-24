@@ -137,23 +137,49 @@ enum OrganizationSmoke {
         check(compare.candidates.count == 2, "compare: removing a candidate drops its family")
 
         compare.setText("Xin chào")
-        check(suite.string(forKey: "compare.text") == "Xin chào" && compare.recentTexts.first == "Xin chào",
-              "compare: custom text is remembered and listed first")
-        compare.setText(CompareModel.presets[2])
+        check(suite.string(forKey: "compare.text") == "Xin chào" && compare.recentTexts.isEmpty,
+              "compare: typing remembers the text but does not touch the recents")
+        compare.commitText("Xin chào")
+        check(compare.recentTexts == ["Xin chào"], "compare: committing a custom text lists it first")
+        compare.commitText(CompareModel.presets[2])
         check(compare.recentTexts == ["Xin chào"] && suite.string(forKey: "compare.text") == CompareModel.presets[2],
-              "compare: presets are remembered as text but not as recents")
-        for i in 1...6 { compare.setText("Text \(i)") }
+              "compare: a committed preset is remembered as text but not as a recent")
+        for i in 1...6 { compare.commitText("Text \(i)") }
         check(compare.recentTexts.count == 5 && compare.recentTexts.first == "Text 6" && !compare.recentTexts.contains("Xin chào"),
-              "compare: only the five latest custom texts are kept", "\(compare.recentTexts)")
-        compare.setText("Text 3")
+              "compare: only the five latest committed texts are kept", "\(compare.recentTexts)")
+        compare.commitText("Text 3")
         check(compare.recentTexts.first == "Text 3" && compare.recentTexts.filter { $0 == "Text 3" }.count == 1,
-              "compare: a repeated text moves to the front")
+              "compare: a repeated committed text moves to the front")
         compare.setOptions(CompareOptions(mode: .sideBySide, sizeRule: .matchXHeight, outlines: true, guides: false))
         let reloaded = CompareModel(defaults: suite)
         check(reloaded.text == "Text 3" && reloaded.recentTexts == compare.recentTexts
               && reloaded.options == CompareOptions(mode: .sideBySide, sizeRule: .matchXHeight, outlines: true, guides: false),
               "compare: text, recents and options persist across a new model")
         check(reloaded.a == nil && reloaded.b == nil && reloaded.candidates.isEmpty, "compare: A, B and candidates are not persisted")
+
+        // Interleaved opens and a cycle: the last open wins, the cycle in between is dropped.
+        let first = Task { await compare.open(referenceFaceID: serif, candidateFaceIDs: [sans, mono]) }
+        let between = Task { compare.cycle(.family(1)) }
+        let second = Task { await compare.open(referenceFaceID: mono, candidateFaceIDs: [serif, sans]) }
+        await first.value; await between.value; await second.value
+        await compare.waitForRenderForSmoke()
+        check(compare.a?.family == "Smoke Mono" && compare.candidates.map(\.family) == ["Smoke Serif", "Smoke Sans"]
+              && compare.b?.family == "Smoke Serif", "compare: interleaved opens and a cycle end on the last open",
+              "\(compare.a?.family ?? "nil") \(compare.candidates.map(\.family)) \(compare.b?.family ?? "nil")")
+        let slow = Task { await compare.open(referenceFaceID: serif, candidateFaceIDs: [sans]) }
+        let empty = Task { await compare.open(referenceFaceID: nil, candidateFaceIDs: []) }
+        await slow.value; await empty.value
+        await compare.waitForRenderForSmoke()
+        check(compare.a == nil && compare.emptyMessage != nil, "compare: an empty open is not overwritten by an earlier open")
+        await compare.open(referenceFaceID: serif, candidateFaceIDs: [sans, mono])
+        let swapTask = Task { await compare.swap() }
+        let cycleTask = Task { compare.cycle(.family(1)) }
+        await swapTask.value; await cycleTask.value
+        await compare.waitForRenderForSmoke()
+        // Swap first (A Sans, B Serif), then → wraps from Serif to Sans; the other order would give A Mono.
+        check(compare.a?.family == "Smoke Sans" && compare.b?.family == "Smoke Sans",
+              "compare: swap reads A and B when it runs, and a later cycle follows it",
+              "\(compare.a?.family ?? "nil") / \(compare.b?.family ?? "nil")")
 
         await compare.open(referenceFaceID: nil, candidateFaceIDs: [])
         check(compare.emptyMessage == "Select fonts or add some to the Quick Collection, then press ⌥⌘K." && compare.a == nil
@@ -181,6 +207,13 @@ enum OrganizationSmoke {
         await model.openInCompare()
         check(model.compare.a != nil && model.compare.candidates.count == 1 && model.compare.b?.family == model.compare.candidates.first?.family,
               "compare: openInCompare opens the selection")
+        model.selection = [sans, mono]
+        model.quickCollectionIDs = [serif, sans, mono]
+        model.openFamilyDetail(faceID: serif)
+        _ = await eventually { model.detail?.family == "Smoke Serif" }
+        check(model.compareSource.reference == serif && model.compareSource.candidates == [sans, mono],
+              "compare: an open family page wins over 2+ selected faces", "\(model.compareSource)")
+        model.closeFamilyDetail()
         model.quickCollectionIDs = []
         model.selection = []
 

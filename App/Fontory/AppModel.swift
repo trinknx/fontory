@@ -758,16 +758,17 @@ final class AppModel {
     /// The Compare window's model (remembered settings in `UserDefaults.standard`).
     let compare = CompareModel()
 
-    /// What ⌥⌘K compares: 2+ selected faces (browser order) → the first against the rest; one selected face or an
+    /// What ⌥⌘K compares: an open family page's representative against the Quick Collection's other families; else 2+ selected faces (browser order) → the first against the rest; one selected face or an
     /// open family page (its representative) against the Quick Collection's other families; else the Quick
     /// Collection's first face against the rest.
     var compareSource: (reference: Int64?, candidates: [Int64]) {
         let quick = quickCollectionIDs.sorted()
-        if selection.count >= 2 {
+        // An open family page wins over any browser selection (as in `layoutsSourceFaceIDs`).
+        if selection.count >= 2, detail == nil {
             let ordered = selectionInBrowserOrder
             return (ordered.first, Array(ordered.dropFirst()))
         }
-        let single = selection.first ?? detail?.representativeID
+        let single = detail?.representativeID ?? selection.first
         if let single {
             var others = quick.filter { $0 != single }
             if let store = backend?.store, !others.isEmpty,
