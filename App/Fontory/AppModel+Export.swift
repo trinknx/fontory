@@ -37,6 +37,12 @@ extension AppModel {
         await exportFonts(faceIDs: detail.faceIDs, suggestedName: detail.family)
     }
 
+    /// "<N> fonts are on a drive that isn't connected." plus the question unless everything is offline.
+    static func offlineMessage(_ count: Int, askingToContinue: Bool = true) -> String {
+        let noun = count == 1 ? "font is" : "fonts are"
+        return "\(count.formatted()) \(noun) on a drive that isn't connected." + (askingToContinue ? " Export the others?" : "")
+    }
+
     /// The whole flow: files, the offline question, the folder panel, the copy, the result.
     func exportFonts(faceIDs: [Int64], suggestedName: String) async {
         guard let backend, !faceIDs.isEmpty, exportProgress == nil else { return }
@@ -44,15 +50,21 @@ extension AppModel {
                                               failureTitle: "The fonts could not be exported"),
               !files.isEmpty else { return }
         let offline = files.filter { $0.url == nil }.count
-        if offline > 0, exportDestinationOverride == nil {
-            let noun = offline == 1 ? "font is" : "fonts are"
-            alert = AlertItem(title: "Some fonts are offline",
-                              message: "\(offline.formatted()) \(noun) on a drive that isn't connected. Export the others?",
-                              actionTitle: "Export") { [weak self] in
-                guard let self else { return }
-                Task { await self.chooseAndExport(files, suggestedName: suggestedName) }
-            }
+        if offline == files.count {
+            alert = AlertItem(title: "The fonts are offline", message: Self.offlineMessage(offline, askingToContinue: false))
             return
+        }
+        if offline > 0 {
+            if let answer = exportOfflineAnswer {
+                guard answer(offline) else { return }
+            } else if exportDestinationOverride == nil {
+                alert = AlertItem(title: "Some fonts are offline", message: Self.offlineMessage(offline),
+                                  actionTitle: "Export") { [weak self] in
+                    guard let self else { return }
+                    Task { await self.chooseAndExport(files, suggestedName: suggestedName) }
+                }
+                return
+            }
         }
         await chooseAndExport(files, suggestedName: suggestedName)
     }

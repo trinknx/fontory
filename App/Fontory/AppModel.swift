@@ -693,6 +693,8 @@ final class AppModel {
     @ObservationIgnored var lastExportResult: ExportResult?
     /// Smoke seams: the destination folder and options that replace the folder panel and offline question.
     @ObservationIgnored var exportDestinationOverride: URL?
+    /// Smoke seam: answers the offline question (given the offline count) instead of the dialog.
+    @ObservationIgnored var exportOfflineAnswer: ((Int) -> Bool)?
     @ObservationIgnored var exportOptionsOverride: (byFamily: Bool, zip: Bool)?
 
     // MARK: Backups (actions in AppModel+Backup.swift)

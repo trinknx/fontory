@@ -51,7 +51,7 @@ enum OrganizationSmoke {
             await smartEditorSteps(model, backend: backend)
             await reviewFixSteps(model, backend: backend)
             await filterSteps(model, backend: backend, folder: dir)
-            await exportSteps(model, faces: faces, folder: dir)
+            await exportSteps(model, backend: backend, faces: faces, folder: dir)
             await duplicateSteps()
             await backupSteps()
         } catch {
@@ -1127,10 +1127,8 @@ enum OrganizationSmoke {
         }) ?? -1
     }
 
-    /// A temporary library (its own registrar and settings suite) with copies of a system font: an OTF-named copy, a TTF
-    /// copy, a copy in a subfolder (for the Trash) and a padded copy (same font, different file).
     /// Export (spec §19) with the panels skipped: a tag's files, the Quick Collection as a ZIP, a missing file counted.
-    private static func exportSteps(_ model: AppModel, faces: [String: Int64], folder: URL) async {
+    private static func exportSteps(_ model: AppModel, backend: LibraryBackend, faces: [String: Int64], folder: URL) async {
         let fm = FileManager.default
         guard let serif = faces["Smoke Serif"], let sans = faces["Smoke Sans"], let mono = faces["Smoke Mono"] else {
             check(false, "export: faces missing")
@@ -1162,10 +1160,53 @@ enum OrganizationSmoke {
         check(model.lastExportResult?.copied == 2 && model.lastExportResult?.skipped == 1 && model.lastExportResult?.output == zip,
               "export: the missing file is skipped and counted", "\(String(describing: model.lastExportResult))")
         check(model.exportProgress == nil, "export: the progress sheet is closed afterwards")
+
+        // A genuinely offline file: its location is marked offline (url nil).
+        do {
+            let store = backend.store
+            let loc = try store.upsertLocation(kind: .folder, volumeUUID: "SMOKE-OFFLINE", relativePath: "Gone",
+                                               displayName: "Gone", lastKnownPath: folder.appendingPathComponent("Gone").path)
+            let face = ParsedFace(postScriptName: "SmokeGone-Regular", family: "Smoke Gone", style: "Regular",
+                                  fullName: "Smoke Gone Regular", glyphCount: 10, styleClass: .sans)
+            let file = FileRecord(locationID: loc.id, relativePath: "SmokeGone.otf", size: 10, mtime: Date(timeIntervalSince1970: 1000),
+                                  format: "otf", fingerprint: "smoke-gone")
+            _ = try store.insertFile(file, faces: [face], importBatch: try store.nextImportBatch())
+            try store.setLocationOnline(loc.id, online: false, lastKnownPath: nil)
+            let goneID = try store.rows(ids: try store.faceIDs(for: LibraryQuery(includeSystem: true))).values.first { $0.family == "Smoke Gone" }?.id
+            guard let gone = goneID else { check(false, "export: offline face missing"); return }
+            check(AppModel.offlineMessage(1) == "1 font is on a drive that isn't connected. Export the others?"
+                  && AppModel.offlineMessage(3) == "3 fonts are on a drive that isn't connected. Export the others?",
+                  "export: the offline question's copy")
+            let before = ((try? fm.contentsOfDirectory(atPath: out.path)) ?? []).sorted()
+            var asked: [Int] = []
+            model.exportOfflineAnswer = { asked.append($0); return false }
+            model.exportOptionsOverride = (byFamily: false, zip: false)
+            await model.exportFonts(faceIDs: [serif, gone], suggestedName: "Mixed")
+            check(asked == [1], "export: the offline question is asked with the offline count", "\(asked)")
+            check(((try? fm.contentsOfDirectory(atPath: out.path)) ?? []).sorted() == before, "export: answering Cancel exports nothing")
+            model.exportOfflineAnswer = { asked.append($0); return true }
+            model.exportOptionsOverride = (byFamily: true, zip: false)
+            await model.exportFonts(faceIDs: [serif, gone], suggestedName: "Mixed")
+            check(model.lastExportResult?.copied == 1 && model.lastExportResult?.skipped == 1,
+                  "export: answering Export copies the others and counts the offline file", "\(String(describing: model.lastExportResult))")
+            // Everything offline: an informational alert, no question, no export.
+            asked = []
+            model.lastExportResult = nil
+            await model.exportFonts(faceIDs: [gone], suggestedName: "Gone")
+            check(asked.isEmpty && model.lastExportResult == nil && model.alert?.actionTitle == nil
+                  && model.alert?.message == "1 font is on a drive that isn't connected.",
+                  "export: when every file is offline an alert says so and nothing is exported", model.alert?.message ?? "no alert")
+            model.alert = nil
+        } catch {
+            check(false, "export: offline setup", "\(error)")
+        }
+        model.exportOfflineAnswer = nil
         model.exportDestinationOverride = nil
         model.exportOptionsOverride = nil
     }
 
+    /// A temporary library (its own registrar and settings suite) with copies of a system font: an OTF-named copy, a TTF
+    /// copy, a copy in a subfolder (for the Trash) and a padded copy (same font, different file).
     private static func duplicateSteps() async {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("FontoryDuplicatesSmoke-\(UUID().uuidString)", isDirectory: true)
