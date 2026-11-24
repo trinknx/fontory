@@ -134,15 +134,19 @@ private struct LayoutsList: View {
     }
 }
 
-/// The canvas, or a hint when no layout is open.
+/// The canvas with the candidates strip under it, or a hint when no layout is open.
 private struct LayoutDetail: View {
     let layouts: LayoutsModel
 
     var body: some View {
         if layouts.current != nil {
-            LayoutCanvasView(model: layouts, image: layouts.renderedImage, document: layouts.current,
-                             zoom: layouts.effectiveZoom, selection: layouts.selectedBlockID,
-                             missingFontBlocks: layouts.report.missingFontBlockIDs)
+            VStack(spacing: 0) {
+                LayoutCanvasView(model: layouts, image: layouts.renderedImage, document: layouts.current,
+                                 zoom: layouts.effectiveZoom, selection: layouts.selectedBlockID,
+                                 missingFontBlocks: layouts.report.missingFontBlockIDs)
+                Divider()
+                CandidatesStrip(layouts: layouts)
+            }
         } else {
             ContentUnavailableView("No Layout Open", systemImage: "doc.richtext",
                                    description: Text("Choose a layout, or start one with New Layout."))

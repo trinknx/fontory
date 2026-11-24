@@ -1974,6 +1974,11 @@ enum OrganizationSmoke {
             // Latin-only (no Vietnamese stacked marks such as ế, ệ): for the missing-characters note.
             try fm.copyItem(at: URL(fileURLWithPath: "/System/Library/Fonts/Supplemental/Hoefler Text.ttc"),
                             to: fonts.appendingPathComponent("Hoefler Text.ttc"))
+            // One family of three styles, for the Pairing Studio (⌘K, cycling).
+            for name in ["Trebuchet MS.ttf", "Trebuchet MS Bold.ttf", "Trebuchet MS Italic.ttf"] {
+                try fm.copyItem(at: URL(fileURLWithPath: "/System/Library/Fonts/Supplemental/\(name)"),
+                                to: fonts.appendingPathComponent(name))
+            }
             backend = try LibraryBackend(databaseURL: root.appendingPathComponent("library.sqlite"), registrar: SmokeRegistrar())
         } catch {
             check(false, "layouts: setup", "\(error)"); return
@@ -2107,6 +2112,8 @@ enum OrganizationSmoke {
         check(layouts.current == nil && layouts.currentURL == nil && layouts.renderedImage == nil,
               "layouts: deleting the open layout closes it")
 
+        await pairingSteps(model, store: backend.store)
+
         // Quit flush: an edit made just before quitting is saved.
         if let dup = layouts.items.first(where: { $0.name == "Renamed 2" }) {
             await layouts.open(dup.url)
@@ -2122,6 +2129,135 @@ enum OrganizationSmoke {
         check(realDates() == realBefore, "layouts: the real Layouts and Templates folders are untouched", "\(realBefore) → \(realDates())")
         check(standardSnapshot() == standardBefore, "layouts: nothing written to the user's defaults")
         check(recycled.allSatisfy { $0.path.hasPrefix(root.path) }, "layouts: only temp files were recycled")
+    }
+
+    // MARK: Wave 3C task 7: Pairing Studio
+
+    /// ⌘K sources and the ⌘K rule, cycling families (←/→) and styles (↑/↓) on the selected block, Apply to All
+    /// Blocks, the strip's remove and its family-name images; every change is one undo step. Starts with no layout
+    /// open, so ⌘K creates a Poster.
+    private static func pairingSteps(_ model: AppModel, store: FontStore) async {
+        let layouts = model.layouts
+        check(layouts.current == nil, "pairing: starts with no layout open")
+        let all = (try? store.faceIDs(for: LibraryQuery())) ?? []
+        var byFamily: [String: [Int64]] = [:]
+        for id in all {
+            guard let ref = try? store.reference(forFace: id) else { continue }
+            byFamily[ref.family.lowercased(), default: []].append(id)
+        }
+        guard let treb = byFamily["trebuchet ms"], treb.count == 3, let georgia = byFamily["georgia"]?.first,
+              let hoefler = byFamily["hoefler text"]?.first else {
+            check(false, "pairing: the fixture has Trebuchet MS (3 styles), Georgia and Hoefler Text", "\(byFamily.keys.sorted())")
+            return
+        }
+        func families() -> [String] { layouts.candidates.map { $0.family.lowercased() } }
+
+        // ⌘K with three faces of one family plus one other: two candidates, in a new Poster.
+        model.selection = Set(treb + [georgia])
+        check(model.layoutsSourceFaceIDs.count == 4, "pairing: ⌘K uses the browser selection")
+        await model.openInLayouts()
+        check(layouts.current != nil && layouts.currentURL?.lastPathComponent.hasPrefix("Poster") == true,
+              "pairing: ⌘K with no layout open creates a Poster layout", "\(String(describing: layouts.currentURL))")
+        check(families() == ["trebuchet ms", "georgia"] || families() == ["georgia", "trebuchet ms"],
+              "pairing: ⌘K with 3 faces of one family plus 1 other gives 2 candidates", "\(families())")
+        layouts.undo()
+        check(layouts.candidates.isEmpty, "pairing: setting the candidates is undoable")
+        layouts.redo()
+        check(families().count == 2, "pairing: … and redoable")
+        let first = layouts.candidates[0]
+        let second = layouts.candidates[1]
+
+        // The strip's family name drawn in its own font, off the main thread.
+        let image = await layouts.candidateImage(for: first, pointSize: 18, scale: 2)
+        check(image != nil && (image?.width ?? 0) > 10, "pairing: the strip renders a candidate's name in its font")
+
+        // Keys.
+        check(LayoutsModel.cycleKey(keyCode: 124) == .family(1) && LayoutsModel.cycleKey(keyCode: 123) == .family(-1)
+              && LayoutsModel.cycleKey(keyCode: 125) == .style(1) && LayoutsModel.cycleKey(keyCode: 126) == .style(-1)
+              && LayoutsModel.cycleKey(keyCode: 51) == nil,
+              "pairing: ←/→ cycle families and ↑/↓ cycle styles")
+
+        // Cycling on the selected block.
+        guard let blockID = layouts.current?.blocks.first?.id else { check(false, "pairing: the Poster has blocks"); return }
+        func font() -> FontReference? { layouts.current?.blocks.first { $0.id == blockID }?.font }
+        layouts.select(blockID)
+        await layouts.applyCandidate(first)
+        let start = font()
+        check(start?.family.lowercased() == first.family.lowercased(), "pairing: a strip click applies the candidate to the block")
+        layouts.cycleFamily(step: 1)
+        await layouts.waitForPairing()
+        let afterOne = font()
+        check(afterOne?.family.lowercased() == second.family.lowercased(), "pairing: → goes to the next family",
+              "\(String(describing: afterOne))")
+        layouts.cycleFamily(step: 1)
+        await layouts.waitForPairing()
+        check(font()?.family.lowercased() == first.family.lowercased(), "pairing: → twice wraps back to the first family",
+              "\(String(describing: font()))")
+        let afterTwo = font()
+        layouts.undo()
+        check(font() == afterOne, "pairing: a family step is undoable")
+        layouts.redo()
+        check(font() == afterTwo, "pairing: … and redoable")
+
+        // Styles: put the block in Trebuchet MS, then ↑.
+        let trebCandidate = layouts.candidates.first { $0.family.lowercased() == "trebuchet ms" }!
+        await layouts.applyCandidate(trebCandidate)
+        let beforeStyle = font()
+        layouts.cycleStyle(step: -1)
+        await layouts.waitForPairing()
+        let afterStyle = font()
+        check(afterStyle?.family.lowercased() == "trebuchet ms" && afterStyle?.postScriptName != beforeStyle?.postScriptName,
+              "pairing: ↑ cycles styles within the family", "\(String(describing: beforeStyle)) → \(String(describing: afterStyle))")
+        layouts.undo()
+        check(font() == beforeStyle, "pairing: a style step is undoable")
+        for _ in 0..<3 { layouts.cycleStyle(step: 1) }
+        await layouts.waitForPairing()
+        check(font() == beforeStyle, "pairing: ↓ three times through three styles wraps around")
+        for _ in 0..<3 { layouts.undo() }
+        check(font() == beforeStyle, "pairing: the style steps undo one by one")
+
+        // Apply to All Blocks.
+        let fontsBefore = layouts.current?.blocks.map(\.font)
+        await layouts.applyFamilyToAll(second)
+        check(layouts.current?.blocks.allSatisfy { $0.font.family.lowercased() == second.family.lowercased() } == true,
+              "pairing: Apply to All sets every block's family", "\(layouts.current?.blocks.map(\.font.family) ?? [])")
+        layouts.undo()
+        check(layouts.current?.blocks.map(\.font) == fontsBefore, "pairing: Apply to All is one undo step")
+
+        // A second ⌘K appends, skipping families already listed.
+        model.selection = [georgia, treb[1], hoefler]
+        await model.openInLayouts()
+        check(families().count == 3 && families().last == "hoefler text" && Array(layouts.candidates.prefix(2)) == [first, second],
+              "pairing: a second ⌘K appends without duplicates", "\(families())")
+        layouts.undo()
+        check(families().count == 2, "pairing: appending is undoable")
+        layouts.redo()
+
+        // The strip's remove.
+        guard let hoeflerCandidate = layouts.candidates.last else { return }
+        layouts.removeCandidate(hoeflerCandidate)
+        check(families() == [first.family.lowercased(), second.family.lowercased()], "pairing: the strip's remove works")
+        layouts.undo()
+        check(families().count == 3, "pairing: removing is undoable")
+        layouts.redo()
+
+        // An empty selection uses the Quick Collection.
+        model.selection = []
+        await model.setQuickCollection([hoefler], included: true)
+        await model.waitForQuickCollectionWritesForSmoke()
+        check(model.layoutsSourceFaceIDs == [hoefler], "pairing: with an empty selection the Quick Collection is used")
+        await model.openInLayouts()
+        check(families().last == "hoefler text" && families().count == 3, "pairing: ⌘K adds the Quick Collection's family",
+              "\(families())")
+        await model.setQuickCollection([hoefler], included: false)
+        await model.waitForQuickCollectionWritesForSmoke()
+
+        // The family page's family.
+        model.openFamilyDetail(faceID: treb[0])
+        let opened = await eventually(within: .seconds(2)) { model.detail != nil }
+        check(opened && Set(model.layoutsSourceFaceIDs) == Set(treb), "pairing: on the family page ⌘K uses its family",
+              "\(model.layoutsSourceFaceIDs)")
+        model.closeFamilyDetail()
     }
 
     // MARK: Wave 3C task 6: block editing and inspector

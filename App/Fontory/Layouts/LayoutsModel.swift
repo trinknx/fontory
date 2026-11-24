@@ -73,6 +73,20 @@ final class LayoutsModel {
     @ObservationIgnored private(set) var renderedScale: CGFloat = 0
     var report = LayoutRenderReport()
 
+    // MARK: Pairing Studio
+
+    /// Family styles by lowercased family (cycling, closest style), filled off the main thread.
+    @ObservationIgnored var familyStyleCache: [String: [PairingStyle]] = [:]
+    /// Bumped when the caches are cleared, so a lookup started before is not stored.
+    @ObservationIgnored var pairingCacheGeneration = 0
+    /// The strip's family-name images drawn in their real fonts, by reference and size. (A missing font's image is
+    /// not kept, so it is drawn again once the font is back.)
+    @ObservationIgnored var candidateImageCache: [CandidateImageKey: CGImage] = [:]
+    /// Bumped when fonts are resolved again (the strip asks for its images again).
+    var fontsVersion = 0
+    /// Cycling and candidate changes run one after another, each on the result of the one before (quick repeats).
+    @ObservationIgnored var pairingChain: Task<Void, Never>?
+
     // MARK: Zoom
 
     /// The explicit zoom (view points per page point), used when `zoomsToFit` is off.
@@ -409,6 +423,8 @@ final class LayoutsModel {
 
     /// Re-resolves every reference (the library may have changed, e.g. a drive came back) and re-renders.
     func refreshFonts() {
+        clearPairingCaches()
+        fontsVersion += 1
         guard current != nil else { return }
         resolved = [:]
         refreshRender()
@@ -665,18 +681,15 @@ extension LayoutsModel {
         setFont(ref, for: id)
     }
 
-    /// A candidate from the family menu: the selected block takes that family's style closest to its current one
-    /// (the candidate's own face when the current style is unknown).
+    /// A candidate from the family menu or the strip: the selected block takes that family's style closest to its
+    /// current one (the candidate's own face when the current style is unknown).
     func applyCandidate(_ candidate: FontReference) async {
-        guard let id = selectedBlockID, let currentFont = selectedBlock?.font else { return }
-        guard let store = fontStore() else { setFont(candidate, for: id); return }
-        let chosen = await Task.detached(priority: .userInitiated) { () -> FontReference in
-            let target = (try? store.styles(ofFamilyOf: candidate)) ?? []
-            let own = (try? store.styles(ofFamilyOf: currentFont)) ?? []
-            guard !target.isEmpty, let style = own.first(where: { $0.reference == currentFont }) else { return candidate }
-            return PairingCycler.closestStyle(to: style, in: target)
-        }.value
-        setFont(chosen, for: id)
+        enqueuePairing { model in
+            guard let id = model.selectedBlockID, let currentFont = model.selectedBlock?.font else { return }
+            let chosen = await model.closestStyle(in: candidate, to: currentFont)
+            model.setFont(chosen, for: id)
+        }
+        await waitForPairing()
     }
 
     /// The block's font at `size` for the in-place editor, loaded off the main thread; nil when it is missing.
@@ -685,14 +698,19 @@ extension LayoutsModel {
         let faceIndex = resolved.faceIndex
         let variations = block.font.variations ?? [:]
         let box = await Task.detached(priority: .userInitiated) { () -> FontBox? in
-            guard let base = FontFile.font(at: url, faceIndex: faceIndex, size: size) else { return nil }
-            guard !variations.isEmpty else { return FontBox(font: base) }
-            let values = Dictionary(variations.map { (NSNumber(value: VariationInfo.code($0.key)), NSNumber(value: $0.value)) },
-                                    uniquingKeysWith: { a, _ in a })
-            let attributes = CTFontDescriptorCreateWithAttributes([kCTFontVariationAttribute: values] as CFDictionary)
-            return FontBox(font: CTFontCreateCopyWithAttributes(base, size, nil, attributes))
+            Self.loadFont(url: url, faceIndex: faceIndex, size: size, variations: variations).map(FontBox.init)
         }.value
         return box.map { $0.font as NSFont }
+    }
+
+    /// A face from its file at `size`, with variation axis values applied.
+    nonisolated static func loadFont(url: URL, faceIndex: Int, size: CGFloat, variations: [String: Double]) -> CTFont? {
+        guard let base = FontFile.font(at: url, faceIndex: faceIndex, size: size) else { return nil }
+        guard !variations.isEmpty else { return base }
+        let values = Dictionary(variations.map { (NSNumber(value: VariationInfo.code($0.key)), NSNumber(value: $0.value)) },
+                                uniquingKeysWith: { a, _ in a })
+        let attributes = CTFontDescriptorCreateWithAttributes([kCTFontVariationAttribute: values] as CFDictionary)
+        return CTFontCreateCopyWithAttributes(base, size, nil, attributes)
     }
 
     // MARK: Report notes
@@ -711,4 +729,184 @@ extension LayoutsModel {
 /// A CTFont handed back from a background load (CoreText fonts are immutable and thread-safe).
 private struct FontBox: @unchecked Sendable {
     let font: CTFont
+}
+
+// MARK: - Pairing Studio
+
+/// ⌘K candidates, cycling (←/→ families, ↑/↓ styles) on the selected block, Apply to All Blocks and the strip.
+/// Store lookups run off the main thread; every change goes through `apply`, so each is one undo step.
+extension LayoutsModel {
+    enum CycleKey: Equatable, Sendable {
+        case family(Int)
+        case style(Int)
+    }
+
+    struct CandidateImageKey: Hashable {
+        var reference: FontReference
+        var pointSize: CGFloat
+        var scale: CGFloat
+    }
+
+    /// What an arrow key does on the canvas: ←/→ the previous/next family, ↑/↓ the previous/next style.
+    nonisolated static func cycleKey(keyCode: UInt16) -> CycleKey? {
+        switch keyCode {
+        case 123: .family(-1)
+        case 124: .family(1)
+        case 126: .style(-1)
+        case 125: .style(1)
+        default: nil
+        }
+    }
+
+    /// ⌘K: with no candidates the families of `faceIDs` become the candidates; otherwise the families not listed
+    /// yet are appended (one candidate per family, its representative face).
+    func addCandidates(faceIDs: [Int64]) async {
+        guard current != nil, !faceIDs.isEmpty, let store = fontStore() else { return }
+        let url = currentURL
+        let refs = await Task.detached(priority: .userInitiated) { (try? store.candidateReferences(faceIDs: faceIDs)) ?? [] }.value
+        // Dropped when another layout was opened meanwhile.
+        guard !refs.isEmpty, currentURL == url else { return }
+        apply { $0.candidates = PairingCycler.merge($0.candidates, adding: refs) }
+    }
+
+    /// ⌫ on the strip: removes the candidate's family.
+    func removeCandidate(_ ref: FontReference) {
+        let key = ref.family.lowercased()
+        apply { $0.candidates.removeAll { $0.family.lowercased() == key } }
+    }
+
+    /// ←/→: the selected block takes the previous/next candidate family, in its style closest to the current one.
+    func cycleFamily(step: Int) {
+        enqueuePairing { model in
+            guard let id = model.selectedBlockID, let font = model.selectedBlock?.font,
+                  let family = PairingCycler.nextFamily(from: font, candidates: model.candidates, step: step) else { return }
+            let chosen = await model.closestStyle(in: family, to: font)
+            // Dropped when the block changed meanwhile (an undo while the styles were looked up).
+            guard model.current?.blocks.first(where: { $0.id == id })?.font == font else { return }
+            model.setFont(chosen, for: id)
+        }
+    }
+
+    /// ↑/↓: the selected block takes the previous/next style of its family (named instances included), wrapping.
+    func cycleStyle(step: Int) {
+        enqueuePairing { model in
+            guard let id = model.selectedBlockID, let font = model.selectedBlock?.font else { return }
+            let styles = await model.familyStyles(of: font)
+            let next = PairingCycler.nextStyle(current: font, styles: styles, step: step)
+            guard next != font, model.current?.blocks.first(where: { $0.id == id })?.font == font else { return }
+            model.setFont(next, for: id)
+        }
+    }
+
+    /// Apply to All Blocks: each block takes the family's style closest to its current style (one undo step).
+    func applyFamilyToAll(_ ref: FontReference) async {
+        enqueuePairing { model in
+            guard let doc = model.current else { return }
+            var chosen: [UUID: FontReference] = [:]
+            for block in doc.blocks { chosen[block.id] = await model.closestStyle(in: ref, to: block.font) }
+            model.apply { doc in
+                for i in doc.blocks.indices {
+                    if let font = chosen[doc.blocks[i].id] { doc.blocks[i].font = font }
+                }
+            }
+        }
+        await waitForPairing()
+    }
+
+    /// Waits for the queued cycling and candidate changes.
+    func waitForPairing() async {
+        while let task = pairingChain {
+            await task.value
+            if pairingChain == task { pairingChain = nil }
+        }
+    }
+
+    /// The strip: `ref`'s family name drawn in its own font (the system font when it is missing), black on clear
+    /// for use as a template image. Resolved and drawn off the main thread; cached.
+    func candidateImage(for ref: FontReference, pointSize: CGFloat, scale: CGFloat) async -> CGImage? {
+        let key = CandidateImageKey(reference: ref, pointSize: pointSize, scale: scale)
+        if let cached = candidateImageCache[key] { return cached }
+        let known = resolved[ref]
+        let store = fontStore()
+        let box = await Task.detached(priority: .userInitiated) { () -> (CandidateImageBox, Bool)? in
+            let found = known ?? store.flatMap { try? $0.resolve([ref])[ref] }
+            var font: CTFont?
+            if let found, !found.isMissing, let url = found.url {
+                font = Self.loadFont(url: url, faceIndex: found.faceIndex, size: pointSize, variations: ref.variations ?? [:])
+            }
+            let name = ref.family.isEmpty ? ref.postScriptName : ref.family
+            let fallback = CTFontCreateUIFontForLanguage(.system, pointSize, nil) ?? CTFontCreateWithName("Helvetica" as CFString, pointSize, nil)
+            guard let image = Self.renderLine(name, font: font ?? fallback, scale: scale) else { return nil }
+            return (CandidateImageBox(image: image), font != nil)
+        }.value
+        guard let (imageBox, isReal) = box else { return nil }
+        if isReal { candidateImageCache[key] = imageBox.image }
+        return imageBox.image
+    }
+
+    /// One line of text, black on clear, at `scale` pixels per point.
+    nonisolated static func renderLine(_ text: String, font: CTFont, scale: CGFloat) -> CGImage? {
+        let attributed = NSAttributedString(string: text, attributes: [
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0, alpha: 1),
+        ])
+        let line = CTLineCreateWithAttributedString(attributed)
+        var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
+        let width = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
+        let w = Int(min(4096, (max(1, width) * scale).rounded(.up)))
+        let h = Int(min(1024, (max(1, ascent + descent) * scale).rounded(.up)))
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.scaleBy(x: scale, y: scale)
+        ctx.textPosition = CGPoint(x: 0, y: descent)
+        CTLineDraw(line, ctx)
+        return ctx.makeImage()
+    }
+
+    // MARK: Helpers
+
+    /// Runs `work` after the pairing work queued before it.
+    func enqueuePairing(_ work: @escaping @MainActor (LayoutsModel) async -> Void) {
+        let previous = pairingChain
+        pairingChain = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            await work(self)
+        }
+    }
+
+    /// The family's style closest to `font` (italic, then weight, then width); `family` itself when either
+    /// family's styles are unknown.
+    func closestStyle(in family: FontReference, to font: FontReference) async -> FontReference {
+        let target = await familyStyles(of: family)
+        let own = await familyStyles(of: font)
+        guard !target.isEmpty else { return family }
+        if target.contains(where: { $0.reference == font }) { return font }
+        let style = own.first { $0.reference == font }
+            ?? own.first { $0.reference.postScriptName == font.postScriptName && $0.reference.variations == nil }
+        guard let style else { return family }
+        return PairingCycler.closestStyle(to: style, in: target)
+    }
+
+    /// The styles of `ref`'s family, from the cache or looked up off the main thread.
+    func familyStyles(of ref: FontReference) async -> [PairingStyle] {
+        let key = ref.family.lowercased()
+        if let cached = familyStyleCache[key] { return cached }
+        guard let store = fontStore() else { return [] }
+        let generation = pairingCacheGeneration
+        let styles = await Task.detached(priority: .userInitiated) { (try? store.styles(ofFamilyOf: ref)) ?? [] }.value
+        if generation == pairingCacheGeneration, !styles.isEmpty { familyStyleCache[key] = styles }
+        return styles
+    }
+
+    func clearPairingCaches() {
+        pairingCacheGeneration += 1
+        familyStyleCache = [:]
+    }
+}
+
+/// A CGImage handed back from a background render (immutable once made).
+private struct CandidateImageBox: @unchecked Sendable {
+    let image: CGImage
 }

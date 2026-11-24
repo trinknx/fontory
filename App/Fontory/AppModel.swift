@@ -735,6 +735,38 @@ final class AppModel {
     /// The Layouts window's model. Its folders are fixed at init (the smoke run passes temporary ones).
     let layouts: LayoutsModel
 
+    /// What ⌘K adds as candidates: the family page's family, else the selection (in browser order), else the
+    /// Quick Collection.
+    var layoutsSourceFaceIDs: [Int64] {
+        if let detail { return detail.faceIDs }
+        if !selection.isEmpty {
+            var ordered = faceIDs.filter(selection.contains)
+            if ordered.count < selection.count {
+                let listed = Set(ordered)
+                ordered += selection.filter { !listed.contains($0) }.sorted()
+            }
+            return ordered
+        }
+        return quickCollectionIDs.sorted()
+    }
+
+    /// ⌘K (the caller opens or focuses the Layouts window): with no layout open, a new one from Poster first; then
+    /// the source's families become the layout's candidates, or are appended to them.
+    func openInLayouts() async {
+        let ids = layoutsSourceFaceIDs
+        if layouts.current == nil {
+            if layouts.templates.isEmpty { await layouts.reloadLists() }
+            let usable = layouts.templates.filter { $0.error == nil }
+            guard let poster = usable.first(where: { $0.name == "Poster" }) ?? usable.first else {
+                layouts.errorMessage = "No layout template is available to start from."
+                return
+            }
+            await layouts.newLayout(from: poster.url)
+            guard layouts.current != nil else { return }
+        }
+        await layouts.addCandidates(faceIDs: ids)
+    }
+
     // MARK: Private
 
     @ObservationIgnored private(set) var backend: LibraryBackend?

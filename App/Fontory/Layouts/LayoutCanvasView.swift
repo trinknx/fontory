@@ -103,7 +103,7 @@ struct PageTransform {
 
 /// Draws the page bitmap centred at `zoom`, then the overlay (selection, corner handles, "Missing font" badges).
 /// Flipped, so page and view y both grow downwards. Click selects, dragging the body moves, a corner handle resizes,
-/// double-click edits the text in place, ⌫ deletes the selected block.
+/// double-click edits the text in place, ⌫ deletes the selected block, ←/→ and ↑/↓ cycle families and styles.
 final class LayoutPageView: NSView {
     static let handleSize: CGFloat = 8
     /// How far a mouse-down may wander before it counts as a drag.
@@ -246,6 +246,16 @@ final class LayoutPageView: NSView {
         // ⌫ and ⌦ delete the selected block.
         if mods.isEmpty, event.keyCode == 51 || event.keyCode == 117, let model, model.selectedBlockID != nil {
             model.deleteSelectedBlock()
+            return
+        }
+        // ←/→ cycle the candidate families and ↑/↓ the family's styles on the selected block (not while editing:
+        // the editor has first responder then).
+        if mods.isEmpty, editor == nil, let model, model.selectedBlockID != nil, !model.isEditingText,
+           let key = LayoutsModel.cycleKey(keyCode: event.keyCode) {
+            switch key {
+            case .family(let step): model.cycleFamily(step: step)
+            case .style(let step): model.cycleStyle(step: step)
+            }
             return
         }
         super.keyDown(with: event)

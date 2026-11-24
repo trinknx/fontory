@@ -81,6 +81,8 @@ struct FontoryApp: App {
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                     .disabled(!model.isBrowserKey || (model.selection.isEmpty && (model.detail == nil || model.detailSelection.isEmpty)))
                 Divider()
+                OpenInLayoutsMenuItem(model: model)
+                Divider()
                 Button("Find Duplicates") { model.applySidebarSelection([.duplicates], modifiers: []) }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
             }
@@ -101,6 +103,23 @@ struct FontoryApp: App {
             MenuBarContent()
                 .environment(model)
         }
+    }
+}
+
+/// Font ▸ Open in Layouts (⌘K), in the browser and on the family page: opens or focuses the Layouts window and
+/// adds the selection (else the Quick Collection, or the family page's family) as candidates.
+private struct OpenInLayoutsMenuItem: View {
+    let model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Open in Layouts") {
+            guard model.browserIsKey else { return }
+            openWindow(id: LayoutsModel.windowID)
+            Task { await model.openInLayouts() }
+        }
+        .keyboardShortcut("k")
+        .disabled(!model.isBrowserKey)
     }
 }
 

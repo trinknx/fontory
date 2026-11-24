@@ -58,6 +58,9 @@ private struct BlockSection: View {
                 .fixedSize()
                 .disabled(styles.count < 2)
             }
+            Button("Apply to All Blocks") { Task { await layouts.applyFamilyToAll(block.font) } }
+                .help("Every block takes this family, keeping its weight where a matching style exists")
+                .disabled(block.font.family.isEmpty)
             if layouts.isFontMissing(block.id) {
                 Label("Missing font", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
