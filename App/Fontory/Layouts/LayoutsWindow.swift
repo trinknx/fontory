@@ -148,7 +148,7 @@ private struct LayoutDetail: View {
                                  zoom: layouts.effectiveZoom, selection: layouts.selectedBlockID,
                                  missingFontBlocks: layouts.report.missingFontBlockIDs)
                 Divider()
-                CandidatesStrip(layouts: layouts)
+                CandidatesStrip(source: layouts)
             }
         } else {
             ContentUnavailableView("No Layout Open", systemImage: "doc.richtext",

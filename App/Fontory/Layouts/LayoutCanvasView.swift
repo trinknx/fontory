@@ -255,6 +255,7 @@ final class LayoutPageView: NSView {
             switch key {
             case .family(let step): model.cycleFamily(step: step)
             case .style(let step): model.cycleStyle(step: step)
+            case .referenceStyle: break
             }
             return
         }

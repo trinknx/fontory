@@ -2216,10 +2216,10 @@ enum OrganizationSmoke {
               && LayoutsModel.cycleKey(keyCode: 125) == .style(1) && LayoutsModel.cycleKey(keyCode: 126) == .style(-1)
               && LayoutsModel.cycleKey(keyCode: 51) == nil,
               "pairing: ←/→ cycle families and ↑/↓ cycle styles")
-        check(CandidatesStrip.cycleKey(.left) == LayoutsModel.cycleKey(keyCode: 123)
-              && CandidatesStrip.cycleKey(.right) == LayoutsModel.cycleKey(keyCode: 124)
-              && CandidatesStrip.cycleKey(.up) == LayoutsModel.cycleKey(keyCode: 126)
-              && CandidatesStrip.cycleKey(.down) == LayoutsModel.cycleKey(keyCode: 125),
+        check(CandidatesStrip<LayoutsModel>.cycleKey(.left) == LayoutsModel.cycleKey(keyCode: 123)
+              && CandidatesStrip<LayoutsModel>.cycleKey(.right) == LayoutsModel.cycleKey(keyCode: 124)
+              && CandidatesStrip<LayoutsModel>.cycleKey(.up) == LayoutsModel.cycleKey(keyCode: 126)
+              && CandidatesStrip<LayoutsModel>.cycleKey(.down) == LayoutsModel.cycleKey(keyCode: 125),
               "pairing: arrows on the focused candidates strip cycle like on the page")
 
         // Cycling on the selected block.

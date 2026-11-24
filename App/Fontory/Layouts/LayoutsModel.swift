@@ -789,10 +789,7 @@ private struct FontBox: @unchecked Sendable {
 /// ⌘K candidates, cycling (←/→ families, ↑/↓ styles) on the selected block, Apply to All Blocks and the strip.
 /// Store lookups run off the main thread; every change goes through `apply`, so each is one undo step.
 extension LayoutsModel {
-    enum CycleKey: Equatable, Sendable {
-        case family(Int)
-        case style(Int)
-    }
+    typealias CycleKey = Fontory.CycleKey
 
     struct CandidateImageKey: Hashable {
         var reference: FontReference
@@ -834,6 +831,7 @@ extension LayoutsModel {
         switch key {
         case .family(let step): cycleFamily(step: step)
         case .style(let step): cycleStyle(step: step)
+        case .referenceStyle: break
         }
     }
 
@@ -971,4 +969,24 @@ extension LayoutsModel {
 /// A CGImage handed back from a background render (immutable once made).
 private struct CandidateImageBox: @unchecked Sendable {
     let image: CGImage
+}
+
+// MARK: - Candidates strip source
+
+extension LayoutsModel: CandidateStripSource {
+    var emptyCandidatesMessage: String { "No candidates. Press ⌘K in the browser, or drag fonts here." }
+    var stripHelp: String {
+        "Candidates: click one to apply it to the selected block; ⌫ removes the selected one. ←/→ on the page cycle them."
+    }
+
+    func isCurrentCandidate(_ ref: FontReference) -> Bool {
+        guard let font = selectedBlock?.font else { return false }
+        return font.family.lowercased() == ref.family.lowercased()
+    }
+
+    func pickCandidate(_ ref: FontReference) async { await applyCandidate(ref) }
+
+    func extraMenuItems(for ref: FontReference) -> [(title: String, action: @MainActor () -> Void)] {
+        [("Apply to All Blocks", { [weak self] in Task { await self?.applyFamilyToAll(ref) } })]
+    }
 }
