@@ -6,6 +6,12 @@ import UniformTypeIdentifiers
 /// The Pairing Studio's candidates under the canvas: each family's name drawn in its own font (rendered off the
 /// main thread). A click applies the candidate to the selected block and selects it in the strip; ⌫ removes the
 /// selected one. Fonts dragged from the browser are added as candidates.
+///
+/// Focus: a click does not move the keyboard focus to the strip, so ←/→/↑/↓ keep cycling on the page after
+/// picking a candidate. The strip takes focus only when the user focuses it explicitly (Tab / keyboard
+/// navigation, or AppKit giving a clicked focusable view focus); while it has focus the arrow keys are forwarded
+/// to the same family/style cycling as on the page, and ⌫ removes the selected candidate. The context menu's
+/// Remove works either way.
 struct CandidatesStrip: View {
     static let pointSize: CGFloat = 18
 
@@ -28,7 +34,6 @@ struct CandidatesStrip: View {
                                   isCurrent: isCurrent(candidate))
                         .onTapGesture {
                             selected = candidate
-                            isFocused = true
                             Task { await layouts.applyCandidate(candidate) }
                         }
                         .contextMenu {
@@ -47,6 +52,9 @@ struct CandidatesStrip: View {
         .focusEffectDisabled()
         .focused($isFocused)
         .onDeleteCommand { if let selected { remove(selected) } }
+        .onMoveCommand { direction in
+            if let key = Self.cycleKey(direction) { layouts.cycle(key) }
+        }
         .onDrop(of: [.fontoryFaceIDs], isTargeted: $isTargeted) { providers in
             FaceDrag.load(providers) { ids in Task { await layouts.addCandidates(faceIDs: ids) } }
         }
@@ -54,6 +62,17 @@ struct CandidatesStrip: View {
             if let selected, !candidates.contains(selected) { self.selected = nil }
         }
         .help("Candidates: click one to apply it to the selected block; ⌫ removes the selected one. ←/→ on the page cycle them.")
+    }
+
+    /// The page's arrow mapping (←/→ families, ↑/↓ styles), for arrows pressed while the strip has focus.
+    static func cycleKey(_ direction: MoveCommandDirection) -> LayoutsModel.CycleKey? {
+        switch direction {
+        case .left: .family(-1)
+        case .right: .family(1)
+        case .up: .style(-1)
+        case .down: .style(1)
+        @unknown default: nil
+        }
     }
 
     private func isCurrent(_ candidate: FontReference) -> Bool {

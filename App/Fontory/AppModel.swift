@@ -751,9 +751,21 @@ final class AppModel {
     }
 
     /// ⌘K (the caller opens or focuses the Layouts window): with no layout open, a new one from Poster first; then
-    /// the source's families become the layout's candidates, or are appended to them.
+    /// the source's families become the layout's candidates, or are appended to them. Presses run one after
+    /// another: a second ⌘K while the first is still creating the Poster waits for it, then appends to it.
     func openInLayouts() async {
         let ids = layoutsSourceFaceIDs
+        let previous = openInLayoutsChain
+        let task = Task { [weak self] in
+            await previous?.value
+            await self?.performOpenInLayouts(ids)
+        }
+        openInLayoutsChain = task
+        await task.value
+        if openInLayoutsChain == task { openInLayoutsChain = nil }
+    }
+
+    private func performOpenInLayouts(_ ids: [Int64]) async {
         if layouts.current == nil {
             if layouts.templates.isEmpty { await layouts.reloadLists() }
             let usable = layouts.templates.filter { $0.error == nil }
@@ -770,6 +782,8 @@ final class AppModel {
     // MARK: Private
 
     @ObservationIgnored private(set) var backend: LibraryBackend?
+    /// The ⌘K in progress; the next one waits for it (see `openInLayouts`).
+    @ObservationIgnored private var openInLayoutsChain: Task<Void, Never>?
     @ObservationIgnored private var presetStore: PresetStore?
     @ObservationIgnored private let rowCache = LRUCache<Int64, FaceRow>(limit: 4000)
     /// Ids whose rows are being fetched by `prefetchRows`.
@@ -913,7 +927,8 @@ final class AppModel {
         await quickCollectionWriteChain?.value
         await stopFaceBackfill()
         await stopDuplicateSearch()
-        // Activation shutdown first (it has the 5 s quit budget); the bounded backup, with the flushed notes, follows.
+        // Activation shutdown, then the backup (at most `quitBackupBudget`) with the flushed notes. All of this runs
+        // inside the app's overall 5 s quit budget (`FontoryApp`), shared with the layouts flush above.
         await backend?.activation.prepareForQuit()
         await writeAutomaticBackup(within: Self.quitBackupBudget)
     }

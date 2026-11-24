@@ -67,7 +67,14 @@ final class LayoutsModel {
     /// Resolutions of the open layout's references (blocks and candidates), filled off the main thread.
     @ObservationIgnored private(set) var resolved: [FontReference: ResolvedFont] = [:]
     @ObservationIgnored private var renderTask: Task<Void, Never>?
+    /// Bumped when the open document is closed or replaced; a render started before is then ignored.
     @ObservationIgnored private var renderGeneration = 0
+    /// An edit arrived while a render ran: one more render follows it, with the latest state.
+    @ObservationIgnored private var renderPending = false
+    /// Bumped whenever `resolved` is reset, so a resolution started before is not merged into it.
+    @ObservationIgnored private var resolveGeneration = 0
+    /// Renders actually started (smoke: rapid edits must not start one render each).
+    @ObservationIgnored private(set) var renderStartCount = 0
     /// The page bitmap at `renderedScale` pixels per page point.
     var renderedImage: CGImage?
     @ObservationIgnored private(set) var renderedScale: CGFloat = 0
@@ -96,6 +103,9 @@ final class LayoutsModel {
     /// Smoke only: seconds to wait after each page, so a cancel can land mid-export.
     @ObservationIgnored var exportPageDelay: TimeInterval = 0
     @ObservationIgnored var exportJob: Task<Void, Error>?
+    /// Identifies the running export; bumped when one starts and when it ends, so a late progress update of an
+    /// export that already ended is dropped.
+    @ObservationIgnored var exportGeneration = 0
 
     // MARK: Zoom
 
@@ -169,7 +179,7 @@ final class LayoutsModel {
             closeCurrent()
             current = doc
             currentURL = url
-            resolved = [:]
+            resetResolutions()
             refreshRender()
         case .failure(let error):
             errorMessage = "“\(url.deletingPathExtension().lastPathComponent)” could not be opened. \(error.localizedDescription)"
@@ -279,7 +289,9 @@ final class LayoutsModel {
         selectedBlockID = nil
         renderTask?.cancel()
         renderTask = nil
+        renderPending = false
         renderGeneration += 1
+        resetResolutions()
         renderedImage = nil
         renderedScale = 0
         report = LayoutRenderReport()
@@ -434,19 +446,38 @@ final class LayoutsModel {
     /// Re-resolves every reference (the library may have changed, e.g. a drive came back) and re-renders.
     func refreshFonts() {
         clearPairingCaches()
+        candidateImageCache = [:]
+        LayoutRenderer.forgetFonts()
         fontsVersion += 1
+        resetResolutions()
         guard current != nil else { return }
-        resolved = [:]
         refreshRender()
     }
 
-    /// Resolves references not yet resolved (off the main thread), then renders off the main thread. A newer call
-    /// supersedes an older one; a superseded render's result is dropped.
+    private func resetResolutions() {
+        resolved = [:]
+        resolveGeneration += 1
+    }
+
+    /// Resolves references not yet resolved (off the main thread), then renders off the main thread. At most one
+    /// render runs at a time: a call while one runs only marks the page stale, and when the running render finishes
+    /// (its image is shown) one more render starts with the latest state. So drags, key repeats and live resizes
+    /// never pile up full-page renders (detached work cannot be cancelled mid-draw).
     private func refreshRender() {
+        guard current != nil else { return }
+        if renderTask != nil {
+            renderPending = true
+            return
+        }
+        startRender()
+    }
+
+    private func startRender() {
         guard let doc = current else { return }
-        renderTask?.cancel()
-        renderGeneration += 1
+        renderPending = false
+        renderStartCount += 1
         let generation = renderGeneration
+        let resolution = resolveGeneration
         let scale = targetScale(for: doc)
         let store = fontStore()
         let known = resolved
@@ -457,21 +488,33 @@ final class LayoutsModel {
             if let store, !missing.isEmpty {
                 let refs = Array(missing)
                 let found = await Task.detached(priority: .userInitiated) { try? store.resolve(refs) }.value ?? [:]
-                guard !Task.isCancelled, let self, generation == self.renderGeneration else { return }
                 fonts.merge(found) { _, new in new }
-                self.resolved.merge(found) { _, new in new }
+                // Kept even when the page changed meanwhile, unless the resolutions were reset (fonts refreshed, another layout).
+                if let self, resolution == self.resolveGeneration { self.resolved.merge(found) { _, new in new } }
             }
-            guard !Task.isCancelled else { return }
-            let rendered = await Task.detached(priority: .userInitiated) { () -> (CGImage?, LayoutRenderReport)? in
-                guard !Task.isCancelled else { return nil }
+            let rendered = await Task.detached(priority: .userInitiated) { () -> (CGImage?, LayoutRenderReport) in
                 let out = LayoutRenderer.renderImage(doc, fonts: fonts, scale: scale)
                 return (out.image, out.report)
             }.value
-            guard !Task.isCancelled, let self, generation == self.renderGeneration, let rendered else { return }
-            self.renderedImage = rendered.0
-            self.renderedScale = scale
-            if self.report != rendered.1 { self.report = rendered.1 }
-            self.renderTask = nil
+            self?.renderFinished(generation: generation, scale: scale, image: rendered.0, report: rendered.1)
+        }
+    }
+
+    private func renderFinished(generation: Int, scale: CGFloat, image: CGImage?, report newReport: LayoutRenderReport) {
+        // The document was closed or replaced meanwhile: this render's task is no longer `renderTask`.
+        guard generation == renderGeneration else { return }
+        renderTask = nil
+        renderedImage = image
+        renderedScale = scale
+        if report != newReport { report = newReport }
+        if renderPending { startRender() }
+    }
+
+    /// Smoke: waits until no render runs or is pending.
+    func waitForRenderForSmoke() async {
+        while let task = renderTask {
+            await task.value
+            await Task.yield()
         }
     }
 
@@ -783,6 +826,15 @@ extension LayoutsModel {
     func removeCandidate(_ ref: FontReference) {
         let key = ref.family.lowercased()
         apply { $0.candidates.removeAll { $0.family.lowercased() == key } }
+    }
+
+    /// An arrow key from the page or the candidates strip: cycles on the selected block (not while editing text).
+    func cycle(_ key: CycleKey) {
+        guard selectedBlockID != nil, !isEditingText else { return }
+        switch key {
+        case .family(let step): cycleFamily(step: step)
+        case .style(let step): cycleStyle(step: step)
+        }
     }
 
     /// ←/→: the selected block takes the previous/next candidate family, in its style closest to the current one.

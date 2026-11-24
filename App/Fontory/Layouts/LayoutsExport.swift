@@ -11,11 +11,13 @@ struct ExportProgress: Equatable {
 enum LayoutExportError: LocalizedError {
     case noLayout
     case noCandidates
+    case busy
 
     var errorDescription: String? {
         switch self {
         case .noLayout: "No layout is open."
         case .noCandidates: "This layout has no candidate fonts."
+        case .busy: "Another PDF export is still running."
         }
     }
 }
@@ -102,7 +104,12 @@ extension LayoutsModel {
 
     /// Runs the build, one store call resolving every font the pages use that the cache lacks, and the PDF write
     /// on a detached task. Cancelling (this task or `cancelExport`) stops between pages and writes nothing.
+    /// One export at a time: a second one while another runs throws `LayoutExportError.busy`. Progress updates
+    /// apply only while their own export is still running (`exportGeneration` moves on when it ends).
     private func writePDF(to url: URL, pages: Int, build: @escaping @Sendable (FontStore?) -> [LayoutDocument]) async throws {
+        guard exportJob == nil else { throw LayoutExportError.busy }
+        exportGeneration += 1
+        let generation = exportGeneration
         let store = fontStore()
         let known = resolved
         let delay = exportPageDelay
@@ -111,6 +118,7 @@ extension LayoutsModel {
         defer {
             exportProgress = nil
             exportJob = nil
+            exportGeneration += 1
         }
         let job = Task.detached(priority: .userInitiated) { [weak self] () throws -> Void in
             let docs = build(store)
@@ -124,7 +132,10 @@ extension LayoutsModel {
                 if Task.isCancelled { return false }
                 if delay > 0 { Thread.sleep(forTimeInterval: delay) }
                 if showsProgress {
-                    Task { @MainActor in self?.exportProgress = ExportProgress(done: index, total: count) }
+                    Task { @MainActor in
+                        guard let self, self.exportGeneration == generation, self.exportJob != nil else { return }
+                        self.exportProgress = ExportProgress(done: index, total: count)
+                    }
                 }
                 return true
             }
@@ -139,7 +150,8 @@ extension LayoutsModel {
 
     // MARK: Print
 
-    /// The print operation for the open layout: paper = page size, no margins, the page drawn through
+    /// The print operation for the open layout: the default printer's paper (not forced to the page size), the
+    /// orientation from the page's aspect, and the page scaled to fit and centred. The page is drawn through
     /// `LayoutRenderer.draw` (vector) with the fonts already resolved for the canvas. Printing draws on the main
     /// thread (AppKit requires it); it is one page.
     func printOperation() -> NSPrintOperation? {
@@ -148,11 +160,6 @@ extension LayoutsModel {
         let size = NSSize(width: max(1, doc.pageSize.w), height: max(1, doc.pageSize.h))
         let info = NSPrintInfo.shared.copy() as! NSPrintInfo
         info.orientation = size.width > size.height ? .landscape : .portrait
-        info.paperSize = size
-        info.topMargin = 0
-        info.bottomMargin = 0
-        info.leftMargin = 0
-        info.rightMargin = 0
         info.isHorizontallyCentered = true
         info.isVerticallyCentered = true
         info.horizontalPagination = .fit

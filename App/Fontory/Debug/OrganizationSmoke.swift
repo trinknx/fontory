@@ -1997,7 +1997,10 @@ enum OrganizationSmoke {
             recycled.append(url)
             do {
                 try fm.createDirectory(at: trash, withIntermediateDirectories: true)
-                let dest = trash.appendingPathComponent(url.lastPathComponent)
+                var dest = trash.appendingPathComponent(url.lastPathComponent)
+                if fm.fileExists(atPath: dest.path) {
+                    dest = trash.appendingPathComponent("\(UUID().uuidString) \(url.lastPathComponent)")
+                }
                 try fm.moveItem(at: url, to: dest)
                 return (dest, nil)
             } catch {
@@ -2077,6 +2080,23 @@ enum OrganizationSmoke {
         layouts.zoomToFit()
         check(layouts.zoomsToFit && layouts.effectiveZoom == layouts.fitZoom, "layouts: zoom to fit")
 
+        // Rapid edits (a drag, key repeats): at most one render runs, one more follows with the latest state.
+        await layouts.waitForRenderForSmoke()
+        let textBeforeRapid = layouts.current?.blocks.first?.text ?? ""
+        let startsBefore = layouts.renderStartCount
+        for i in 0..<20 { layouts.apply({ $0.blocks[0].text = "Rapid edit \(i)" }, undoable: false) }
+        await layouts.waitForRenderForSmoke()
+        let starts = layouts.renderStartCount - startsBefore
+        check(starts >= 1 && starts <= 3, "layouts: 20 rapid edits start at most 3 renders", "\(starts)")
+        if let doc = layouts.current, let shown = layouts.renderedImage {
+            let expected = LayoutRenderer.renderImage(doc, fonts: layouts.resolved, scale: layouts.renderedScale).image
+            let same = expected.map { imageBytes($0) == imageBytes(shown) } ?? false
+            check(doc.blocks.first?.text == "Rapid edit 19" && same, "layouts: after rapid edits the page shows the last edit")
+        } else {
+            check(false, "layouts: after rapid edits the page shows the last edit", "no image")
+        }
+        layouts.apply({ $0.blocks[0].text = textBeforeRapid }, undoable: false)
+
         await layoutEditingSteps(layouts, store: backend.store)
 
         // Rename, duplicate.
@@ -2152,6 +2172,26 @@ enum OrganizationSmoke {
         }
         func families() -> [String] { layouts.candidates.map { $0.family.lowercased() } }
 
+        // Two ⌘K presses at once with no layout open: one new Poster, both sources' families in it.
+        let itemsBefore = layouts.items.count
+        model.selection = Set(treb)
+        let pressA = Task { @MainActor in await model.openInLayouts() }
+        // Let the first press read its source and start creating the Poster; it is still running when the second comes.
+        for _ in 0..<3 { await Task.yield() }
+        let firstStillRunning = layouts.current == nil
+        model.selection = [georgia]
+        let pressB = Task { @MainActor in await model.openInLayouts() }
+        await pressA.value
+        await pressB.value
+        let layoutFiles = ((try? FileManager.default.contentsOfDirectory(atPath: layouts.layoutsDirectory.path)) ?? [])
+            .filter { $0.hasSuffix(".json") }
+        check(firstStillRunning && layouts.items.count == itemsBefore + 1 && layoutFiles.count == itemsBefore + 1,
+              "pairing: two ⌘K presses at once create exactly one layout", "\(firstStillRunning) \(layouts.items.map(\.name))")
+        check(Set(families()) == ["trebuchet ms", "georgia"] && families().count == 2,
+              "pairing: … holding both presses' candidates", "\(families())")
+        if let made = layouts.currentURL { await layouts.delete(made) }
+        check(layouts.current == nil && layouts.items.count == itemsBefore, "pairing: the double-⌘K layout is removed again")
+
         // ⌘K with three faces of one family plus one other: two candidates, in a new Poster.
         model.selection = Set(treb + [georgia])
         check(model.layoutsSourceFaceIDs.count == 4, "pairing: ⌘K uses the browser selection")
@@ -2176,6 +2216,11 @@ enum OrganizationSmoke {
               && LayoutsModel.cycleKey(keyCode: 125) == .style(1) && LayoutsModel.cycleKey(keyCode: 126) == .style(-1)
               && LayoutsModel.cycleKey(keyCode: 51) == nil,
               "pairing: ←/→ cycle families and ↑/↓ cycle styles")
+        check(CandidatesStrip.cycleKey(.left) == LayoutsModel.cycleKey(keyCode: 123)
+              && CandidatesStrip.cycleKey(.right) == LayoutsModel.cycleKey(keyCode: 124)
+              && CandidatesStrip.cycleKey(.up) == LayoutsModel.cycleKey(keyCode: 126)
+              && CandidatesStrip.cycleKey(.down) == LayoutsModel.cycleKey(keyCode: 125),
+              "pairing: arrows on the focused candidates strip cycle like on the page")
 
         // Cycling on the selected block.
         guard let blockID = layouts.current?.blocks.first?.id else { check(false, "pairing: the Poster has blocks"); return }
@@ -2305,9 +2350,14 @@ enum OrganizationSmoke {
 
         // Print: the operation's paper is the page; the view draws the page.
         if let op = layouts.printOperation() {
-            let paper = op.printInfo.paperSize
-            check(paper.width == doc.pageSize.w && paper.height == doc.pageSize.h && op.printInfo.topMargin == 0 && op.printInfo.leftMargin == 0,
-                  "print: paper size is the page size with no margins", "\(paper)")
+            let info = op.printInfo
+            let defaultPaper = NSPrintInfo.shared.paperSize
+            let paper = info.paperSize
+            let samePaper = (paper == defaultPaper) || (paper == NSSize(width: defaultPaper.height, height: defaultPaper.width))
+            let wantsLandscape = doc.pageSize.w > doc.pageSize.h
+            check(samePaper && info.orientation == (wantsLandscape ? .landscape : .portrait)
+                  && info.horizontalPagination == .fit && info.verticalPagination == .fit,
+                  "print: the default paper, scaled to fit, oriented by the page's aspect", "\(paper) vs \(defaultPaper)")
             let data = op.view?.dataWithPDF(inside: op.view?.bounds ?? .zero)
             let printed = data.flatMap { CGDataProvider(data: $0 as CFData) }.flatMap { CGPDFDocument($0) }
             check(op.view?.bounds.size == CGSize(width: doc.pageSize.w, height: doc.pageSize.h) && printed?.numberOfPages == 1,
@@ -2337,8 +2387,14 @@ enum OrganizationSmoke {
         }
         let shown = await eventually(within: .seconds(5)) { (layouts.exportProgress?.total ?? 0) == 30 && (layouts.exportProgress?.done ?? 0) >= 2 }
         check(shown, "export: 30 candidates show a progress sheet", "\(String(describing: layouts.exportProgress))")
+        var busy = false
+        do { try await layouts.exportPDF(to: dir.appendingPathComponent("second.pdf")) } catch LayoutExportError.busy { busy = true } catch {}
+        check(busy && !fm.fileExists(atPath: dir.appendingPathComponent("second.pdf").path),
+              "export: a second export is refused while one runs")
         layouts.cancelExport()
         await task.value
+        try? await Task.sleep(for: .milliseconds(150))
+        check(layouts.exportProgress == nil, "export: a late progress update of an ended export is dropped")
         check(cancelledError && !fm.fileExists(atPath: cancelled.path) && layouts.exportProgress == nil,
               "export: Cancel ends the export, writes no file and closes the sheet")
         layouts.exportPageDelay = 0
@@ -2516,6 +2572,11 @@ enum OrganizationSmoke {
                 && abs(r.width - 300 * zoom) < 1e-9 && t.pageDelta(CGSize(width: 10 * zoom, height: -4 * zoom)) == CGSize(width: 10, height: -4)
         }
         check(roundTrips, "editing: the canvas's page ↔ view mapping round-trips at 5 %, 100 % and 800 %")
+    }
+
+    /// An image's pixels, for comparing two renders.
+    private static func imageBytes(_ image: CGImage) -> Data? {
+        image.dataProvider?.data as Data?
     }
 
     /// Polls (on the main actor) until `condition` holds or `budget` passes.
