@@ -33,6 +33,20 @@ final class CompareCanvasView: NSView {
     private var image: CGImage?
     private var scene: CompareScene?
     private var lastReported: (CGSize, CGFloat)?
+    /// The user typed in the header's text field since the canvas last had focus.
+    private var fieldEdited = false
+    nonisolated(unsafe) private var editObserver: NSObjectProtocol?
+
+    deinit {
+        if let editObserver { NotificationCenter.default.removeObserver(editObserver) }
+    }
+
+    /// Takes keyboard focus unless the user is editing the text field (so the arrows cycle, never move a caret).
+    func takeFocus() {
+        guard let window, !(window.firstResponder is NSText && fieldEdited) else { return }
+        fieldEdited = false
+        if window.firstResponder !== self { window.makeFirstResponder(self) }
+    }
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -89,14 +103,25 @@ final class CompareCanvasView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard window != nil else { return }
+        if let editObserver { NotificationCenter.default.removeObserver(editObserver) }
+        editObserver = nil
+        guard let window else { return }
+        window.initialFirstResponder = self
+        editObserver = NotificationCenter.default.addObserver(forName: NSControl.textDidBeginEditingNotification, object: nil,
+                                                              queue: .main) { [weak self] note in
+            let sender = note.object as? NSView
+            MainActor.assumeIsolated { if let self, sender?.window === self.window { self.fieldEdited = true } }
+        }
+        model?.focusCanvas = { [weak self] in self?.takeFocus() }
         let appearance = effectiveAppearance
-        // Arrows work as soon as the window opens, without a click (unless a text field is being edited).
-        DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.model?.appearanceDidChange(appearance)
-                if let window = self.window, !(window.firstResponder is NSText) { window.makeFirstResponder(self) }
+        // Arrows work as soon as the window opens, without a click: SwiftUI may focus the header's text field by
+        // default, so the canvas takes focus again once the window has settled.
+        for delay in [0.0, 0.3] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.model?.appearanceDidChange(appearance)
+                    self?.takeFocus()
+                }
             }
         }
     }
@@ -134,6 +159,7 @@ final class CompareCanvasView: NSView {
     // MARK: Keys
 
     override func mouseDown(with event: NSEvent) {
+        fieldEdited = false
         window?.makeFirstResponder(self)
     }
 
@@ -145,9 +171,10 @@ final class CompareCanvasView: NSView {
         perform(command, on: model)
     }
 
-    /// ⌘C when the canvas has focus (a text field being edited has its own copy, and is not the first responder here).
+    /// ⌘C whenever no text is being edited (a field being edited keeps its own Copy). Key equivalents reach the view
+    /// hierarchy before the Edit menu, so the menu item does not swallow it.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard window?.firstResponder === self,
+        guard !(window?.firstResponder is NSText),
               Self.command(keyCode: event.keyCode, modifiers: event.modifierFlags) == .copy, let model else {
             return super.performKeyEquivalent(with: event)
         }

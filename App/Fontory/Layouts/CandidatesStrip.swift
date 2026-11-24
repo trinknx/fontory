@@ -85,6 +85,13 @@ struct CandidatesStrip<Source: CandidateStripSource & Observable>: View {
         .focusEffectDisabled()
         .focused($isFocused)
         .onDeleteCommand { if let selected { remove(selected) } }
+        // ⇧↑/⇧↓ step the reference style (Compare); without ⇧ the plain arrows go on to `onMoveCommand`. Layouts
+        // ignores `.referenceStyle`.
+        .onKeyPress(keys: [.upArrow, .downArrow]) { press in
+            guard press.modifiers == .shift else { return .ignored }
+            source.cycle(.referenceStyle(press.key == .upArrow ? -1 : 1))
+            return .handled
+        }
         .onMoveCommand { direction in
             if let key = Self.cycleKey(direction) { source.cycle(key) }
         }

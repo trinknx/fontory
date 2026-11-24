@@ -34,6 +34,8 @@ final class CompareModel: CandidateStripSource {
     private(set) var emptyMessage: String?
     @ObservationIgnored var fontStore: @MainActor () -> FontStore? = { nil }
     var isKey = false
+    /// Set by the canvas: gives it keyboard focus unless the text field is being edited.
+    @ObservationIgnored var focusCanvas: (() -> Void)?
     /// The canvas's appearance (light/dark), which the colours are resolved for; nil until the window exists.
     @ObservationIgnored private(set) var appearance: NSAppearance?
 
@@ -70,6 +72,7 @@ final class CompareModel: CandidateStripSource {
     func open(referenceFaceID: Int64?, candidateFaceIDs: [Int64], text newText: String? = nil) async {
         openGeneration += 1
         let gen = openGeneration
+        defer { focusCanvas?() }
         await run { model in
             guard gen == model.openGeneration else { return }
             if let newText { model.setText(newText) }
