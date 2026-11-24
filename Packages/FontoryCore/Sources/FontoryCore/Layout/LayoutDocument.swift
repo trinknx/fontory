@@ -49,7 +49,8 @@ public enum LayoutColor {
     public static func isValid(_ hex: String) -> Bool { rgb(hex) != nil }
 
     public static func rgb(_ hex: String) -> (Double, Double, Double)? {
-        guard hex.count == 7, hex.hasPrefix("#"), let v = UInt32(hex.dropFirst(), radix: 16) else { return nil }
+        guard hex.count == 7, hex.hasPrefix("#"), hex.dropFirst().allSatisfy(\.isHexDigit),
+              let v = UInt32(hex.dropFirst(), radix: 16) else { return nil }
         return (Double((v >> 16) & 0xFF) / 255, Double((v >> 8) & 0xFF) / 255, Double(v & 0xFF) / 255)
     }
 
@@ -91,15 +92,15 @@ public struct LayoutBlock: Codable, Sendable, Equatable, Identifiable {
         id = (try? c.decodeIfPresent(UUID.self, forKey: .id)) ?? UUID()
         kind = try c.decode(Kind.self, forKey: .kind)
         frame = try c.decode(LayoutFrame.self, forKey: .frame)
-        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
-        font = try c.decodeIfPresent(FontReference.self, forKey: .font) ?? FontReference(postScriptName: "", family: "")
-        size = try c.decodeIfPresent(Double.self, forKey: .size) ?? 24
-        lineHeight = try c.decodeIfPresent(Double.self, forKey: .lineHeight) ?? 1.2
-        tracking = try c.decodeIfPresent(Double.self, forKey: .tracking) ?? 0
+        text = (try? c.decodeIfPresent(String.self, forKey: .text)) ?? ""
+        font = (try? c.decodeIfPresent(FontReference.self, forKey: .font)) ?? FontReference(postScriptName: "", family: "")
+        size = (try? c.decodeIfPresent(Double.self, forKey: .size)) ?? 24
+        lineHeight = (try? c.decodeIfPresent(Double.self, forKey: .lineHeight)) ?? 1.2
+        tracking = (try? c.decodeIfPresent(Double.self, forKey: .tracking)) ?? 0
         alignment = (try? c.decodeIfPresent(LayoutAlignment.self, forKey: .alignment)) ?? .left
         let hex = try? c.decodeIfPresent(String.self, forKey: .color)
         color = hex.flatMap { $0 }.flatMap { LayoutColor.isValid($0) ? $0 : nil }
-        sizes = try c.decodeIfPresent([Double].self, forKey: .sizes) ?? []
+        sizes = (try? c.decodeIfPresent([Double].self, forKey: .sizes)) ?? []
     }
 }
 
@@ -129,8 +130,8 @@ public struct LayoutDocument: Codable, Sendable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? Self.currentVersion
-        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Untitled"
+        version = (try? c.decodeIfPresent(Int.self, forKey: .version)) ?? Self.currentVersion
+        name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? "Untitled"
         pageSize = try c.decode(LayoutSize.self, forKey: .pageSize)
         func colour(_ key: CodingKeys, _ fallback: String) -> String {
             if let s = (try? c.decodeIfPresent(String.self, forKey: key)) ?? nil, LayoutColor.isValid(s) { return s }
@@ -138,8 +139,13 @@ public struct LayoutDocument: Codable, Sendable, Equatable {
         }
         background = colour(.background, Self.defaultBackground)
         foreground = colour(.foreground, Self.defaultForeground)
-        showMissing = try c.decodeIfPresent(Bool.self, forKey: .showMissing) ?? true
-        blocks = try c.decodeIfPresent([LayoutBlock].self, forKey: .blocks) ?? []
-        candidates = try c.decodeIfPresent([FontReference].self, forKey: .candidates) ?? []
+        showMissing = (try? c.decodeIfPresent(Bool.self, forKey: .showMissing)) ?? true
+        // A wrong-typed array is treated as empty; a malformed block inside a well-typed array still fails the file.
+        var decoded: [LayoutBlock] = []
+        if var list = try? c.nestedUnkeyedContainer(forKey: .blocks) {
+            while !list.isAtEnd { decoded.append(try list.decode(LayoutBlock.self)) }
+        }
+        blocks = decoded
+        candidates = (try? c.decodeIfPresent([FontReference].self, forKey: .candidates)) ?? []
     }
 }

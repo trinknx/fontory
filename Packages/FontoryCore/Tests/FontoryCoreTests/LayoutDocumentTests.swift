@@ -121,4 +121,42 @@ private func sampleDoc() -> LayoutDocument {
         #expect(items.map(\.name) == ["Poster", "Wordmark", "Waterfall", "Aardvark"])
         #expect(items.map(\.isBuiltIn) == [true, true, true, false])
     }
+
+    @Test func wrongTypedValuesFallBack() throws {
+        let json = """
+        {"name":5,"pageSize":{"w":1,"h":2},"showMissing":"yes","candidates":"nope","blocks":[
+         {"kind":"text","frame":{"x":0,"y":0,"w":1,"h":1},"lineHeight":"1.2","size":"big","tracking":[],"text":7,"sizes":"x"}]}
+        """
+        let doc = try JSONDecoder().decode(LayoutDocument.self, from: Data(json.utf8))
+        #expect(doc.showMissing && doc.candidates.isEmpty)
+        let b = try #require(doc.blocks.first)
+        #expect(b.lineHeight == 1.2 && b.size == 24 && b.tracking == 0 && b.text.isEmpty && b.sizes.isEmpty)
+        let wholeArray = try JSONDecoder().decode(LayoutDocument.self, from: Data(#"{"pageSize":{"w":1,"h":2},"blocks":"x"}"#.utf8))
+        #expect(wholeArray.blocks.isEmpty)
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(LayoutDocument.self, from: Data(#"{"pageSize":{"w":1,"h":2},"blocks":[{"kind":"text"}]}"#.utf8))
+        }
+    }
+
+    @Test func strictHex() {
+        #expect(LayoutColor.rgb("#+FFFFF") == nil)
+        #expect(LayoutColor.rgb("#-FFFFF") == nil)
+    }
+
+    @Test func deletedBuiltInStaysDeletedAndNewOnesInstall() throws {
+        let (lib, root) = try library()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bundle = root.appendingPathComponent("Bundle")
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        for n in ["A", "B", "C"] { try lib.save(sampleDoc(), to: bundle.appendingPathComponent("\(n).json")) }
+        try Data("[\"A.json\",\"B.json\"]".utf8).write(to: bundle.appendingPathComponent("order.json"))
+        try lib.installBuiltInTemplates(from: bundle)
+        #expect(lib.listTemplates().map(\.name) == ["A", "B"])
+        try FileManager.default.removeItem(at: lib.templatesDirectory.appendingPathComponent("A.json"))
+        try lib.installBuiltInTemplates(from: bundle)
+        #expect(lib.listTemplates().map(\.name) == ["B"])
+        try Data("[\"A.json\",\"B.json\",\"C.json\"]".utf8).write(to: bundle.appendingPathComponent("order.json"))
+        try lib.installBuiltInTemplates(from: bundle)
+        #expect(lib.listTemplates().map(\.name) == ["B", "C"])
+    }
 }

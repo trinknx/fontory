@@ -21,6 +21,8 @@ public struct LayoutLibrary: Sendable {
     public let templatesDirectory: URL
     static let orderFileName = "order.json"
     static let recordedOrderFileName = ".builtin-order.json"
+    /// Names of built-ins already copied once; a later install skips them even if the user deleted the file.
+    static let installedFileName = ".builtin-installed.json"
 
     public init(layoutsDirectory: URL, templatesDirectory: URL) {
         self.layoutsDirectory = layoutsDirectory
@@ -64,7 +66,8 @@ public struct LayoutLibrary: Sendable {
         return dest
     }
 
-    /// Copies bundled templates that are missing; an existing file is never overwritten (the user may have edited it).
+    /// Copies each bundled template once: an existing file is never overwritten, and one the user deleted is not
+    /// restored (installed names are recorded in `.builtin-installed.json`). A newly bundled name is copied once.
     public func installBuiltInTemplates(from bundleDirectory: URL) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: templatesDirectory, withIntermediateDirectories: true)
@@ -74,12 +77,16 @@ public struct LayoutLibrary: Sendable {
             order = files.filter { $0.hasSuffix(".json") && $0 != Self.orderFileName && !$0.hasPrefix(".") }
                 .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         }
-        for file in order {
+        let installedURL = templatesDirectory.appendingPathComponent(Self.installedFileName)
+        var installed = Set(Self.readOrder(installedURL))
+        for file in order where !installed.contains(file) {
             let src = bundleDirectory.appendingPathComponent(file)
             let dst = templatesDirectory.appendingPathComponent(file)
-            guard fm.fileExists(atPath: src.path), !fm.fileExists(atPath: dst.path) else { continue }
-            try Self.writeAtomically(try Data(contentsOf: src), to: dst)
+            guard fm.fileExists(atPath: src.path) else { continue }
+            if !fm.fileExists(atPath: dst.path) { try Self.writeAtomically(try Data(contentsOf: src), to: dst) }
+            installed.insert(file)
         }
+        try Self.writeAtomically(try JSONEncoder().encode(installed.sorted()), to: installedURL)
         try Self.writeAtomically(try JSONEncoder().encode(order),
                                  to: templatesDirectory.appendingPathComponent(Self.recordedOrderFileName))
     }
