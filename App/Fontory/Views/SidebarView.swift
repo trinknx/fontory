@@ -11,28 +11,16 @@ struct SidebarView: View {
         @Bindable var model = model
         List(selection: selection) {
             Section {
-                libraryRow("All Fonts", "textformat", .all, model.counts.all)
-                libraryRow("System", "lock", .system, model.counts.system)
-                    .help("Fonts that ship with macOS (read-only)")
-                libraryRow("User", "person", .user, model.counts.user)
+                // Where fonts come from, what was just imported, what is on. Activation state is
+                // shown on every card, so there is no Deactivated/Offline row; Duplicates is in the Font menu.
+                libraryRow("All", "square.grid.2x2", .all, model.counts.all)
+                libraryRow("User", "person.crop.circle", .user, model.counts.user)
                     .help("Fonts active outside Fontory: /Library/Fonts, ~/Library/Fonts, Font Book, Adobe and other apps")
-                libraryRow("Activated", "checkmark.circle", .activated, model.counts.activated)
+                libraryRow("System", "desktopcomputer", .system, model.counts.system)
+                    .help("Fonts that ship with macOS (read-only)")
+                libraryRow("Last Import", "clock", .recentImport, model.counts.lastImport)
+                libraryRow("Activated", "sun.max", .activated, model.counts.activated)
                     .help("Everything active on this Mac: System, User and the fonts Fontory activated")
-                libraryRow("Deactivated", "circle", .deactivated, model.counts.deactivated)
-                    .help("Library fonts that are active nowhere")
-                libraryRow("Offline", "externaldrive.badge.xmark", .offline, model.counts.offline)
-                libraryRow("Last Import", "square.and.arrow.down", .recentImport, model.counts.lastImport)
-                libraryRow("Quick Collection", "bookmark", .quickCollection, model.organizationCounts.quickCollection)
-                    .contextMenu {
-                        Button("Save as Tag…") { promptSaveQuickCollectionAsTag(model: model) }
-                            .disabled(model.quickCollectionIDs.isEmpty)
-                        Button("Clear…") { model.confirmClearQuickCollection() }
-                            .disabled(model.quickCollectionIDs.isEmpty)
-                    }
-                Label("Duplicates", systemImage: "doc.on.doc")
-                    .badge(model.duplicateGroups.count)
-                    .tag(SidebarItem.duplicates)
-                    .help("Files holding the same font: exact copies and other versions or formats")
                 if let progress = model.faceBackfillProgress, progress.total > 0 {
                     FaceBackfillRow(progress: progress)
                 }

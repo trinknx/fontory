@@ -61,6 +61,9 @@ struct FontoryApp: App {
                 }
                 .keyboardShortcut("j")
                 .disabled(!model.isBrowserKey || model.quickCollectionTargetSet.isEmpty)
+                Divider()
+                Button("Find Duplicates") { model.applySidebarSelection([.duplicates], modifiers: []) }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
             }
         }
 

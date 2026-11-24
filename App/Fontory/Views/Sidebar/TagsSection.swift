@@ -14,6 +14,7 @@ struct TagsSection: View {
 
     var body: some View {
         Section {
+            QuickCollectionRow()
             ForEach(model.childTags(of: nil)) { TagNode(tag: $0) }
             StyleGroup()
         } header: {
@@ -199,6 +200,23 @@ private struct TagMenu: View {
         Button("Deactivate All") { Task { await model.activateTag(tag.id, on: false) } }
         Divider()
         Button("Delete…") { model.confirmDeleteTag(tag.id) }
+    }
+}
+
+/// The Quick Collection (⌘J), first in Tags: a scratch set that can be saved as a tag.
+private struct QuickCollectionRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Label("Quick Collection", systemImage: "bookmark")
+            .badge(model.organizationCounts.quickCollection)
+            .tag(SidebarItem.scope(.quickCollection))
+            .contextMenu {
+                Button("Save as Tag…") { promptSaveQuickCollectionAsTag(model: model) }
+                    .disabled(model.quickCollectionIDs.isEmpty)
+                Button("Clear…") { model.confirmClearQuickCollection() }
+                    .disabled(model.quickCollectionIDs.isEmpty)
+            }
     }
 }
 
