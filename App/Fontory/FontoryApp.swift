@@ -34,6 +34,11 @@ struct FontoryApp: App {
                 // so the standard Undo keeps working for text.
                 Button("Undo Family Edit") { if model.browserIsKey { Task { await model.undoLastFamilyEdit() } } }
                     .disabled(!model.isBrowserKey || !model.canUndoFamilyEdit)
+                // Likewise ⌘Z / ⇧⌘Z reach these in the Layouts window outside text fields.
+                Button("Undo Layout Edit") { if model.layouts.windowIsKey { model.layouts.undo() } }
+                    .disabled(!model.layouts.isKey || !model.layouts.canUndo)
+                Button("Redo Layout Edit") { if model.layouts.windowIsKey { model.layouts.redo() } }
+                    .disabled(!model.layouts.isKey || !model.layouts.canRedo)
             }
             CommandGroup(before: .toolbar) {
                 // On the family page both close it and show the browser in that mode, whichever mode is current.
@@ -42,11 +47,12 @@ struct FontoryApp: App {
                 Button("as List") { model.showBrowser(as: .list) }
                     .keyboardShortcut("3")
                 Divider()
-                Button("Zoom In") { model.adjustZoom(by: 0.1) }
+                // In the Layouts window these zoom the page (Actual Size fits it); elsewhere, the browser.
+                Button("Zoom In") { model.layouts.windowIsKey ? model.layouts.zoomIn() : model.adjustZoom(by: 0.1) }
                     .keyboardShortcut("+")
-                Button("Zoom Out") { model.adjustZoom(by: -0.1) }
+                Button("Zoom Out") { model.layouts.windowIsKey ? model.layouts.zoomOut() : model.adjustZoom(by: -0.1) }
                     .keyboardShortcut("-")
-                Button("Actual Size") { model.resetZoom() }
+                Button("Actual Size") { model.layouts.windowIsKey ? model.layouts.zoomToFit() : model.resetZoom() }
                     .keyboardShortcut("0")
                 Divider()
                 Button("Show Family") { if model.browserIsKey { model.showFamilyDetailForSelection() } }
@@ -78,6 +84,12 @@ struct FontoryApp: App {
                     .keyboardShortcut("d", modifiers: [.command, .shift])
             }
         }
+
+        Window("Layouts", id: LayoutsModel.windowID) {
+            LayoutsWindow()
+                .environment(model)
+        }
+        .defaultSize(width: 1200, height: 800)
 
         Settings {
             SettingsView()
@@ -127,14 +139,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ⌘Z undoes the last family edit when the browser is key, no text is being edited there and there is an
         // edit to undo (`AppModel.handlesFamilyUndoKey`); otherwise it goes on to the standard Undo (text fields,
         // the Text tab, sheets, Settings). The Edit menu's Undo item is left alone.
+        // In the Layouts window ⌘= zooms the page, and ⌘Z / ⇧⌘Z undo and redo layout edits unless a text field is
+        // being edited there (it keeps its own undo).
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let isZoomIn = mods == .command && event.charactersIgnoringModifiers == "="
             let isEscape = event.keyCode == 53 && mods.subtracting([.function, .numericPad]).isEmpty
             let isUndo = mods == .command && event.charactersIgnoringModifiers?.lowercased() == "z"
-            guard isZoomIn || isEscape || isUndo else { return event }
+            let isRedo = mods == [.command, .shift] && event.charactersIgnoringModifiers?.lowercased() == "z"
+            guard isZoomIn || isEscape || isUndo || isRedo else { return event }
             let handled = MainActor.assumeIsolated { () -> Bool in
-                guard let key = NSApp.keyWindow, key === self.model.browserWindow else { return false }
+                let layouts = self.model.layouts
+                if let key = NSApp.keyWindow, key === layouts.window {
+                    if isZoomIn {
+                        layouts.zoomIn()
+                        return true
+                    }
+                    guard isUndo || isRedo,
+                          LayoutsModel.handlesUndoKey(windowIsKey: true, editingText: key.firstResponder is NSText) else { return false }
+                    if isUndo { layouts.undo() } else { layouts.redo() }
+                    return true
+                }
+                guard !isRedo, let key = NSApp.keyWindow, key === self.model.browserWindow else { return false }
                 if isUndo {
                     guard AppModel.handlesFamilyUndoKey(isCommandZ: true, browserIsKey: true,
                                                         editingText: key.firstResponder is NSText,

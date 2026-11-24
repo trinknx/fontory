@@ -730,6 +730,11 @@ final class AppModel {
     @ObservationIgnored var holdsRestoreScanForSmoke = false
     #endif
 
+    // MARK: Layouts
+
+    /// The Layouts window's model. Its folders are fixed at init (the smoke run passes temporary ones).
+    let layouts: LayoutsModel
+
     // MARK: Private
 
     @ObservationIgnored private(set) var backend: LibraryBackend?
@@ -770,7 +775,11 @@ final class AppModel {
     @ObservationIgnored var suppressesPreviewSaveForSmoke = false
     #endif
 
-    init() {
+    /// `layoutsDirectory` and `templatesDirectory` default to `Layouts/` and `Templates/` in
+    /// `~/Library/Application Support/Fontory`; the smoke run passes temporary folders.
+    init(layoutsDirectory: URL? = nil, templatesDirectory: URL? = nil) {
+        layouts = LayoutsModel(layoutsDirectory: layoutsDirectory ?? LayoutsModel.defaultDirectory("Layouts"),
+                               templatesDirectory: templatesDirectory ?? LayoutsModel.defaultDirectory("Templates"))
         SettingsKey.register()
         let renderer = PreviewRenderer()
         previewRenderer = renderer
@@ -797,6 +806,7 @@ final class AppModel {
         textLineHeight = Self.textLineHeightRange.contains(lineHeight) ? lineHeight : Self.defaultTextLineHeight
         duplicateLocationRank = (defaults.array(forKey: SettingsKey.duplicateLocationRank) as? [NSNumber])?.map(\.int64Value) ?? []
         skipDuplicatesOnImport = defaults.bool(forKey: SettingsKey.skipDuplicatesOnImport)
+        layouts.fontStore = { [weak self] in self?.backend?.store }
     }
 
     // MARK: Startup
@@ -826,6 +836,8 @@ final class AppModel {
         refreshCounts()
         await refreshNow()
         isReady = true
+        // The built-in layout templates, copied once (an existing file is never overwritten).
+        Task { await layouts.installBuiltInTemplates() }
         // Today's automatic backup when it is missing, behind the launch.
         scheduleLaunchBackup()
 
@@ -861,6 +873,8 @@ final class AppModel {
     }
 
     func prepareForQuit() async {
+        // The open layout's pending edits, bounded so a slow disk cannot hold up quitting.
+        await awaitAtMost(Self.layoutsQuitBudget, Task { await layouts.flush() })
         cancelRestore()
         flushPreviewSave()
         await flushNotes()
@@ -872,6 +886,7 @@ final class AppModel {
         await writeAutomaticBackup(within: Self.quitBackupBudget)
     }
 
+    static let layoutsQuitBudget: Duration = .seconds(1)
     private static let previewSaveDelay: Duration = .milliseconds(300)
 
     private func schedulePreviewSave() {

@@ -55,6 +55,7 @@ enum OrganizationSmoke {
             await familyEditorSteps()
             await duplicateSteps()
             await backupSteps()
+            await layoutsSteps()
         } catch {
             check(false, "setup", "\(error)")
         }
@@ -1932,6 +1933,192 @@ enum OrganizationSmoke {
 
         let standardAfter = keys.map { String(describing: UserDefaults.standard.object(forKey: $0)) }
         check(standardAfter == standardBefore, "backup: nothing written to the user's defaults")
+    }
+
+    // MARK: Wave 3C task 5: Layouts window
+
+    /// A fresh AppModel whose LayoutsModel uses temporary Layouts/Templates folders (set at init, before anything
+    /// installs or writes): built-in templates, New Layout naming, edit → dirty → autosave, undo/redo, the render,
+    /// font resolution, rename/duplicate, delete through a fake recycler, and the quit flush.
+    private static func layoutsSteps() async {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FontoryLayoutsSmoke-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let suiteName = "local.fontory.smoke.layouts.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else { check(false, "layouts: settings suite"); return }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+        func standardSnapshot() -> [String] {
+            let all = UserDefaults.standard.dictionaryRepresentation()
+            return all.keys.filter { $0.localizedCaseInsensitiveContains("layout") || $0.hasPrefix("zoom") || $0 == "previewSettings" }
+                .sorted().map { "\($0)=\(String(describing: all[$0]))" }
+        }
+        let standardBefore = standardSnapshot()
+        // The real folders are only looked at (their dates), never written.
+        let realBase = (try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: false))?
+            .appendingPathComponent("Fontory", isDirectory: true)
+        func realDates() -> [String] {
+            guard let realBase else { return [] }
+            return ["Layouts", "Templates"].map { name in
+                let date = (try? fm.attributesOfItem(atPath: realBase.appendingPathComponent(name).path))?[.modificationDate]
+                return "\(name)=\(String(describing: date))"
+            }
+        }
+        let realBefore = realDates()
+
+        let fonts = root.appendingPathComponent("Fonts", isDirectory: true)
+        let backend: LibraryBackend
+        do {
+            try fm.createDirectory(at: fonts, withIntermediateDirectories: true)
+            try fm.copyItem(at: URL(fileURLWithPath: "/System/Library/Fonts/Supplemental/Georgia Italic.ttf"),
+                            to: fonts.appendingPathComponent("Georgia Italic.ttf"))
+            backend = try LibraryBackend(databaseURL: root.appendingPathComponent("library.sqlite"), registrar: SmokeRegistrar())
+        } catch {
+            check(false, "layouts: setup", "\(error)"); return
+        }
+        let model = AppModel(layoutsDirectory: root.appendingPathComponent("Layouts", isDirectory: true),
+                             templatesDirectory: root.appendingPathComponent("Templates", isDirectory: true))
+        model.settingsDefaults = suite
+        model.suppressesPreviewSaveForSmoke = true
+        model.backupDirectory = root.appendingPathComponent("Backups", isDirectory: true)
+        let layouts = model.layouts
+        check(layouts.layoutsDirectory.path.hasPrefix(root.path) && layouts.templatesDirectory.path.hasPrefix(root.path),
+              "layouts: the smoke's layouts and templates live in its temp folder")
+        var recycled: [URL] = []
+        let trash = root.appendingPathComponent("FakeTrash", isDirectory: true)
+        layouts.recycle = { url in
+            recycled.append(url)
+            do {
+                try fm.createDirectory(at: trash, withIntermediateDirectories: true)
+                let dest = trash.appendingPathComponent(url.lastPathComponent)
+                try fm.moveItem(at: url, to: dest)
+                return (dest, nil)
+            } catch {
+                return (nil, error.localizedDescription)
+            }
+        }
+        await model.attachBackendForSmoke(backend)
+        guard let loc = await model.runBackground({ try backend.addFolder(fonts) }) else {
+            check(false, "layouts: add the font folder", model.alert?.message ?? ""); return
+        }
+        await model.reloadLocations()
+        model.rescan(loc.id)
+        await model.waitForScansForSmoke()
+
+        // Templates.
+        await layouts.installBuiltInTemplates()
+        let templateFiles = ((try? fm.contentsOfDirectory(atPath: layouts.templatesDirectory.path)) ?? []).filter { !$0.hasPrefix(".") }
+        check(templateFiles.count == 10 && layouts.templates.count == 10 && layouts.templates.first?.name == "Poster"
+              && layouts.templates.allSatisfy(\.isBuiltIn),
+              "layouts: the built-in templates are installed into the temp folder, Poster first",
+              "\(templateFiles.sorted()) / \(layouts.templates.map(\.name))")
+        guard let poster = layouts.templates.first(where: { $0.name == "Poster" }) else { return }
+
+        // New Layout naming.
+        await layouts.newLayout(from: poster.url)
+        let first = layouts.currentURL
+        await layouts.newLayout(from: poster.url)
+        let second = layouts.currentURL
+        check(first?.lastPathComponent == "Poster.json" && second?.lastPathComponent == "Poster 2.json"
+              && layouts.items.map(\.name) == ["Poster", "Poster 2"] && layouts.current?.name == "Poster 2",
+              "layouts: New Layout from Poster makes Poster.json, then Poster 2.json",
+              "\(String(describing: first?.lastPathComponent)), \(String(describing: second?.lastPathComponent)), \(layouts.items.map(\.name))")
+
+        // Render.
+        let rendered = await eventually(within: .seconds(2)) { layouts.renderedImage != nil }
+        check(rendered, "layouts: the page renders within 2 s")
+        if let doc = layouts.current, rendered {
+            let georgia = doc.blocks.first { $0.font.postScriptName == "Georgia-Italic" }
+            let helvetica = doc.blocks.first { $0.font.postScriptName == "HelveticaNeue-Bold" }
+            check(georgia.map { !layouts.report.missingFontBlockIDs.contains($0.id.uuidString) } == true
+                  && helvetica.map { layouts.report.missingFontBlockIDs.contains($0.id.uuidString) } == true,
+                  "layouts: an indexed font resolves; a font not in the library is reported missing",
+                  "\(layouts.report.missingFontBlockIDs)")
+        }
+
+        // Edit, dirty, autosave.
+        guard let url = layouts.currentURL, let original = layouts.current?.blocks.first?.text else {
+            check(false, "layouts: a layout is open"); return
+        }
+        let imageBefore = layouts.renderedImage
+        layouts.apply { $0.blocks[0].text = "Smoke headline" }
+        check(layouts.isDirty, "layouts: an edit marks the layout dirty")
+        let saved = await eventually(within: .seconds(3)) {
+            !layouts.isDirty && ((try? String(contentsOf: url, encoding: .utf8))?.contains("Smoke headline") ?? false)
+        }
+        check(saved, "layouts: the autosave writes the edit about 1 s later")
+        check(await eventually(within: .seconds(2)) { layouts.renderedImage != nil && layouts.renderedImage !== imageBefore },
+              "layouts: an edit re-renders the page")
+
+        // Undo / redo.
+        layouts.undo()
+        check(layouts.current?.blocks.first?.text == original && layouts.isDirty, "layouts: undo restores the text")
+        layouts.redo()
+        check(layouts.current?.blocks.first?.text == "Smoke headline", "layouts: redo applies it again")
+        layouts.undo()
+        check(layouts.canRedo, "layouts: redo is available after undo")
+        layouts.apply { $0.blocks[0].text = "Another" }
+        check(!layouts.canRedo, "layouts: a new edit clears redo")
+        layouts.apply({ $0.showMissing = false }, undoable: false)
+        layouts.undo()
+        check(layouts.current?.blocks.first?.text != "Another" && layouts.current?.showMissing == false,
+              "layouts: a non-undoable change is kept and not an undo step")
+
+        // Zoom.
+        layouts.zoomIn()
+        check(!layouts.zoomsToFit && layouts.effectiveZoom > layouts.fitZoom, "layouts: zoom in leaves fit")
+        layouts.zoomToFit()
+        check(layouts.zoomsToFit && layouts.effectiveZoom == layouts.fitZoom, "layouts: zoom to fit")
+
+        // Rename, duplicate.
+        await layouts.rename(url, to: "Renamed")
+        let renamed = layouts.layoutsDirectory.appendingPathComponent("Renamed.json")
+        check(layouts.currentURL == renamed && fm.fileExists(atPath: renamed.path) && !fm.fileExists(atPath: url.path)
+              && layouts.current?.name == "Renamed" && layouts.items.map(\.name).contains("Renamed"),
+              "layouts: rename moves the open layout's file", "\(layouts.items.map(\.name))")
+        await layouts.flush()
+        check((try? LayoutLibrary(layoutsDirectory: layouts.layoutsDirectory, templatesDirectory: layouts.templatesDirectory)
+                .load(renamed))?.blocks.first?.text == layouts.current?.blocks.first?.text,
+              "layouts: the renamed file holds the latest edits")
+        await layouts.duplicate(renamed)
+        check(layouts.items.map(\.name).contains("Renamed 2") && layouts.currentURL?.lastPathComponent == "Renamed 2.json",
+              "layouts: duplicate makes Renamed 2 and opens it", "\(layouts.items.map(\.name))")
+        await layouts.open(renamed)
+
+        // Delete through the fake recycler.
+        guard let firstURL = first else { return }
+        await layouts.delete(firstURL)
+        check(recycled == [firstURL] && !fm.fileExists(atPath: firstURL.path) && !layouts.items.map(\.name).contains("Poster"),
+              "layouts: delete moves the file to the (fake) Trash", "\(recycled)")
+        await layouts.delete(renamed)
+        check(layouts.current == nil && layouts.currentURL == nil && layouts.renderedImage == nil,
+              "layouts: deleting the open layout closes it")
+
+        // Quit flush: an edit made just before quitting is saved.
+        if let dup = layouts.items.first(where: { $0.name == "Renamed 2" }) {
+            await layouts.open(dup.url)
+            layouts.apply { $0.blocks[0].text = "Saved at quit" }
+            await model.prepareForQuit()
+            check((try? String(contentsOf: dup.url, encoding: .utf8))?.contains("Saved at quit") == true && !layouts.isDirty,
+                  "layouts: quitting saves a pending edit")
+        } else {
+            check(false, "layouts: the duplicate is listed")
+        }
+
+        // Nothing outside the temp folders.
+        check(realDates() == realBefore, "layouts: the real Layouts and Templates folders are untouched", "\(realBefore) → \(realDates())")
+        check(standardSnapshot() == standardBefore, "layouts: nothing written to the user's defaults")
+        check(recycled.allSatisfy { $0.path.hasPrefix(root.path) }, "layouts: only temp files were recycled")
+    }
+
+    /// Polls (on the main actor) until `condition` holds or `budget` passes.
+    private static func eventually(within budget: Duration, _ condition: () -> Bool) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + budget
+        while clock.now < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
     }
 }
 #endif
