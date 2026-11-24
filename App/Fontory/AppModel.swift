@@ -739,15 +739,51 @@ final class AppModel {
     /// Quick Collection.
     var layoutsSourceFaceIDs: [Int64] {
         if let detail { return detail.faceIDs }
-        if !selection.isEmpty {
-            var ordered = faceIDs.filter(selection.contains)
-            if ordered.count < selection.count {
-                let listed = Set(ordered)
-                ordered += selection.filter { !listed.contains($0) }.sorted()
-            }
-            return ordered
-        }
+        if !selection.isEmpty { return selectionInBrowserOrder }
         return quickCollectionIDs.sorted()
+    }
+
+    /// The selected faces in browser order (any not listed, such as filtered out meanwhile, follow sorted).
+    private var selectionInBrowserOrder: [Int64] {
+        var ordered = faceIDs.filter(selection.contains)
+        if ordered.count < selection.count {
+            let listed = Set(ordered)
+            ordered += selection.filter { !listed.contains($0) }.sorted()
+        }
+        return ordered
+    }
+
+    // MARK: Compare
+
+    /// The Compare window's model (remembered settings in `UserDefaults.standard`).
+    let compare = CompareModel()
+
+    /// What ⌥⌘K compares: 2+ selected faces (browser order) → the first against the rest; one selected face or an
+    /// open family page (its representative) against the Quick Collection's other families; else the Quick
+    /// Collection's first face against the rest.
+    var compareSource: (reference: Int64?, candidates: [Int64]) {
+        let quick = quickCollectionIDs.sorted()
+        if selection.count >= 2 {
+            let ordered = selectionInBrowserOrder
+            return (ordered.first, Array(ordered.dropFirst()))
+        }
+        let single = selection.first ?? detail?.representativeID
+        if let single {
+            var others = quick.filter { $0 != single }
+            if let store = backend?.store, !others.isEmpty,
+               let rows = try? store.rows(ids: others + [single]), let family = rows[single]?.family.lowercased() {
+                others = others.filter { rows[$0]?.family.lowercased() != family }
+            }
+            return (single, others)
+        }
+        if let first = quick.first { return (first, Array(quick.dropFirst())) }
+        return (nil, [])
+    }
+
+    /// ⌥⌘K (the caller opens or focuses the Compare window).
+    func openInCompare() async {
+        let source = compareSource
+        await compare.open(referenceFaceID: source.reference, candidateFaceIDs: source.candidates)
     }
 
     /// ⌘K (the caller opens or focuses the Layouts window): with no layout open, a new one from Poster first; then
@@ -853,6 +889,7 @@ final class AppModel {
         duplicateLocationRank = (defaults.array(forKey: SettingsKey.duplicateLocationRank) as? [NSNumber])?.map(\.int64Value) ?? []
         skipDuplicatesOnImport = defaults.bool(forKey: SettingsKey.skipDuplicatesOnImport)
         layouts.fontStore = { [weak self] in self?.backend?.store }
+        compare.fontStore = { [weak self] in self?.backend?.store }
     }
 
     // MARK: Startup

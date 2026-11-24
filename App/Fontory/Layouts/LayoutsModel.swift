@@ -941,6 +941,12 @@ extension LayoutsModel {
     func closestStyle(in family: FontReference, to font: FontReference) async -> FontReference {
         let target = await familyStyles(of: family)
         let own = await familyStyles(of: font)
+        return Self.closestStyle(in: family, target: target, to: font, own: own)
+    }
+
+    /// The pure part of `closestStyle(in:to:)`, given both families' styles (shared with Compare).
+    nonisolated static func closestStyle(in family: FontReference, target: [PairingStyle], to font: FontReference,
+                                         own: [PairingStyle]) -> FontReference {
         guard !target.isEmpty else { return family }
         if target.contains(where: { $0.reference == font }) { return font }
         let style = own.first { $0.reference == font }

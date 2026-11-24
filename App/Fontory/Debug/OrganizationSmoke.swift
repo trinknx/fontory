@@ -56,10 +56,136 @@ enum OrganizationSmoke {
             await duplicateSteps()
             await backupSteps()
             await layoutsSteps()
+            await compareSteps()
         } catch {
             check(false, "setup", "\(error)")
         }
         return failures == 0
+    }
+
+    /// Compare: opening rules, cycling, swap, the missing-font scene, remembered text/recents in a temporary suite
+    /// (never `.standard`), the empty state. The seeded faces have no files, so their scene sides are missing.
+    private static func compareSteps() async {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FontoryCompareSmoke-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let suiteName = "local.fontory.smoke.compare.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else { check(false, "compare: settings suite"); return }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+        func standardKeys() -> [String] {
+            UserDefaults.standard.dictionaryRepresentation().keys.filter { $0.hasPrefix("compare.") }.sorted()
+        }
+        let standardBefore = standardKeys()
+
+        let backend: LibraryBackend
+        let faces: [String: Int64]
+        do {
+            try fm.createDirectory(at: root, withIntermediateDirectories: true)
+            backend = try LibraryBackend(databaseURL: root.appendingPathComponent("library.sqlite"))
+            faces = try seed(backend.store, folder: root)
+        } catch {
+            check(false, "compare: setup", "\(error)"); return
+        }
+        guard let serif = faces["Smoke Serif"], let sans = faces["Smoke Sans"], let mono = faces["Smoke Mono"] else {
+            check(false, "compare: seeded faces"); return
+        }
+        let compare = CompareModel(defaults: suite)
+        compare.fontStore = { backend.store }
+        check(compare.text == CompareModel.presets[0] && compare.options == CompareOptions() && compare.recentTexts.isEmpty,
+              "compare: fresh suite starts with the first preset and default options")
+        compare.canvasDidResize(CGSize(width: 800, height: 400), scale: 1)
+
+        await compare.open(referenceFaceID: serif, candidateFaceIDs: [sans, mono])
+        await compare.waitForRenderForSmoke()
+        check(compare.a?.family == "Smoke Serif", "compare: open sets A to the reference family", compare.a?.family ?? "nil")
+        check(compare.candidates.map(\.family) == ["Smoke Sans", "Smoke Mono"], "compare: open lists the candidate families",
+              "\(compare.candidates.map(\.family))")
+        check(compare.b?.family == "Smoke Sans", "compare: open sets B to the first candidate", compare.b?.family ?? "nil")
+        check(compare.emptyMessage == nil, "compare: no empty message when fonts are open")
+        check(compare.isCurrentCandidate(compare.candidates[0]) && !compare.isCurrentCandidate(compare.candidates[1]),
+              "compare: the current candidate is B's family")
+        check(compare.scene?.a.isMissing == true && compare.scene?.b.isMissing == true,
+              "compare: fonts without files give missing scene sides")
+        check(compare.scene?.a.label == "Smoke Serif Regular", "compare: the side label is Family Style", compare.scene?.a.label ?? "nil")
+        check(compare.copyImage() == false, "compare: Copy has nothing to copy for missing fonts")
+
+        compare.cycle(.family(1))
+        await compare.waitForRenderForSmoke()
+        check(compare.b?.family == "Smoke Mono", "compare: → cycles B to the next family", compare.b?.family ?? "nil")
+        compare.cycle(.family(1))
+        await compare.waitForRenderForSmoke()
+        check(compare.b?.family == "Smoke Sans", "compare: → wraps around the candidates", compare.b?.family ?? "nil")
+        compare.cycle(.family(-1))
+        await compare.waitForRenderForSmoke()
+        check(compare.b?.family == "Smoke Mono", "compare: ← cycles B back", compare.b?.family ?? "nil")
+        let aBefore = compare.a, bBefore = compare.b
+        compare.cycle(.style(1))
+        compare.cycle(.referenceStyle(1))
+        await compare.waitForRenderForSmoke()
+        check(compare.a == aBefore && compare.b == bBefore, "compare: one-style families keep A and B on style keys")
+        await compare.pickCandidate(compare.candidates[0])
+        check(compare.b?.family == "Smoke Sans", "compare: picking a candidate makes it B")
+
+        await compare.swap()
+        await compare.waitForRenderForSmoke()
+        check(compare.a?.family == "Smoke Sans" && compare.b?.family == "Smoke Serif", "compare: swap exchanges A and B",
+              "\(compare.a?.family ?? "nil") / \(compare.b?.family ?? "nil")")
+        check(compare.candidates.contains { $0.family == "Smoke Serif" }, "compare: swap puts the old A's family into the candidates")
+        check(compare.scene?.a.isMissing == true, "compare: a missing A is replaced, not drawn", "\(String(describing: compare.scene?.a.isMissing))")
+
+        compare.removeCandidate(compare.candidates[0])
+        check(compare.candidates.count == 2, "compare: removing a candidate drops its family")
+
+        compare.setText("Xin chào")
+        check(suite.string(forKey: "compare.text") == "Xin chào" && compare.recentTexts.first == "Xin chào",
+              "compare: custom text is remembered and listed first")
+        compare.setText(CompareModel.presets[2])
+        check(compare.recentTexts == ["Xin chào"] && suite.string(forKey: "compare.text") == CompareModel.presets[2],
+              "compare: presets are remembered as text but not as recents")
+        for i in 1...6 { compare.setText("Text \(i)") }
+        check(compare.recentTexts.count == 5 && compare.recentTexts.first == "Text 6" && !compare.recentTexts.contains("Xin chào"),
+              "compare: only the five latest custom texts are kept", "\(compare.recentTexts)")
+        compare.setText("Text 3")
+        check(compare.recentTexts.first == "Text 3" && compare.recentTexts.filter { $0 == "Text 3" }.count == 1,
+              "compare: a repeated text moves to the front")
+        compare.setOptions(CompareOptions(mode: .sideBySide, sizeRule: .matchXHeight, outlines: true, guides: false))
+        let reloaded = CompareModel(defaults: suite)
+        check(reloaded.text == "Text 3" && reloaded.recentTexts == compare.recentTexts
+              && reloaded.options == CompareOptions(mode: .sideBySide, sizeRule: .matchXHeight, outlines: true, guides: false),
+              "compare: text, recents and options persist across a new model")
+        check(reloaded.a == nil && reloaded.b == nil && reloaded.candidates.isEmpty, "compare: A, B and candidates are not persisted")
+
+        await compare.open(referenceFaceID: nil, candidateFaceIDs: [])
+        check(compare.emptyMessage == "Select fonts or add some to the Quick Collection, then press ⌥⌘K." && compare.a == nil
+              && compare.b == nil && compare.candidates.isEmpty, "compare: opening with nothing shows the no-fonts message")
+
+        // Opening rules on the app model (its own model reads the standard defaults, never writes them).
+        let model = AppModel(layoutsDirectory: root.appendingPathComponent("Layouts", isDirectory: true),
+                             templatesDirectory: root.appendingPathComponent("Templates", isDirectory: true))
+        await model.attachBackendForSmoke(backend)
+        await model.refreshNowForSmoke()
+        model.compare.fontStore = { backend.store }
+        check(model.compareSource.reference == nil && model.compareSource.candidates.isEmpty, "compare: nothing selected or collected has no source")
+        model.quickCollectionIDs = [serif, sans, mono]
+        let quick = model.quickCollectionIDs.sorted()
+        check(model.compareSource.reference == quick.first && model.compareSource.candidates == Array(quick.dropFirst()),
+              "compare: the Quick Collection is the source with nothing selected")
+        model.selection = [sans]
+        check(model.compareSource.reference == sans && model.compareSource.candidates == [serif, mono],
+              "compare: one selected face against the Quick Collection without its family", "\(model.compareSource)")
+        model.selection = [sans, mono, serif]
+        let ordered = model.faceIDs.filter(model.selection.contains)
+        check(model.compareSource.reference == ordered.first && model.compareSource.candidates == Array(ordered.dropFirst()),
+              "compare: 2+ selected faces compare the first against the rest in browser order")
+        model.selection = [serif, sans]
+        await model.openInCompare()
+        check(model.compare.a != nil && model.compare.candidates.count == 1 && model.compare.b?.family == model.compare.candidates.first?.family,
+              "compare: openInCompare opens the selection")
+        model.quickCollectionIDs = []
+        model.selection = []
+
+        check(standardKeys() == standardBefore, "compare: nothing was written to the standard defaults",
+              "\(standardKeys()) vs \(standardBefore)")
     }
 
     /// Three synthetic faces in one folder location: Smoke Serif, Smoke Sans, Smoke Mono.
