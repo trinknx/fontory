@@ -163,6 +163,16 @@ final class FeatureRulesModel {
         return GlyphExport.copyGlyph(font: font, glyph: glyph, to: pasteboard)
     }
 
+    /// Copy Glyph for the UI: renders the PNG and SVG off the main actor, then writes; beeps when there is neither.
+    @discardableResult
+    func copyGlyphAsync(_ glyph: CGGlyph, to pasteboard: NSPasteboard = .general) async -> Bool {
+        guard let face else {
+            NSSound.beep()
+            return false
+        }
+        return await GlyphExport.copyGlyphAsync(font: { face.font }, glyph: glyph, to: pasteboard)
+    }
+
     /// The rule's input as plain text. False when it has no characters.
     func copyCharacters(_ rule: GSUBRule, to pasteboard: NSPasteboard = .general) -> Bool {
         guard let text = characters(for: rule), !text.isEmpty else { return false }
@@ -177,9 +187,13 @@ final class FeatureRulesModel {
     }
 
     /// File promise provider for dragging `glyph` out: SVG file, or PNG for colour/bitmap glyphs; no string item.
+    /// nil for an inkless glyph (zero bounds, e.g. space), which has nothing to drag.
     func dragItem(for glyph: CGGlyph) -> NSPasteboardWriting? {
         guard let face else { return nil }
         let font = face.font
+        var g = glyph
+        let bounds = CTFontGetBoundingRectsForGlyphs(font, .default, &g, nil, 1)
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
         let psName = CTFontCopyPostScriptName(font) as String
         let glyphName = CTFontCopyGraphicsFont(font, nil).name(for: glyph) as String?
         let scalar = labels?.character(for: glyph)?.unicodeScalars.first?.value

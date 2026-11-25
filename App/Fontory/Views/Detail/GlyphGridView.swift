@@ -497,12 +497,16 @@ enum GlyphExport {
     }
 
     /// Copy Glyph for the UI: renders the PNG and SVG off the main thread, then writes; beeps when there is neither.
-    static func copyGlyphAsync(font: @escaping @Sendable () -> CTFont?, glyph: CGGlyph) async {
+    @discardableResult
+    static func copyGlyphAsync(font: @escaping @Sendable () -> CTFont?, glyph: CGGlyph,
+                               to pasteboard: NSPasteboard = .general) async -> Bool {
         let rendered = await Task.detached(priority: .userInitiated) { () -> (Data?, String?) in
             guard let font = font() else { return (nil, nil) }
             return (GlyphImage.png(font: font, glyph: glyph), GlyphSVG.document(font: font, glyph: glyph))
         }.value
-        if !write(png: rendered.0, svg: rendered.1) { NSSound.beep() }
+        let wrote = write(png: rendered.0, svg: rendered.1, to: pasteboard)
+        if !wrote { NSSound.beep() }
+        return wrote
     }
 }
 

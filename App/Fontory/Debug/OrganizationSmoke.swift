@@ -143,6 +143,51 @@ enum OrganizationSmoke {
             check(false, "rules: copy writes to the given pasteboard only", "no rule with characters in \(tag)")
         }
 
+        if let glyph = rules?.rules.first?.input.first {
+            let pb = NSPasteboard(name: .init("fontory.smoke.\(UUID())"))
+            defer { pb.releaseGlobally() }
+            let wrote = await model.copyGlyphAsync(glyph, to: pb)
+            let types = pb.types ?? []
+            check(wrote && types.contains(.png) && types.contains(GlyphExport.svgType) && !types.contains(.string)
+                  && NSPasteboard.general.changeCount == general,
+                  "rules: async copy writes PNG and SVG to the given pasteboard", "\(types.map(\.rawValue))")
+
+            let psName = renderer.font(fileURL: sfns, faceIndex: 0, pointSize: 1)
+                .map { CTFontCopyPostScriptName($0) as String } ?? "?"
+            let item = model.dragItem(for: glyph) as? GlyphPromiseProvider
+            let dragPB = NSPasteboard(name: .init("fontory.smoke.\(UUID())"))
+            defer { dragPB.releaseGlobally() }
+            let dragTypes = item?.writableTypes(for: dragPB) ?? []
+            let name = (item?.userInfo as? GlyphPromiseProvider.Payload)?.fileName ?? ""
+            check(item != nil && !dragTypes.contains(.string) && name.hasPrefix(psName + " ") && name.hasSuffix(".svg"),
+                  "rules: drag item is an SVG promise without text", "\(name) \(dragTypes.map(\.rawValue))")
+        } else {
+            check(false, "rules: async copy writes PNG and SVG to the given pasteboard", "no rule")
+            check(false, "rules: drag item is an SVG promise without text", "no rule")
+        }
+        if let sfFont = renderer.font(fileURL: sfns, faceIndex: 0, pointSize: 1) {
+            var ch: UniChar = 0x20
+            var space: CGGlyph = 0
+            CTFontGetGlyphsForCharacters(sfFont, &ch, &space, 1)
+            check(space != 0 && model.dragItem(for: space) == nil, "rules: inkless glyph has no drag item")
+        }
+
+        let emojiURL = URL(fileURLWithPath: "/System/Library/Fonts/Apple Color Emoji.ttc")
+        let emoji = FeatureRulesModel(renderer: renderer)
+        await emoji.load(fileURL: emojiURL, faceIndex: 0, selection: .all)
+        var emojiGlyphs: [CGGlyph] = [0, 0]
+        if let emojiFont = renderer.font(fileURL: emojiURL, faceIndex: 0, pointSize: 1) {
+            let utf16 = Array("\u{1F600}".utf16)
+            CTFontGetGlyphsForCharacters(emojiFont, utf16, &emojiGlyphs, utf16.count)
+        }
+        let emojiItem = emoji.dragItem(for: emojiGlyphs[0]) as? GlyphPromiseProvider
+        let emojiPB = NSPasteboard(name: .init("fontory.smoke.\(UUID())"))
+        defer { emojiPB.releaseGlobally() }
+        let emojiName = (emojiItem?.userInfo as? GlyphPromiseProvider.Payload)?.fileName ?? ""
+        check(emojiGlyphs[0] != 0 && emojiName.hasSuffix(".png")
+              && !(emojiItem?.writableTypes(for: emojiPB) ?? []).contains(.string),
+              "rules: colour glyph drags as a PNG promise", "\(emojiGlyphs[0]) \(emojiName)")
+
         let raced = FeatureRulesModel(renderer: renderer)
         let first = Task { await raced.load(fileURL: sfns, faceIndex: 0, selection: .all) }
         _ = await eventually(within: .seconds(2)) { raced.phase == .reading }
