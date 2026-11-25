@@ -1424,6 +1424,21 @@ final class AppModel {
         invalidateRows()
     }
 
+    /// Stops watching and scanning a location and waits for its scan to end, so nothing reads or prunes its folder
+    /// while it moves. `relink` (or `updateWatchers` plus `rescan`) brings it back.
+    func suspendLocation(_ id: Int64) async {
+        guard let backend else { return }
+        folderEventTasks.removeValue(forKey: id)?.cancel()
+        watchers.removeValue(forKey: id)?.stop()
+        // The run is cancelled in the scanner, not here: the scan task then drains the stream until the run has ended.
+        while let task = scanTasks[id] {
+            await backend.scanner.cancel(locationID: id)
+            await task.value
+            if scanTasks[id] == task { break }
+        }
+        await backend.scanner.cancel(locationID: id)
+    }
+
     /// Returns the task that finishes the removal (awaited by the Google Fonts controller).
     @discardableResult
     func removeLocation(_ id: Int64) -> Task<Void, Never> {

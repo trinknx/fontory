@@ -40,6 +40,10 @@ final class GoogleFontsController {
     /// A catalogue check succeeded while a run was going: run again when it finishes (it listed families before).
     @ObservationIgnored private var rerunRequested = false
     @ObservationIgnored private var isChecking = false
+    /// A folder move is under way: the stopped run must not rescan the old folder.
+    @ObservationIgnored private var isMovingFolder = false
+    /// Smoke hook: Move Files takes the cross-volume path (copy, then delete) on one volume.
+    @ObservationIgnored var forcesCrossVolumeMove = false
     /// The last progress read, shown while the next run reads it again.
     @ObservationIgnored private var lastProgress = (done: 0, total: 0)
 
@@ -104,12 +108,19 @@ final class GoogleFontsController {
             try await Self.background { try backend.validateGoogleFolder(folder, ignoring: previous?.id) }
             stopRun()
             await stoppedRun?.value
-            let loc = try await Self.addLocation(at: folder, backend: backend, ignoring: previous?.id)
-            if let previous, previous.id != loc.id { await model.removeLocation(previous.id).value }
-            // The families were downloaded elsewhere, if at all: everything is fetched again into this folder.
-            try await Self.background { try backend.store.resetGoogleDownloads() }
-            await model.reloadLocations()
-            model.updateWatchers()
+            do {
+                let loc = try await Self.addLocation(at: folder, backend: backend, ignoring: previous?.id)
+                // The families were downloaded elsewhere, if at all: everything is fetched again into this folder.
+                // Reset before the old location goes, so a failure never leaves rows "done" for an empty folder.
+                try await Self.background { try backend.store.resetGoogleDownloads() }
+                if let previous, previous.id != loc.id { await model.removeLocation(previous.id).value }
+                await model.reloadLocations()
+                model.updateWatchers()
+            } catch {
+                await model.reloadLocations()
+                restartIfActive()
+                throw error
+            }
         }
         setEnabled(true)
         setPaused(false)
@@ -141,19 +152,23 @@ final class GoogleFontsController {
         let target = url.standardizedFileURL
         let oldURL = URL(fileURLWithPath: old.lastKnownPath, isDirectory: true).standardizedFileURL
         guard target.path != oldURL.path else { return }
-        try await Self.background { try backend.validateGoogleFolder(target, ignoring: old.id) }
+        // Refuses user locations and any folder inside or containing the current one (a move into itself, or new
+        // files nested in the old folder).
+        let ref = try await Self.background { try backend.validateGoogleFolder(target, ignoring: old.id) }
+        guard !LibraryBackend.isSamePlace(ref, old) else { return }
         if moveFiles, !old.online { throw LibraryError.locationOffline(old.displayName) }
 
         stopRun()
+        isMovingFolder = true
+        defer { isMovingFolder = false }
         await stoppedRun?.value
         do {
             if moveFiles {
-                try await Self.background { try Self.moveFolder(from: oldURL, to: target) }
-                await model.relink(old.id, to: target)
+                try await moveFolderKeepingActivation(old, from: oldURL, to: target, model: model, backend: backend)
             } else {
                 let loc = try await Self.addLocation(at: target, backend: backend, ignoring: old.id)
-                if loc.id != old.id { await model.removeLocation(old.id).value }
                 try await Self.background { try backend.store.resetGoogleDownloads() }
+                if loc.id != old.id { await model.removeLocation(old.id).value }
                 await model.reloadLocations()
                 model.updateWatchers()
             }
@@ -162,6 +177,29 @@ final class GoogleFontsController {
             throw error
         }
         restartIfActive()
+    }
+
+    /// Move Files: nothing watches, scans or keeps fonts registered in the old folder while it moves; the active
+    /// fonts are registered again from the new place by `relink` (or from the old one when the move fails).
+    private func moveFolderKeepingActivation(_ old: LocationRecord, from oldURL: URL, to target: URL, model: AppModel,
+                           backend: LibraryBackend) async throws {
+        await model.suspendLocation(old.id)
+        await backend.activation.volumeUnmounted(locationIDs: [old.id])
+        let forceCopy = forcesCrossVolumeMove
+        let leftover: Bool
+        do {
+            leftover = try await Self.background { try Self.moveFolder(from: oldURL, to: target, forceCopy: forceCopy) }
+        } catch {
+            let report = await backend.activation.volumeMounted(locationIDs: [old.id])
+            model.present(report, state: .on, context: "Re-activating fonts")
+            model.updateWatchers()
+            throw error
+        }
+        await model.relink(old.id, to: target)
+        if leftover {
+            model.alert = AlertItem(title: "The old Google Fonts folder could not be deleted",
+                                    message: "Its fonts were copied to “\(target.lastPathComponent)”. Delete “\(oldURL.path)” in the Finder.")
+        }
     }
 
     // MARK: Checks and downloads
@@ -295,7 +333,7 @@ final class GoogleFontsController {
                 case .familyDone:
                     progress.done += 1
                     sinceRescan += 1
-                    if sinceRescan >= Self.rescanEvery {
+                    if sinceRescan >= Self.rescanEvery, !isMovingFolder {
                         sinceRescan = 0
                         model?.rescan(loc.id)
                     }
@@ -316,7 +354,7 @@ final class GoogleFontsController {
         lastProgress = progress
         let present = model?.location(loc.id) != nil
         // Families written since the last rescan are indexed now (also after a pause; not when the folder is gone).
-        if sinceRescan > 0, !unavailable, model?.location(loc.id)?.online == true { model?.rescan(loc.id) }
+        if sinceRescan > 0, !unavailable, !isMovingFolder, model?.location(loc.id)?.online == true { model?.rescan(loc.id) }
         if present {
             failedFamilies = (try? await Self.background {
                 try store.googleFamiliesNeedingDownload().filter { $0.status == 2 }.count
@@ -359,9 +397,11 @@ final class GoogleFontsController {
         }
     }
 
-    /// Moves the folder `from` to `to` (a new path or an empty folder). Across volumes, copies and then deletes the
-    /// original; a failed copy removes only the partial copy it made.
-    nonisolated static func moveFolder(from: URL, to: URL) throws {
+    /// Moves the folder `from` to `to` (a new path or an empty folder). On one volume this is a rename and any error
+    /// is thrown as is. Across volumes (or with `forceCopy`), the folder is copied, then the original deleted; a
+    /// failed copy removes only the partial copy it made and keeps the original. Returns true when the copy is in
+    /// place but the original could not be deleted entirely (the caller reports it; the copy is the location now).
+    nonisolated static func moveFolder(from: URL, to: URL, forceCopy: Bool = false) throws -> Bool {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         if fm.fileExists(atPath: to.path, isDirectory: &isDir) {
@@ -372,17 +412,28 @@ final class GoogleFontsController {
         } else {
             try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
         }
-        do {
+        func volume(_ url: URL) throws -> NSObject? {
+            try url.resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier as? NSObject
+        }
+        let sourceVolume = try volume(from)
+        let targetVolume = try volume(to.deletingLastPathComponent())
+        // Unknown identifiers mean a plain rename attempt: copy-and-delete only when the volumes are known to differ.
+        let crossVolume = forceCopy || (sourceVolume != nil && targetVolume != nil && sourceVolume != targetVolume)
+        guard crossVolume else {
             try fm.moveItem(at: from, to: to)
+            return false
+        }
+        do {
+            try fm.copyItem(at: from, to: to)
         } catch {
-            guard fm.fileExists(atPath: from.path), !fm.fileExists(atPath: to.path) else { throw error }
-            do {
-                try fm.copyItem(at: from, to: to)
-            } catch {
-                try? fm.removeItem(at: to)
-                throw error
-            }
+            try? fm.removeItem(at: to)
+            throw error
+        }
+        do {
             try fm.removeItem(at: from)
+            return false
+        } catch {
+            return true
         }
     }
 

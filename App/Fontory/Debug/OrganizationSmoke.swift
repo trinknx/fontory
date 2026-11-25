@@ -1533,14 +1533,24 @@ enum OrganizationSmoke {
         private let lock = NSLock()
         private var log: [(path: String, existed: Bool)] = []
 
+        /// Every register and unregister, in order, with the path (registration order checks).
+        private var calls: [(register: Bool, path: String)] = []
+
         var unregistered: [(path: String, existed: Bool)] { lock.withLock { log } }
+        var events: [(register: Bool, path: String)] { lock.withLock { calls } }
 
         func register(_ urls: [URL]) async -> [URL: RegistrationOutcome] {
-            Dictionary(urls.map { ($0, .ok) }, uniquingKeysWith: { a, _ in a })
+            lock.withLock { for url in urls { calls.append((true, url.path)) } }
+            return Dictionary(urls.map { ($0, .ok) }, uniquingKeysWith: { a, _ in a })
         }
 
         func unregister(_ urls: [URL]) async -> [URL: RegistrationOutcome] {
-            lock.withLock { for url in urls { log.append((url.path, FileManager.default.fileExists(atPath: url.path))) } }
+            lock.withLock {
+                for url in urls {
+                    log.append((url.path, FileManager.default.fileExists(atPath: url.path)))
+                    calls.append((false, url.path))
+                }
+            }
             return Dictionary(urls.map { ($0, .ok) }, uniquingKeysWith: { a, _ in a })
         }
 
@@ -3097,6 +3107,7 @@ enum OrganizationSmoke {
         let google = root.appendingPathComponent("Google Fonts", isDirectory: true)
         let supplemental = URL(fileURLWithPath: "/System/Library/Fonts/Supplemental", isDirectory: true)
         let transport = FakeGoogleTransport()
+        let registrar = SmokeRegistrar()
         let backend: LibraryBackend
         let arial: Data, georgia: Data, courier: Data
         do {
@@ -3108,7 +3119,7 @@ enum OrganizationSmoke {
             transport.set("Smoke Sans", modified: "2025-01-01", font: arial)
             transport.set("Smoke Serif", modified: "2025-01-01", font: georgia)
             transport.set("Smoke Mono", modified: "2025-01-01", font: courier)
-            backend = try LibraryBackend(databaseURL: root.appendingPathComponent("library.sqlite"), registrar: SmokeRegistrar())
+            backend = try LibraryBackend(databaseURL: root.appendingPathComponent("library.sqlite"), registrar: registrar)
         } catch {
             check(false, "google: setup", "\(error)"); return
         }
@@ -3222,8 +3233,24 @@ enum OrganizationSmoke {
               "google: catalogue failure shows error and changes nothing", "\(controller.phase)")
         transport.setFailsCatalog(false)
 
+        // A new folder inside or containing the current one is refused (move and leave) and nothing changes.
+        let diskBefore = snapshot()
+        for (target, move) in [(google.appendingPathComponent("Sub", isDirectory: true), true),
+                               (google.appendingPathComponent("Sub", isDirectory: true), false),
+                               (root, true)] {
+            var refused = false
+            do { try await controller.changeFolder(to: target, moveFiles: move) } catch let error as LibraryError {
+                if case .overlapsLocation = error { refused = true }
+            } catch {}
+            check(refused && snapshot() == diskBefore && controller.location?.id == loc.id
+                  && samePath(controller.location?.lastKnownPath, google) && fm.fileExists(atPath: google.path),
+                  "google: change into or around the current folder is refused (\(target.lastPathComponent), move \(move))",
+                  "\(refused) \(controller.phase)")
+        }
+
         // Move Files: the folder moves, the location is relinked (same id) and activation is kept.
         let moved = root.appendingPathComponent("Moved/Google Fonts", isDirectory: true)
+        let eventsBeforeMove = registrar.events.count
         do {
             try fm.createDirectory(at: moved.deletingLastPathComponent(), withIntermediateDirectories: true)
             try await controller.changeFolder(to: moved, moveFiles: true)
@@ -3235,6 +3262,37 @@ enum OrganizationSmoke {
               && fm.fileExists(atPath: moved.appendingPathComponent("Smoke Sans/SmokeSans-Regular.ttf").path)
               && googleIDs(store).count == 3 && activatedIDs(store).contains(sansMoved ?? -1),
               "google: move folder keeps activation", "\(controller.phase) \(String(describing: controller.location?.lastKnownPath))")
+        func unregisterBeforeRegister(since start: Int, old: URL, new: URL) -> Bool {
+            let events = Array(registrar.events.dropFirst(start))
+            // Temp paths may be spelled /var/… or /private/var/…; the moved-away files no longer resolve.
+            func norm(_ path: String) -> String { path.hasPrefix("/private/") ? String(path.dropFirst(8)) : path }
+            let oldPath = norm(old.standardizedFileURL.path), newPath = norm(new.standardizedFileURL.path)
+            func under(_ path: String, _ base: String) -> Bool { norm(path).hasPrefix(base + "/") }
+            guard let lastUnregister = events.lastIndex(where: { !$0.register && under($0.path, oldPath) }),
+                  let firstRegister = events.firstIndex(where: { $0.register && under($0.path, newPath) }) else { return false }
+            return lastUnregister < firstRegister && !events.contains { $0.register && under($0.path, oldPath) }
+        }
+        check(unregisterBeforeRegister(since: eventsBeforeMove, old: google, new: moved),
+              "google: move unregisters the old files before registering the new ones",
+              "\(registrar.events.dropFirst(eventsBeforeMove).map { "\($0.register ? "+" : "-")\($0.path)" })")
+
+        // Move Files across volumes (forced copy, then delete): watcher and scans are held, activation is kept.
+        let copied = root.appendingPathComponent("Copied/Google Fonts", isDirectory: true)
+        let eventsBeforeCopy = registrar.events.count
+        controller.forcesCrossVolumeMove = true
+        do { try await controller.changeFolder(to: copied, moveFiles: true) } catch { check(false, "google: copy folder", "\(error)") }
+        controller.forcesCrossVolumeMove = false
+        let copySettled = await settled()
+        // Past the folder-event delay: a watcher left on the old folder would have rescanned (and pruned) by now.
+        try? await Task.sleep(for: .seconds(6))
+        await model.waitForScansForSmoke()
+        let sansCopied = googleFace(store, postScriptName: "ArialMT")
+        check(copySettled && controller.location?.id == loc.id && samePath(controller.location?.lastKnownPath, copied)
+              && !fm.fileExists(atPath: moved.path)
+              && fm.fileExists(atPath: copied.appendingPathComponent("Smoke Sans/SmokeSans-Regular.ttf").path)
+              && googleIDs(store).count == 3 && activatedIDs(store).contains(sansCopied ?? -1)
+              && unregisterBeforeRegister(since: eventsBeforeCopy, old: moved, new: copied),
+              "google: cross-volume move keeps activation", "\(controller.phase) \(googleIDs(store).count)")
 
         // Leave Them: a new location, the old files stay, everything is downloaded again into the new root.
         let left = root.appendingPathComponent("Leave/Google Fonts", isDirectory: true)
@@ -3243,13 +3301,31 @@ enum OrganizationSmoke {
         let leaveSettled = await settled()
         check(leaveSettled && controller.phase == .idle && googleLocations().count == 1
               && controller.location.map { $0.id != loc.id && samePath($0.lastKnownPath, left) } == true
-              && fm.fileExists(atPath: moved.appendingPathComponent("Smoke Sans/SmokeSans-Regular.ttf").path)
+              && fm.fileExists(atPath: copied.appendingPathComponent("Smoke Sans/SmokeSans-Regular.ttf").path)
               && ["Smoke Sans", "Smoke Serif", "Smoke Mono"].allSatisfy {
                   fm.fileExists(atPath: left.appendingPathComponent("\($0)/\(FakeGoogleTransport.fileName($0))").path)
               }
               && transport.requests - requestsBeforeLeave >= 6 && googleIDs(store).count == 3
               && (try? store.googleProgress()).map { $0 == (3, 3) } == true,
               "google: leave folder re-downloads into new root", "\(controller.phase) \(googleLocations().count)")
+
+        // Enable elsewhere fails after the run stopped (a file where the folder's parent should be): the location,
+        // the download state and the phase come back as they were.
+        let blocker = root.appendingPathComponent("Blocker")
+        fm.createFile(atPath: blocker.path, contents: Data())
+        let leftID = controller.location?.id
+        // A run is going when it fails, so a missing restart would leave the phase stuck at downloading.
+        transport.setFontDelay(.milliseconds(400))
+        transport.set("Smoke Mono", modified: "2026-06-01", font: courier + Data(count: 8))
+        await controller.checkForUpdates(force: true)
+        let runningBeforeFailure = await eventually(within: .seconds(5)) { if case .downloading = controller.phase { return true }; return false }
+        var enableFailed = false
+        do { try await controller.enable(at: blocker.appendingPathComponent("Google Fonts")) } catch { enableFailed = true }
+        let afterFailure = await settled()
+        transport.setFontDelay(.zero)
+        check(runningBeforeFailure && enableFailed && afterFailure && controller.phase == .idle && controller.location?.id == leftID
+              && googleLocations().count == 1 && (try? store.googleProgress()).map { $0 == (3, 3) } == true,
+              "google: a failed enable elsewhere restarts and changes nothing", "\(enableFailed) \(controller.phase)")
 
         // Pause, Stop Syncing and Remove from Library: files stay on disk.
         controller.pause()

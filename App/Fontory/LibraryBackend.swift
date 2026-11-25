@@ -173,10 +173,12 @@ final class LibraryBackend: Sendable {
 
     /// Checks that `url` (which may not exist yet) can hold the Google Fonts location: the `addFolder` overlap rules
     /// with no exemption, plus no user or system location at the same place (it is never converted) and no other
-    /// Google Fonts location. `ignoring` is the current Google Fonts location while its folder changes.
-    func validateGoogleFolder(_ url: URL, ignoring: Int64? = nil) throws {
+    /// Google Fonts location. `ignoring` is the current Google Fonts location while its folder changes: it may sit at
+    /// the same place, but a folder inside or containing it is still refused. Returns the folder's volume reference.
+    @discardableResult
+    func validateGoogleFolder(_ url: URL, ignoring: Int64? = nil) throws -> VolumeRef {
         let ref = try Self.prospectiveRef(for: url)
-        let all = try store.locations().filter { !$0.autoIndexed && $0.id != ignoring }
+        let all = try store.locations().filter { !$0.autoIndexed }
         if let existing = all.first(where: { $0.volumeUUID == ref.volumeUUID && $0.relativePath == ref.relativePath }),
            existing.kind != .googleFonts {
             if existing.kind.isReadOnly { throw LibraryError.alreadySystemLocation(existing.displayName) }
@@ -188,9 +190,16 @@ final class LibraryBackend: Sendable {
         if let inner = all.first(where: { Self.contains(ref, $0) }) {
             throw LibraryError.overlapsLocation(new: url.lastPathComponent, existing: inner.displayName, inside: false)
         }
-        if let other = all.first(where: { $0.kind == .googleFonts && !($0.volumeUUID == ref.volumeUUID && $0.relativePath == ref.relativePath) }) {
+        if let other = all.first(where: { $0.kind == .googleFonts && $0.id != ignoring
+                                          && !($0.volumeUUID == ref.volumeUUID && $0.relativePath == ref.relativePath) }) {
             throw LibraryError.googleFolderExists(other.displayName)
         }
+        return ref
+    }
+
+    /// Whether `ref` is the place of `location`.
+    static func isSamePlace(_ ref: VolumeRef, _ location: LocationRecord) -> Bool {
+        ref.volumeUUID == location.volumeUUID && ref.relativePath == location.relativePath
     }
 
     /// Adds the Google Fonts location at the existing folder `url` (see `validateGoogleFolder`). Re-adding the same
