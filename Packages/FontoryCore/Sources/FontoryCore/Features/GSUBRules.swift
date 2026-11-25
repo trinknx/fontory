@@ -82,11 +82,16 @@ public struct GSUBRuleReader: Sendable {
             for l in table.features[i].lookups { lookups.insert(Int(l)) }
         }
         var walk = Walk(budget: budget)
+        var groups: [[GSUBRule]] = []
         for index in lookups.sorted() {
             if walk.exhausted { break }
-            readLookup(index, &walk)
+            walk.emitted = []
+            groups.append(lookupRules(index, depth: 0, &walk))
         }
-        return walk.result
+        var composeSteps = budget
+        let rules = Self.compose(groups, steps: &composeSteps)
+        if composeSteps < 0 { walk.exhausted = true }
+        return walk.result(rules)
     }
 
     private func featureIndices(_ selection: LayoutSelection) -> [Int] {
@@ -103,13 +108,19 @@ public struct GSUBRuleReader: Sendable {
 
     // MARK: Walking
 
-    /// The state of one feature's walk: budget, distinct rules in first-seen order, and failures.
+    /// The state of one feature's walk: budget, failures, and the nested lookups of contextual lookups.
     struct Walk {
         var budget: Int
-        var rules: [GSUBRule] = []
-        var seen = Set<GSUBRule>()
         var failed = false
         var exhausted = false
+        /// Some nested lookup was deeper than `maxNesting` and not read.
+        var truncated = false
+        /// Rules of nested lookups (already flagged contextual), by lookup index; each is parsed once.
+        var nested: [Int: [GSUBRule]] = [:]
+        /// Nested lookups being read, to stop cycles.
+        var active = Set<Int>()
+        /// Nested lookups already emitted for the lookup being read, so one lookup lists them once.
+        var emitted = Set<Int>()
 
         init(budget: Int) { self.budget = budget }
 
@@ -120,57 +131,257 @@ public struct GSUBRuleReader: Sendable {
             return !exhausted
         }
 
-        mutating func add(_ rule: GSUBRule) {
-            if seen.insert(rule).inserted, rules.count < GSUBFeatureRules.listLimit { rules.append(rule) }
-        }
-
-        var result: GSUBFeatureRules {
-            GSUBFeatureRules(rules: rules, totalCount: seen.count, isIncomplete: failed || exhausted,
-                             isUnreadable: seen.isEmpty && failed)
+        /// The final list: distinct rules in first-seen order, capped at `listLimit`.
+        func result(_ all: [GSUBRule]) -> GSUBFeatureRules {
+            var seen = Set<GSUBRule>()
+            var rules: [GSUBRule] = []
+            for r in all where seen.insert(r).inserted && rules.count < GSUBFeatureRules.listLimit { rules.append(r) }
+            return GSUBFeatureRules(rules: rules, totalCount: seen.count, isIncomplete: failed || exhausted || truncated,
+                                    isUnreadable: seen.isEmpty && failed)
         }
     }
+
+    /// Nested lookups deeper than this are not read.
+    static let maxNesting = 8
 
     /// A subtable's rules, or nil when it is malformed (it then contributes nothing).
     private typealias Parsed = [GSUBRule]?
 
-    /// Reads LookupList entry `index` and adds the rules of its subtables to `walk`.
-    private func readLookup(_ index: Int, _ walk: inout Walk) {
+    /// The rules of LookupList entry `index`. An unreadable lookup or subtable sets `failed` and contributes nothing.
+    private func lookupRules(_ index: Int, depth: Int, _ walk: inout Walk) -> [GSUBRule] {
         guard index < lookupCount, walk.spend(1), let offset = gsub.u16(lookupList + 2 + index * 2),
               case let lookup = lookupList + Int(offset), let type = gsub.u16(lookup),
               let count = gsub.u16(lookup + 4), walk.spend(Int(count)) else {
             if !walk.exhausted { walk.failed = true }
-            return
+            return []
         }
+        var out: [GSUBRule] = []
         for i in 0..<Int(count) {
-            guard let sub = gsub.u16(lookup + 6 + i * 2) else { walk.failed = true; return }
-            readSubtable(type: Int(type), at: lookup + Int(sub), &walk, extensionDepth: 0)
-            if walk.exhausted { return }
+            guard let sub = gsub.u16(lookup + 6 + i * 2) else { walk.failed = true; return out }
+            if let rules = readSubtable(type: Int(type), at: lookup + Int(sub), depth: depth, &walk, extensionDepth: 0) {
+                out += rules
+            } else if !walk.exhausted {
+                // A nil caused by the budget running out is incompleteness, not a malformed lookup.
+                walk.failed = true
+            }
+            if walk.exhausted { return out }
         }
+        return out
     }
 
-    /// Dispatches on the lookup type. Types 5, 6 and 8 (contextual, chaining, reverse chaining) are not read yet.
-    private func readSubtable(type: Int, at offset: Int, _ walk: inout Walk, extensionDepth: Int) {
-        let parsed: Parsed
+    /// Dispatches on the lookup type. Contextual types (5, 6) list the rules of the lookups they call; 8 lists
+    /// its own singles. All of these are flagged contextual. Unknown types contribute nothing.
+    private func readSubtable(type: Int, at offset: Int, depth: Int, _ walk: inout Walk, extensionDepth: Int) -> Parsed {
         switch type {
-        case 1: parsed = single(at: offset, &walk)
-        case 2: parsed = sequences(at: offset, kind: .multiple, &walk)
-        case 3: parsed = sequences(at: offset, kind: .alternate, &walk)
-        case 4: parsed = ligatures(at: offset, &walk)
+        case 1: return single(at: offset, &walk)
+        case 2: return sequences(at: offset, kind: .multiple, &walk)
+        case 3: return sequences(at: offset, kind: .alternate, &walk)
+        case 4: return ligatures(at: offset, &walk)
+        case 5, 6:
+            guard let calls = type == 5 ? contextCalls(at: offset, &walk) : chainCalls(at: offset, &walk)
+            else { return nil }
+            var out: [GSUBRule] = []
+            for index in calls {
+                guard let rules = nestedRules(index, depth: depth + 1, &walk) else { return nil }
+                out += rules
+            }
+            return out
         case 7:
             // Extension: format 1, wrapped type, 32-bit offset from this subtable. Nesting is not allowed.
             guard extensionDepth == 0, gsub.u16(offset) == 1, let inner = gsub.u16(offset + 2),
-                  let delta = gsub.u32(offset + 4), delta <= UInt32(Int32.max) else { walk.failed = true; return }
-            readSubtable(type: Int(inner), at: offset + Int(delta), &walk, extensionDepth: 1)
-            return
+                  let delta = gsub.u32(offset + 4), delta <= UInt32(Int32.max) else { return nil }
+            return readSubtable(type: Int(inner), at: offset + Int(delta), depth: depth, &walk, extensionDepth: 1)
+        case 8: return reverseChain(at: offset, &walk)
+        default: return []
+        }
+    }
+
+    /// The rules of a lookup called from a contextual lookup, flagged contextual. Each nested lookup is parsed
+    /// once per feature; listing it again still costs one step per rule. A lookup already being read (a cycle),
+    /// or already listed for the current lookup, gives nothing. nil: the budget ran out.
+    private func nestedRules(_ index: Int, depth: Int, _ walk: inout Walk) -> [GSUBRule]? {
+        guard walk.emitted.insert(index).inserted else { return [] }
+        guard depth <= Self.maxNesting else { walk.truncated = true; return [] }
+        let rules: [GSUBRule]
+        if let cached = walk.nested[index] {
+            rules = cached
+        } else {
+            guard walk.active.insert(index).inserted else { return [] }
+            let outer = walk.emitted
+            walk.emitted = []
+            rules = lookupRules(index, depth: depth, &walk).map {
+                GSUBRule(kind: $0.kind, input: $0.input, outputs: $0.outputs, isContextual: true)
+            }
+            walk.emitted = outer
+            walk.active.remove(index)
+            if walk.exhausted { return nil }
+            walk.nested[index] = rules
+        }
+        return walk.spend(rules.count) ? rules : nil
+    }
+
+    // MARK: Contextual subtables
+
+    /// The lookup indices of `count` SubstLookupRecords (sequence index, lookup index) at `offset`.
+    private func lookupRecords(at offset: Int, count: Int, _ walk: inout Walk) -> [Int]? {
+        guard walk.spend(count) else { return nil }
+        var out: [Int] = []
+        for i in 0..<count {
+            guard gsub.u16(offset + i * 4) != nil, let index = gsub.u16(offset + i * 4 + 2) else { return nil }
+            out.append(Int(index))
+        }
+        return out
+    }
+
+    /// A ClassDef table's header is readable and of format 1 or 2. Classes themselves are not shown.
+    private func classDefIsValid(at offset: Int) -> Bool {
+        guard let format = gsub.u16(offset) else { return false }
+        switch format {
+        case 1: return gsub.u16(offset + 4) != nil
+        case 2: return gsub.u16(offset + 2) != nil
+        default: return false
+        }
+    }
+
+    /// Offsets `count` u16 offsets at `offset` are all readable.
+    private func offsetsReadable(at offset: Int, count: Int, _ walk: inout Walk) -> Bool {
+        guard walk.spend(count) else { return false }
+        return (0..<count).allSatisfy { gsub.u16(offset + $0 * 2) != nil }
+    }
+
+    /// Rule sets (formats 1 and 2 of types 5 and 6): `count` offsets at `offset`, from `base`; null sets are
+    /// skipped. Each rule's lookup indices come from `rule(at:)`.
+    private func ruleSets(base: Int, countAt offset: Int, _ walk: inout Walk,
+                          rule: (Int, inout Walk) -> [Int]?) -> [Int]? {
+        guard let count = gsub.u16(offset), walk.spend(Int(count)) else { return nil }
+        var calls: [Int] = []
+        for i in 0..<Int(count) {
+            guard let setOffset = gsub.u16(offset + 2 + i * 2) else { return nil }
+            if setOffset == 0 { continue }
+            let set = base + Int(setOffset)
+            guard let rules = gsub.u16(set), walk.spend(Int(rules)) else { return nil }
+            for k in 0..<Int(rules) {
+                guard let ruleOffset = gsub.u16(set + 2 + k * 2), let found = rule(set + Int(ruleOffset), &walk)
+                else { return nil }
+                calls += found
+            }
+        }
+        return calls
+    }
+
+    /// Context substitution (5), formats 1–3: the lookups it calls.
+    private func contextCalls(at offset: Int, _ walk: inout Walk) -> [Int]? {
+        // SequenceRule / ClassSequenceRule: glyphCount, seqLookupCount, inputSequence[glyphCount - 1], records.
+        func rule(_ r: Int, _ walk: inout Walk) -> [Int]? {
+            guard let glyphs = gsub.u16(r), glyphs >= 1, let records = gsub.u16(r + 2) else { return nil }
+            return lookupRecords(at: r + 4 + (Int(glyphs) - 1) * 2, count: Int(records), &walk)
+        }
+        switch gsub.u16(offset) {
+        case 1:
+            return ruleSets(base: offset, countAt: offset + 4, &walk, rule: rule)
+        case 2:
+            guard let classDef = gsub.u16(offset + 4), classDef != 0, classDefIsValid(at: offset + Int(classDef))
+            else { return nil }
+            return ruleSets(base: offset, countAt: offset + 6, &walk, rule: rule)
+        case 3:
+            guard let glyphs = gsub.u16(offset + 2), glyphs >= 1, let records = gsub.u16(offset + 4),
+                  offsetsReadable(at: offset + 6, count: Int(glyphs), &walk) else { return nil }
+            return lookupRecords(at: offset + 6 + Int(glyphs) * 2, count: Int(records), &walk)
         default:
-            return
+            return nil
         }
-        if let rules = parsed {
-            for r in rules { walk.add(r) }
-        } else if !walk.exhausted {
-            // A nil caused by the budget running out is incompleteness, not a malformed lookup.
-            walk.failed = true
+    }
+
+    /// Chained context substitution (6), formats 1–3: the lookups it calls.
+    private func chainCalls(at offset: Int, _ walk: inout Walk) -> [Int]? {
+        // ChainedSequenceRule: backtrack count + glyphs, input count + glyphs (count - 1), lookahead count +
+        // glyphs, seqLookupCount, records.
+        func rule(_ r: Int, _ walk: inout Walk) -> [Int]? {
+            guard let back = gsub.u16(r), case let p1 = r + 2 + Int(back) * 2,
+                  let input = gsub.u16(p1), input >= 1, case let p2 = p1 + 2 + (Int(input) - 1) * 2,
+                  let ahead = gsub.u16(p2), case let p3 = p2 + 2 + Int(ahead) * 2,
+                  let records = gsub.u16(p3), walk.spend(Int(back) + Int(input) + Int(ahead)) else { return nil }
+            return lookupRecords(at: p3 + 2, count: Int(records), &walk)
         }
+        switch gsub.u16(offset) {
+        case 1:
+            return ruleSets(base: offset, countAt: offset + 4, &walk, rule: rule)
+        case 2:
+            // Backtrack, input and lookahead ClassDefs; only the input one is required.
+            for (k, required) in [(4, false), (6, true), (8, false)] {
+                guard let classDef = gsub.u16(offset + k) else { return nil }
+                if classDef == 0 { if required { return nil } else { continue } }
+                guard classDefIsValid(at: offset + Int(classDef)) else { return nil }
+            }
+            return ruleSets(base: offset, countAt: offset + 10, &walk, rule: rule)
+        case 3:
+            guard let back = gsub.u16(offset + 2), offsetsReadable(at: offset + 4, count: Int(back), &walk),
+                  case let p1 = offset + 4 + Int(back) * 2, let input = gsub.u16(p1), input >= 1,
+                  offsetsReadable(at: p1 + 2, count: Int(input), &walk), case let p2 = p1 + 2 + Int(input) * 2,
+                  let ahead = gsub.u16(p2), offsetsReadable(at: p2 + 2, count: Int(ahead), &walk),
+                  case let p3 = p2 + 2 + Int(ahead) * 2, let records = gsub.u16(p3) else { return nil }
+            return lookupRecords(at: p3 + 2, count: Int(records), &walk)
+        default:
+            return nil
+        }
+    }
+
+    /// Reverse chaining single substitution (8): coverage glyph → substitute, flagged contextual.
+    private func reverseChain(at offset: Int, _ walk: inout Walk) -> Parsed {
+        guard gsub.u16(offset) == 1, let covOffset = gsub.u16(offset + 2),
+              let back = gsub.u16(offset + 4), offsetsReadable(at: offset + 6, count: Int(back), &walk),
+              case let p1 = offset + 6 + Int(back) * 2, let ahead = gsub.u16(p1),
+              offsetsReadable(at: p1 + 2, count: Int(ahead), &walk), case let p2 = p1 + 2 + Int(ahead) * 2,
+              let count = gsub.u16(p2), let cov = coverage(at: offset + Int(covOffset), &walk) else { return nil }
+        var out: [GSUBRule] = []
+        for (g, index) in cov {
+            guard index < Int(count), let sub = gsub.u16(p2 + 2 + index * 2) else { return nil }
+            out.append(GSUBRule(kind: .single, input: [g], outputs: [[sub]], isContextual: true))
+        }
+        return out
+    }
+
+    // MARK: Composition
+
+    /// Composes chains inside one feature. `groups` are the rules of each lookup, in lookup order. Each output of
+    /// a non-contextual single or alternate rule is passed through the non-contextual singles of later lookups,
+    /// in order; a later single that was composed this way (its input was the earlier rule's output) is dropped.
+    /// Contextual rules are never composed or dropped. Each step through a later lookup costs one of `steps`;
+    /// when they run out, the remaining outputs are left as they are.
+    static func compose(_ groups: [[GSUBRule]], steps: inout Int) -> [GSUBRule] {
+        // Per glyph, the later lookups that substitute it singly: (group, output), in group order. Within one
+        // lookup the first subtable covering a glyph wins.
+        var singles: [CGGlyph: [(group: Int, output: CGGlyph)]] = [:]
+        for (k, group) in groups.enumerated() {
+            var inGroup = Set<CGGlyph>()
+            for r in group where !r.isContextual && r.kind == .single && r.outputs.count == 1 && r.outputs[0].count == 1 {
+                if inGroup.insert(r.input[0]).inserted { singles[r.input[0], default: []].append((k, r.outputs[0][0])) }
+            }
+        }
+        if singles.isEmpty { return groups.flatMap { $0 } }
+
+        var dropped = Set<Int>()  // group << 16 | input glyph
+        var out: [GSUBRule] = []
+        for (k, group) in groups.enumerated() {
+            for r in group {
+                guard !r.isContextual, r.kind == .single || r.kind == .alternate else { out.append(r); continue }
+                if r.kind == .single, dropped.contains(k << 16 | Int(r.input[0])) { continue }
+                var outputs = r.outputs
+                for o in outputs.indices where outputs[o].count == 1 {
+                    var glyph = outputs[o][0], after = k
+                    while steps > 0, let next = singles[glyph]?.first(where: { $0.group > after }) {
+                        steps -= 1
+                        dropped.insert(next.group << 16 | Int(glyph))
+                        glyph = next.output
+                        after = next.group
+                    }
+                    if steps <= 0, singles[glyph]?.contains(where: { $0.group > after }) == true { steps = -1 }
+                    outputs[o] = [glyph]
+                }
+                out.append(GSUBRule(kind: r.kind, input: r.input, outputs: outputs))
+            }
+        }
+        return out
     }
 
     /// The glyphs of a Coverage table with their coverage indices, in coverage order.

@@ -31,6 +31,35 @@ private func ligatures(first: Int, _ ligs: [(glyph: Int, rest: [Int])]) -> [UInt
 }
 private func extensionOf(_ type: Int, _ inner: [UInt8]) -> [UInt8] { be([1, type, 0, 8]) + inner }
 
+/// Chained context (6) format 3; `calls` are the nested lookups, each applied at sequence index 0.
+private func chain3(backtrack: [[Int]] = [], input: [[Int]], lookahead: [[Int]] = [], calls: [Int]) -> [UInt8] {
+    let covs = (backtrack + input + lookahead).map(cov1)
+    var offsets: [Int] = []
+    var pos = 2 * (5 + covs.count + 2 * calls.count)
+    for c in covs { offsets.append(pos); pos += c.count }
+    let b = backtrack.count, i = input.count
+    var head = [3, b] + offsets[0..<b] + [i] + offsets[b..<b + i] + [lookahead.count] + offsets[(b + i)...]
+    head += [calls.count] + calls.flatMap { [0, $0] }
+    return be(head) + covs.flatMap { $0 }
+}
+/// Context (5) format 1: one rule set for `glyph`, one single-glyph rule calling `call`.
+private func context1(_ glyph: Int, call: Int) -> [UInt8] {
+    let c = cov1([glyph])
+    return be([1, 8, 1, 8 + c.count]) + c + be([1, 4]) + be([1, 1, 0, call])
+}
+/// Context (5) format 2: ClassDef format 2 puts `glyph` in class 1; class 1's rule calls `call`.
+private func context2(_ glyph: Int, call: Int) -> [UInt8] {
+    let c = cov1([glyph])
+    let classDef = be([2, 1, glyph, glyph, 1])
+    let set = 12 + c.count + classDef.count
+    return be([2, 12, 12 + c.count, 2, 0, set]) + c + classDef + be([1, 4]) + be([1, 1, 0, call])
+}
+/// Reverse chaining single (8) with no backtrack or lookahead.
+private func reverse(_ glyphs: [Int], _ subs: [Int]) -> [UInt8] {
+    be([1, 10 + 2 * subs.count, 0, 0, subs.count] + subs) + cov1(glyphs)
+}
+private let filler = lookup(1, [single1(cov1([1]), delta: 1)])
+
 /// One lookup; a nil subtable list makes the lookup's offset point past the table.
 private func lookup(_ type: Int, _ subs: [[UInt8]]) -> [UInt8] {
     var head = be([type, 0, subs.count])
@@ -151,6 +180,75 @@ private func standard(extra: [[UInt8]?] = []) -> GSUBRuleReader? {
         let r = try #require(reader([("ss01", [0])], [lookup(1, [single1(cov2(0, 2499), delta: 1)])]))
         let got = r.rules(for: "ss01", selection: .all, budget: 100)
         #expect(got.isIncomplete && !got.isUnreadable)
+    }
+
+    // MARK: Contextual lookups and composition
+
+    @Test func chainedContextFormat3CallsNestedLookup() throws {
+        let lookups = Array(repeating: filler, count: 5) + [lookup(6, [chain3(input: [[10]], calls: [6])]),
+                                                           lookup(1, [single2([10], [80])])]
+        let got = try #require(reader([("calt", [5])], lookups)).rules(for: "calt", selection: .all)
+        #expect(got.rules == [GSUBRule(kind: .single, input: [10], outputs: [[80]], isContextual: true)])
+        #expect(!got.isIncomplete)
+    }
+
+    @Test func contextFormat1And2() throws {
+        let r = try #require(reader([("calt", [0, 1])], [
+            lookup(5, [context1(10, call: 2)]), lookup(5, [context2(11, call: 3)]),
+            lookup(1, [single2([10], [80])]), lookup(1, [single2([11], [81])]),
+        ]))
+        let got = r.rules(for: "calt", selection: .all)
+        #expect(got.rules == [
+            GSUBRule(kind: .single, input: [10], outputs: [[80]], isContextual: true),
+            GSUBRule(kind: .single, input: [11], outputs: [[81]], isContextual: true),
+        ])
+        #expect(!got.isIncomplete)
+    }
+
+    @Test func reverseChaining() throws {
+        let got = try #require(reader([("rclt", [0])], [lookup(8, [reverse([11, 12], [90, 91])])]))
+            .rules(for: "rclt", selection: .all)
+        #expect(got.rules == [
+            GSUBRule(kind: .single, input: [11], outputs: [[90]], isContextual: true),
+            GSUBRule(kind: .single, input: [12], outputs: [[91]], isContextual: true),
+        ])
+    }
+
+    @Test(.timeLimit(.minutes(1))) func nestedLookupCycleTerminates() throws {
+        let r = try #require(reader([("calt", [0])], [
+            lookup(6, [chain3(input: [[10]], calls: [1])]), lookup(6, [chain3(input: [[10]], calls: [0])]),
+        ]))
+        let got = r.rules(for: "calt", selection: .all)
+        #expect(got.rules.allSatisfy { $0.isContextual })
+    }
+
+    @Test(.timeLimit(.minutes(1))) func budgetStopsLargeFeature() throws {
+        let callers = Array(repeating: lookup(6, [chain3(input: [[1]], calls: [200])]), count: 200)
+        let r = try #require(reader([("calt", Array(0..<200))], callers + [lookup(1, [single1(cov2(0, 1999), delta: 1)])]))
+        let got = r.rules(for: "calt", selection: .all, budget: 10_000)
+        #expect(got.isIncomplete)
+        #expect(got.rules.count > 0)
+    }
+
+    private func chains() -> GSUBRuleReader? {
+        reader([("ss03", [20, 21]), ("ss04", [22, 23])], Array(repeating: filler, count: 20) + [
+            lookup(1, [single2([30], [31])]), lookup(1, [single2([31, 33], [32, 34])]),
+            lookup(3, [sequence(40, [41, 42])]), lookup(1, [single2([42], [43])]),
+        ])
+    }
+
+    @Test func chainsAreComposed() throws {
+        let got = try #require(chains()).rules(for: "ss03", selection: .all)
+        #expect(got.rules == [
+            GSUBRule(kind: .single, input: [30], outputs: [[32]]),
+            GSUBRule(kind: .single, input: [33], outputs: [[34]]),
+        ])
+        #expect(got.totalCount == 2)
+    }
+
+    @Test func alternatesAreComposedPerOutput() throws {
+        let got = try #require(chains()).rules(for: "ss04", selection: .all)
+        #expect(got.rules == [GSUBRule(kind: .alternate, input: [40], outputs: [[41], [43]])])
     }
 
     @Test func realFontHasRules() throws {
