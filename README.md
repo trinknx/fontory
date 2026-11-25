@@ -41,7 +41,7 @@ It was written for a designer with about 20,000 fonts on an external drive, afte
 - **Your files stay put.** Fontory never copies or moves fonts into a managed folder. You add folders or files, and they stay where they are.
 - **Built for external drives.** Locations are identified by volume UUID and relative path, not by mount path. Unplug the drive and its fonts go offline but keep their tags and notes. Plug it back in, even at a different mount point like `/Volumes/Fonts 1`, and the fonts you had on are activated again.
 - **Hot activation.** Fonts are registered for your login session through CoreText, so other apps update their font menus without restarting.
-- **Native and private.** Swift, SwiftUI and AppKit, with no third-party dependencies, no account, no network access and no telemetry.
+- **Native and private.** Swift, SwiftUI and AppKit, with no third-party dependencies, no account and no telemetry. It makes no network requests unless you turn on Google Fonts.
 
 ## Features
 
@@ -91,6 +91,10 @@ It was written for a designer with about 20,000 fonts on an external drive, afte
 - Permanent activations are restored at launch, at login and when a drive is plugged back in. Temporary activations end when Fontory quits.
 - Fonts that macOS or Font Book already has active are shown as active and read-only.
 - A menu bar item and launch at login keep activations alive after the window closes.
+
+### Google Fonts
+
+- **Google Fonts:** download the whole Google Fonts library to a folder you choose, browse it with category, Vietnamese and popularity filters, and activate only what you use.
 
 ### Tools
 
@@ -171,7 +175,7 @@ Fontory reads your font files and never changes them. Everything it records live
 | Layout templates (editable files) | `~/Library/Application Support/Fontory/Templates/` |
 | Preferences | the `local.fontory.app` defaults domain |
 
-Fontory makes no network requests.
+Fontory makes no network requests, except when you turn on Google Fonts: the catalogue and font files then come directly from Google (fonts.google.com and fonts.gstatic.com), and only after you agree in the consent sheet.
 
 To remove Fontory completely, quit it, delete the app, then delete `~/Library/Application Support/Fontory`.
 
@@ -292,7 +296,7 @@ It prints `SMOKE PASSED` when every check passes.
 - Developer ID signing and notarization, so the `xattr` step is no longer needed.
 - Intel support.
 
-Out of scope: Google Fonts and Adobe Fonts sync, cloud sync of tags (use backups), and the Mac App Store, because Fontory needs unsandboxed access to your font folders.
+Out of scope: Adobe Fonts sync, cloud sync of tags (use backups), and the Mac App Store, because Fontory needs unsandboxed access to your font folders.
 
 ## Contributing
 
