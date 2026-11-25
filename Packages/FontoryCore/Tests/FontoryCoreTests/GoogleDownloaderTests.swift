@@ -10,6 +10,7 @@ final class FakeGoogleTransport: GoogleTransport, @unchecked Sendable {
     private var requested: [URL] = []
     private var inFlight = 0
     private var maxInFlightValue = 0
+    private var urlDelays: [URL: Duration] = [:]
     /// Delay applied to every font (gstatic) request.
     var fontDelay: Duration = .zero
     /// Called (outside the lock) before each request is answered.
@@ -18,6 +19,8 @@ final class FakeGoogleTransport: GoogleTransport, @unchecked Sendable {
     func set(_ url: URL, _ data: Data) { lock.withLock { responses[url] = data } }
     func remove(_ url: URL) { lock.withLock { _ = responses.removeValue(forKey: url) } }
     func fail(_ url: URL, times: Int) { lock.withLock { failuresLeft[url] = times } }
+    /// Delay for one URL, overriding `fontDelay`.
+    func delay(_ url: URL, _ d: Duration?) { lock.withLock { urlDelays[url] = d } }
     var requests: [URL] { lock.withLock { requested } }
     var maxInFlight: Int { lock.withLock { maxInFlightValue } }
 
@@ -29,7 +32,8 @@ final class FakeGoogleTransport: GoogleTransport, @unchecked Sendable {
         }
         defer { if isFont { lock.withLock { inFlight -= 1 } } }
         onRequest?(url)
-        if isFont, fontDelay > .zero { try await Task.sleep(for: fontDelay) }
+        let wait = lock.withLock { urlDelays[url] } ?? (isFont ? fontDelay : .zero)
+        if wait > .zero { try await Task.sleep(for: wait) }
         return try lock.withLock {
             if let n = failuresLeft[url], n > 0 {
                 failuresLeft[url] = n - 1
@@ -288,6 +292,97 @@ final class EventLog: @unchecked Sendable {
         #expect(log.finished)
     }
 
+    /// Runs `dl` in a task that the transport hook can cancel through `holder`.
+    private func runCancellable(_ dl: GoogleFontsDownloader, _ holder: TaskHolder, _ log: EventLog) async {
+        let task = Task { await dl.run { log.append($0) } }
+        holder.task = task
+        await task.value
+    }
+
+    private func expectPausedCleanly(_ family: String, _ store: FontStore, _ root: URL, _ log: EventLog) throws {
+        let s = try status(store)
+        #expect(s[family]?.status == 0)
+        #expect(s[family]?.error == nil)
+        #expect(!log.done.contains(family) && log.failed.isEmpty && !log.finished && !log.rootUnavailable)
+        #expect(!exists(root.appendingPathComponent(family)))
+        #expect(!exists(tmp(root).appendingPathComponent(family)))
+    }
+
+    @Test func cancellationDuringFontRequestsCleansStaging() async throws {
+        let root = try makeRoot(); defer { cleanup(root) }
+        let store = try makeStore()
+        let t = FakeGoogleTransport()
+        t.set(GoogleCatalog.catalogURL, catalog([("A", "1"), ("B", "1"), ("C", "1")]))
+        serve(t, "A", fonts: ["A.ttf": "a"])
+        serve(t, "B", fonts: ["B-1.ttf": "1", "B-2.ttf": "2", "B-3.ttf": "3"])
+        // B's requests would hang for 10 minutes unless cancellation interrupts them.
+        let bFonts = ["B-1.ttf", "B-2.ttf", "B-3.ttf"].map { fontURL("B", "static/\($0)") }
+        for u in bFonts { t.delay(u, .seconds(600)) }
+        serve(t, "C", fonts: ["C.ttf": "c"])
+        let holder = TaskHolder()
+        let trigger = fontURL("B", "static/B-2.ttf")
+        let staged = LockedFlag()
+        let bStaging = tmp(root).appendingPathComponent("B")
+        t.onRequest = { url in
+            guard url == trigger else { return }
+            // The staging folder (with OFL.txt) exists while B's fonts are in flight.
+            staged.set(FileManager.default.fileExists(atPath: bStaging.appendingPathComponent("OFL.txt").path))
+            holder.task?.cancel()
+        }
+        let dl = downloader(store, root, t)
+        _ = try await dl.refreshCatalog()
+        let log = EventLog()
+        let start = ContinuousClock.now
+        await runCancellable(dl, holder, log)
+
+        #expect(staged.value)
+        #expect(log.done == ["A"])
+        try expectPausedCleanly("B", store, root, log)
+        #expect(try status(store)["C"]?.status == 0)
+        #expect(!t.requests.contains(GoogleCatalog.manifestURL(for: "C")))
+        // Generous bound: the suite runs in parallel; only an uninterrupted 600 s request would exceed it.
+        #expect(ContinuousClock.now - start < .seconds(300))
+
+        // Resume finishes B and C.
+        t.onRequest = nil
+        for u in bFonts { t.delay(u, nil) }
+        let log2 = EventLog()
+        await dl.run { log2.append($0) }
+        #expect(log2.done == ["B", "C"] && log2.finished)
+        #expect(contents(root.appendingPathComponent("B/B-3.ttf")) == "3")
+    }
+
+    @Test func cancellationDuringManifestBackoff() async throws {
+        let root = try makeRoot(); defer { cleanup(root) }
+        let store = try makeStore()
+        let t = FakeGoogleTransport()
+        t.set(GoogleCatalog.catalogURL, catalog([("A", "1"), ("B", "1")]))
+        serve(t, "A", fonts: ["A.ttf": "a"])
+        serve(t, "B", fonts: ["B.ttf": "b"])
+        let manifestB = GoogleCatalog.manifestURL(for: "B")
+        t.fail(manifestB, times: 3)
+        let holder = TaskHolder()
+        t.onRequest = { url in
+            guard url == manifestB else { return }
+            // Cancel shortly after the first attempt fails, while the 600 s backoff sleep is running.
+            Task.detached {
+                try? await Task.sleep(for: .milliseconds(100))
+                holder.task?.cancel()
+            }
+        }
+        let dl = GoogleFontsDownloader(store: store, root: root, transport: t,
+                                       backoff: [.seconds(600), .seconds(600), .seconds(600)], minimumFamilies: 1)
+        _ = try await dl.refreshCatalog()
+        let log = EventLog()
+        let start = ContinuousClock.now
+        await runCancellable(dl, holder, log)
+
+        #expect(ContinuousClock.now - start < .seconds(300))
+        #expect(t.requests.filter { $0 == manifestB }.count == 1)
+        #expect(log.done == ["A"])
+        try expectPausedCleanly("B", store, root, log)
+    }
+
     @Test func cancellationStopsEarly() async throws {
         let root = try makeRoot(); defer { cleanup(root) }
         let store = try makeStore()
@@ -450,6 +545,26 @@ final class EventLog: @unchecked Sendable {
         #expect(!t.requests.contains(second))
         #expect(Set(try FileManager.default.contentsOfDirectory(atPath: root.path)) == ["A"])
     }
+}
+
+@Suite struct GoogleTransportTests {
+    @Test func redirectsOnlyToGoogleFontsHostsOverHTTPS() {
+        let allowed = ["https://fonts.google.com/download/list?family=X", "https://fonts.gstatic.com/s/x/a.ttf",
+                       "https://FONTS.GSTATIC.COM/s/x/a.ttf"]
+        let refused = ["http://fonts.gstatic.com/s/x/a.ttf", "http://fonts.google.com/metadata/fonts",
+                       "https://evil.example/a.ttf", "https://fonts.gstatic.com.evil.example/a.ttf",
+                       "https://evilfonts.gstatic.com/a.ttf", "https://google.com/", "ftp://fonts.gstatic.com/a.ttf",
+                       "file:///etc/passwd"]
+        for s in allowed { #expect(URLSessionGoogleTransport.isAllowedRedirect(URL(string: s)!), "\(s)") }
+        for s in refused { #expect(!URLSessionGoogleTransport.isAllowedRedirect(URL(string: s)!), "\(s)") }
+    }
+}
+
+final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func set(_ v: Bool) { lock.withLock { flag = v } }
+    var value: Bool { lock.withLock { flag } }
 }
 
 final class TaskHolder: @unchecked Sendable {
