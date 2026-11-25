@@ -1,9 +1,9 @@
 import Foundation
 
 public enum Schema {
-    public static let currentVersion: Int32 = 5
+    public static let currentVersion: Int32 = 6
 
-    private static let steps: [(version: Int32, sql: String)] = [(1, v1), (2, v2), (3, v3), (4, v4), (5, v5)]
+    private static let steps: [(version: Int32, sql: String)] = [(1, v1), (2, v2), (3, v3), (4, v4), (5, v5), (6, v6)]
 
     /// Runs each step whose version is greater than the database's `user_version`.
     public static func migrate(_ db: Database) throws {
@@ -18,6 +18,15 @@ public enum Schema {
             }
         }
     }
+
+    /// Google Fonts catalog cache: one row per family. `status`: 0 pending, 1 done, 2 failed. `subsets` is stored as
+    /// `",latin,vietnamese,"` so a subset matches exactly with `LIKE '%,latin,%'`.
+    static let v6 = """
+    CREATE TABLE google_families(family TEXT PRIMARY KEY, folder TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      category TEXT NOT NULL, subsets TEXT NOT NULL, popularity INTEGER NOT NULL, designers TEXT NOT NULL,
+      last_modified TEXT NOT NULL, downloaded_modified TEXT, status INTEGER NOT NULL DEFAULT 0,
+      error TEXT, withdrawn INTEGER NOT NULL DEFAULT 0);
+    """
 
     /// Wave 3B: the search index also covers `custom_family`, so a renamed family is found by its new name.
     /// Recreates `faces_fts` and its triggers (the update trigger also fires on `custom_family`) and rebuilds

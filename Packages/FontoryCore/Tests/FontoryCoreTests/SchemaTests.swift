@@ -21,6 +21,27 @@ import Testing
         }
     }
 
+    @Test func v6CreatesGoogleFamilies() throws {
+        let db = try Database(path: ":memory:")
+        try Schema.migrate(db)
+        let v = try db.prepare("PRAGMA user_version")
+        #expect(try v.step())
+        #expect(v.int64(0) == 6)
+        v.reset()
+        func insert(_ family: String, _ folder: String) throws {
+            try db.execute("""
+            INSERT INTO google_families(family, folder, category, subsets, popularity, designers, last_modified)
+            VALUES('\(family)', '\(folder)', 'sans-serif', ',latin,', 1, 'D', '2024-01-01')
+            """)
+        }
+        try insert("Lato", "Lato")
+        let row = try db.prepare("SELECT status, withdrawn, downloaded_modified, error FROM google_families")
+        #expect(try row.step())
+        #expect(row.int64(0) == 0 && row.int64(1) == 0)
+        row.reset()
+        #expect(throws: (any Error).self) { try insert("Lato2", "lato") }
+    }
+
     @Test func ftsTracksFaces() throws {
         let db = try Database(path: ":memory:")
         try Schema.migrate(db)

@@ -2,11 +2,15 @@ import Foundation
 
 /// `system`: under /System (ships with macOS). `userInstalled`: active outside Fontory, e.g. /Library/Fonts,
 /// ~/Library/Fonts, or a folder indexed only because a font in it is active. Both are read-only in Fontory.
+/// `googleFonts`: the folder Fontory downloads Google Fonts into; toggleable like a folder.
 public enum LocationKind: Int, Sendable {
-    case folder = 0, fileSet = 1, system = 2, userInstalled = 3
+    case folder = 0, fileSet = 1, system = 2, userInstalled = 3, googleFonts = 4
 
     /// Fontory never changes the activation of fonts in read-only locations.
     public var isReadOnly: Bool { self == .system || self == .userInstalled }
+
+    /// Fontory can activate and deactivate fonts in these locations.
+    public var isToggleable: Bool { self == .folder || self == .fileSet || self == .googleFonts }
 }
 public enum ActivationState: Int, Sendable, Hashable { case off = 0, on = 1, temporary = 2 }
 public enum OutlineType: String, Sendable { case truetype, cff, cff2, bitmap, unknown }
@@ -215,7 +219,7 @@ extension ActivationStatus {
         switch kind {
         case .system: self = .system
         case .userInstalled: self = externalActive ? .external : .disabledOutside
-        case .folder, .fileSet:
+        case .folder, .fileSet, .googleFonts:
             if activation != .off { self = .on } else { self = externalActive ? .external : .off }
         }
     }

@@ -46,7 +46,9 @@ extension LibraryQuery {
 
     /// Active on the Mac: system, registered outside Fontory, or activated by Fontory. Shared by the `.activated`
     /// scope and the smart-tag "Activation" condition.
-    static let activatedClause = "(locations.kind = 2 OR files.external_active != 0 OR locations.kind IN (0, 1) AND faces.activation != 0)"
+    /// SQL list of the `LocationKind` raw values whose activation Fontory toggles (see `LocationKind.isToggleable`).
+    static let toggleableKindsSQL = "0, 1, 4"
+    static let activatedClause = "(locations.kind = 2 OR files.external_active != 0 OR locations.kind IN (\(toggleableKindsSQL)) AND faces.activation != 0)"
 
     /// The single place a smart-tag pick is compiled.
     static func compileSmartRule(_ rule: SmartRule) -> (clause: String, bindings: [SQLValue]) {
@@ -100,9 +102,9 @@ extension LibraryQuery {
         // Kind 3 faces count as active only while registered (external_active), like library files.
         // Keep in step with `LibraryCounts.init(groups:includeSystem:)` and `FaceRow.activationStatus`.
         case .system: clauses.append("locations.kind = 2")
-        case .user: clauses.append("files.external_active != 0 AND (locations.kind = 3 OR locations.kind IN (0, 1) AND faces.activation = 0)")
+        case .user: clauses.append("files.external_active != 0 AND (locations.kind = 3 OR locations.kind IN (\(Self.toggleableKindsSQL)) AND faces.activation = 0)")
         case .activated: clauses.append(Self.activatedClause)
-        case .deactivated: clauses.append("faces.activation = 0 AND files.external_active = 0 AND locations.kind IN (0, 1)")
+        case .deactivated: clauses.append("faces.activation = 0 AND files.external_active = 0 AND locations.kind IN (\(Self.toggleableKindsSQL))")
         case .offline: clauses.append("locations.online = 0")
         case .recentImport: clauses.append("files.import_batch = (SELECT MAX(import_batch) FROM files)")
         case .location(let id, let subfolder):

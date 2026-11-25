@@ -172,7 +172,7 @@ import Testing
         #expect(try match("zebra*").isEmpty)
         #expect(try match("quokka*") == [7])
         let v = try db.prepare("PRAGMA user_version")
-        #expect(try v.step() && v.int64(0) == 5)
+        #expect(try v.step() && v.int64(0) == Int64(Schema.currentVersion))
         v.reset()
     }
 }

@@ -234,6 +234,7 @@ private struct LocationRow: View {
         switch location.kind {
         case .folder: return "folder"
         case .fileSet: return "doc.on.doc"
+        case .googleFonts: return "textformat"
         case .system: return "lock"
         case .userInstalled: return "person.crop.square"
         }

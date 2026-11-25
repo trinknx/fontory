@@ -23,7 +23,7 @@ public struct LibraryCounts: Sendable, Equatable {
             // The System view ignores "show system fonts" (as `LibraryQuery` does).
             if isSystem { system += g.count }
             if !includeSystem && isSystem { continue }
-            let toggleable = g.kind == .folder || g.kind == .fileSet
+            let toggleable = g.kind.isToggleable
             all += g.count
             if g.externalActive && (g.kind == .userInstalled || toggleable && g.activation == .off) { user += g.count }
             if isSystem || g.externalActive || toggleable && g.activation != .off { activated += g.count }

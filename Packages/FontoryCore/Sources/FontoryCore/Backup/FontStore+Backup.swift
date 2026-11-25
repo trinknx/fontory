@@ -276,7 +276,7 @@ extension FontStore {
                     rep.reset()
                 }
 
-                let userKinds: Set<Int> = [LocationKind.folder.rawValue, LocationKind.fileSet.rawValue]
+                let userKinds: Set<Int> = [LocationKind.folder.rawValue, LocationKind.fileSet.rawValue, LocationKind.googleFonts.rawValue]
                 return RestoreResult(
                     tagCount: tagOrder.count,
                     restoredFaceCount: Set(matched.values).count,

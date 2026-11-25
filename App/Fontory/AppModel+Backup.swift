@@ -311,7 +311,8 @@ extension AppModel {
         async -> (folders: [Int64], fileSets: [(LocationRecord, [URL])]) {
         let mapped = await runBackground { try backend.store.locationMap(for: manifest) } ?? [:]
         let missing = manifest.locations.filter {
-            mapped[$0.index] == nil && ($0.kind == LocationKind.folder.rawValue || $0.kind == LocationKind.fileSet.rawValue)
+            mapped[$0.index] == nil && ($0.kind == LocationKind.folder.rawValue || $0.kind == LocationKind.fileSet.rawValue
+                || $0.kind == LocationKind.googleFonts.rawValue)
         }
         var folders: [Int64] = []
         var fileSets: [(LocationRecord, [URL])] = []
@@ -319,6 +320,12 @@ extension AppModel {
             let readded = await runBackground { () -> ReAdded? in
                 guard let dir = AppModel.reachableFolder(loc) else { return nil }
                 if loc.kind == LocationKind.folder.rawValue { return .folder(try backend.addFolder(dir).id) }
+                if loc.kind == LocationKind.googleFonts.rawValue {
+                    // The catalog owns this location (it gets its own sidebar row), so it is restored as-is, not via the overlap checks.
+                    let ref = try VolumeIdentity.ref(for: dir)
+                    return .folder(try backend.store.upsertLocation(kind: .googleFonts, volumeUUID: ref.volumeUUID, relativePath: ref.relativePath,
+                                                                    displayName: dir.lastPathComponent, lastKnownPath: dir.standardizedFileURL.path).id)
+                }
                 let urls = (loc.members ?? []).map { dir.appendingPathComponent($0) }
                     .filter { FileManager.default.fileExists(atPath: $0.path) }
                 guard !urls.isEmpty, case .fileSet(let record) = try backend.fileTarget(for: dir) else { return nil }

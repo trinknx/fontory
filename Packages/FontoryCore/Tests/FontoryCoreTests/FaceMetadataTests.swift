@@ -44,7 +44,7 @@ import Testing
         #expect(try v.step())
         #expect(v.int64(0) == Int64(Schema.currentVersion))
         v.reset()
-        #expect(Schema.currentVersion == 5)
+        #expect(Schema.currentVersion == 6)
 
         let faceCols = try columns(db, "faces")
         #expect(faceCols["features"] == "''")

@@ -1235,7 +1235,7 @@ final class AppModel {
     // MARK: Locations
 
     /// The user's folders and file sets.
-    var userLocations: [LocationRecord] { locations.filter { !$0.kind.isReadOnly && !$0.autoIndexed } }
+    var userLocations: [LocationRecord] { locations.filter { $0.kind != .googleFonts && !$0.kind.isReadOnly && !$0.autoIndexed } }
     /// The standard font folders (System, Computer, User). Auto-indexed folders are not listed: their fonts are in
     /// the System and User views.
     /// Every location but the auto-indexed ones (Settings).
@@ -1454,7 +1454,7 @@ final class AppModel {
     // MARK: Folder watching
 
     func updateWatchers() {
-        let watched = locations.filter { $0.online && !$0.autoIndexed && ($0.kind == .folder || $0.kind == .userInstalled) }
+        let watched = locations.filter { $0.online && !$0.autoIndexed && ($0.kind == .folder || $0.kind == .googleFonts || $0.kind == .userInstalled) }
         let wanted = Dictionary(watched.map { ($0.id, $0.lastKnownPath) },
                                 uniquingKeysWith: { a, _ in a })
         for (id, watcher) in watchers where wanted[id] != watcher.path {

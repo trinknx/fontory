@@ -132,6 +132,7 @@ private struct LocationSettings: View {
         case .userInstalled: "person.crop.square"
         case .fileSet: "doc.on.doc"
         case .folder: "folder"
+        case .googleFonts: "textformat"
         }
     }
 
