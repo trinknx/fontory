@@ -5,3 +5,6 @@ Fontory.xcodeproj/
 .swiftpm/
 .superpowers/
 dist/
+
+# Remotion video project (kept on the video/intro-promo branch only)
+video/

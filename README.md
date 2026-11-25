@@ -6,7 +6,7 @@ Fontory manages the fonts you already have, wherever they live, including on an 
 
 It was written for a designer with about 20,000 fonts on an external drive, after other font managers became too slow at that size.
 
-![Fontory's main window: a grid of font previews with the library sidebar](docs/screenshots/main.png)
+[![Watch the Fontory intro video (44 seconds)](docs/media/fontory-intro-poster.jpg)](docs/media/fontory-intro.mp4)
 
 [![Release](https://img.shields.io/github/v/release/trinknx/fontory)](https://github.com/trinknx/fontory/releases/latest)
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue)
