@@ -328,6 +328,12 @@ enum SettingsKey {
     static let duplicateLocationRank = "duplicates.locationRank"
     /// Settings → Duplicates: "Skip duplicates on import" (default off).
     static let skipDuplicatesOnImport = "duplicates.skipOnImport"
+    /// Google Fonts: the user consented to the download (Settings → "Stop Syncing" clears it).
+    static let googleFontsEnabled = "googleFonts.enabled"
+    /// Google Fonts: the last successful catalogue check (Date); launch checks at most once per 24 h.
+    static let googleFontsLastCheck = "googleFonts.lastCheck"
+    /// Google Fonts: downloads paused by the user.
+    static let googleFontsPaused = "googleFonts.paused"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -558,6 +564,8 @@ final class AppModel {
     // MARK: Locations
 
     private(set) var locations: [LocationRecord] = []
+    /// Google Fonts download and sync, created once the library is open (the smoke run sets its own).
+    var google: GoogleFontsController?
     var scanProgress: [Int64: ScanProgress] = [:]
     /// Per location: faces with activation, tags or notes that scans removed because their files are gone (or that
     /// Duplicates removed from the library or moved to the Trash), accumulated
@@ -916,6 +924,7 @@ final class AppModel {
             }.value
             self.backend = backend
             self.presetStore = presetStore
+            google = GoogleFontsController(model: self, transport: URLSessionGoogleTransport(), defaults: .standard)
             presets = await Task.detached { presetStore.load() }.value
         } catch {
             alert = AlertItem(title: "The font library could not be opened", message: error.localizedDescription)
@@ -955,6 +964,8 @@ final class AppModel {
         }
         // 7. Watch online folders.
         updateWatchers()
+        // 7b. Google Fonts: the daily update check and any pending downloads, behind the launch.
+        if let google { Task { await google.launch() } }
         refreshCounts()
         scheduleRefresh()
         await loadQuickCollection()
@@ -975,6 +986,7 @@ final class AppModel {
         await stopDuplicateSearch()
         // Activation shutdown, then the backup (at most `quitBackupBudget`) with the flushed notes. All of this runs
         // inside the app's overall 5 s quit budget (`FontoryApp`), shared with the layouts flush above.
+        google?.stopForQuit()
         await backend?.activation.prepareForQuit()
         await writeAutomaticBackup(within: Self.quitBackupBudget)
     }
@@ -1412,15 +1424,17 @@ final class AppModel {
         invalidateRows()
     }
 
-    func removeLocation(_ id: Int64) {
-        guard let backend else { return }
+    /// Returns the task that finishes the removal (awaited by the Google Fonts controller).
+    @discardableResult
+    func removeLocation(_ id: Int64) -> Task<Void, Never> {
+        guard let backend else { return Task {} }
         scanTasks[id]?.cancel()
         scanTasks[id] = nil
         watchers.removeValue(forKey: id)?.stop()
         scanProgress[id] = nil
         removalNotices[id] = nil
         forgetPreviewFonts(of: id)
-        Task {
+        return Task {
             await backend.scanner.cancel(locationID: id)
             await backend.activation.volumeUnmounted(locationIDs: [id])
             _ = await runBackground({ try backend.store.deleteLocation(id) }, failureTitle: "The location could not be removed")
@@ -1502,6 +1516,7 @@ final class AppModel {
             let report = await backend.activation.volumeMounted(locationIDs: ids)
             present(report, state: .on, context: "Re-activating fonts on the mounted volume")
             for id in ids where location(id)?.kind != .system { rescan(id) }
+            google?.volumeMounted(ids)
             updateWatchers()
             invalidateRows()
             refreshCounts()
@@ -1516,7 +1531,8 @@ final class AppModel {
             let ids = locations.filter { $0.online && ($0.lastKnownPath == root || $0.lastKnownPath.hasPrefix(root + "/")) }.map(\.id)
             guard !ids.isEmpty else { return }
             // First, before any await: nothing of ours may keep a file on the volume open, or the eject fails
-            // with "disk in use". Pending renders are dropped and parsed fonts released.
+            // with "disk in use". Pending renders are dropped and parsed fonts released, Google downloads stopped.
+            google?.volumeUnmounted(ids)
             previewPipeline.cancelAll()
             glyphPipeline.cancelAll()
             // The backfill may be reading from the volume; no run starts until the locations are offline.

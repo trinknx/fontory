@@ -6,6 +6,9 @@ enum LibraryError: LocalizedError {
     case notReachable(String)
     case overlapsLocation(new: String, existing: String, inside: Bool)
     case locationOffline(String)
+    case alreadyInLibrary(String)
+    case googleFolderExists(String)
+    case folderNotEmpty(String)
 
     var errorDescription: String? {
         switch self {
@@ -15,6 +18,9 @@ enum LibraryError: LocalizedError {
         case .locationOffline(let name): "“\(name)” is offline. Connect its drive first."
         case .alreadySystemLocation(let name): "“\(name)” is an installed-fonts folder and is already in the library."
         case .notReachable(let name): "“\(name)” is not reachable."
+        case .alreadyInLibrary(let name): "“\(name)” is already in the library."
+        case .googleFolderExists(let name): "Google Fonts already downloads to “\(name)”."
+        case .folderNotEmpty(let name): "“\(name)” is not empty. Choose an empty or new folder."
         }
     }
 }
@@ -145,6 +151,56 @@ final class LibraryBackend: Sendable {
             throw LibraryError.overlapsLocation(new: url.lastPathComponent, existing: inner.displayName, inside: false)
         }
         return try store.upsertLocation(kind: .folder, volumeUUID: ref.volumeUUID, relativePath: ref.relativePath,
+                                        displayName: url.lastPathComponent, lastKnownPath: url.standardizedFileURL.path)
+    }
+
+    // MARK: Google Fonts
+
+    /// The Google Fonts location, if any.
+    func googleLocation() -> LocationRecord? {
+        try? store.locations().first { $0.kind == .googleFonts }
+    }
+
+    /// The volume reference of `url`, which may not exist yet: its nearest existing ancestor's plus the missing names.
+    private static func prospectiveRef(for url: URL) throws -> VolumeRef {
+        let url = url.standardizedFileURL
+        if FileManager.default.fileExists(atPath: url.path) || url.path == "/" { return try VolumeIdentity.ref(for: url) }
+        let parent = try prospectiveRef(for: url.deletingLastPathComponent())
+        let name = url.lastPathComponent
+        return VolumeRef(volumeUUID: parent.volumeUUID,
+                         relativePath: parent.relativePath.isEmpty ? name : parent.relativePath + "/" + name)
+    }
+
+    /// Checks that `url` (which may not exist yet) can hold the Google Fonts location: the `addFolder` overlap rules
+    /// with no exemption, plus no user or system location at the same place (it is never converted) and no other
+    /// Google Fonts location. `ignoring` is the current Google Fonts location while its folder changes.
+    func validateGoogleFolder(_ url: URL, ignoring: Int64? = nil) throws {
+        let ref = try Self.prospectiveRef(for: url)
+        let all = try store.locations().filter { !$0.autoIndexed && $0.id != ignoring }
+        if let existing = all.first(where: { $0.volumeUUID == ref.volumeUUID && $0.relativePath == ref.relativePath }),
+           existing.kind != .googleFonts {
+            if existing.kind.isReadOnly { throw LibraryError.alreadySystemLocation(existing.displayName) }
+            throw LibraryError.alreadyInLibrary(existing.displayName)
+        }
+        if let outer = all.first(where: { Self.contains($0, ref) }) {
+            throw LibraryError.overlapsLocation(new: url.lastPathComponent, existing: outer.displayName, inside: true)
+        }
+        if let inner = all.first(where: { Self.contains(ref, $0) }) {
+            throw LibraryError.overlapsLocation(new: url.lastPathComponent, existing: inner.displayName, inside: false)
+        }
+        if let other = all.first(where: { $0.kind == .googleFonts && !($0.volumeUUID == ref.volumeUUID && $0.relativePath == ref.relativePath) }) {
+            throw LibraryError.googleFolderExists(other.displayName)
+        }
+    }
+
+    /// Adds the Google Fonts location at the existing folder `url` (see `validateGoogleFolder`). Re-adding the same
+    /// folder returns that location. As in `addFolder`, auto-indexed locations inside it are dropped and one at the
+    /// same place becomes this location.
+    func addGoogleLocation(_ url: URL, ignoring: Int64? = nil) throws -> LocationRecord {
+        try validateGoogleFolder(url, ignoring: ignoring)
+        let ref = try VolumeIdentity.ref(for: url)
+        for auto in try store.locations() where auto.autoIndexed && Self.contains(ref, auto) { try store.deleteLocation(auto.id) }
+        return try store.upsertLocation(kind: .googleFonts, volumeUUID: ref.volumeUUID, relativePath: ref.relativePath,
                                         displayName: url.lastPathComponent, lastKnownPath: url.standardizedFileURL.path)
     }
 

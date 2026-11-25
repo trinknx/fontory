@@ -59,6 +59,7 @@ enum OrganizationSmoke {
             await compareSteps()
             glyphCopySteps()
             await rulesSteps()
+            await googleSteps()
         } catch {
             check(false, "setup", "\(error)")
         }
@@ -3006,6 +3007,264 @@ enum OrganizationSmoke {
     /// An image's pixels, for comparing two renders.
     private static func imageBytes(_ image: CGImage) -> Data? {
         image.dataProvider?.data as Data?
+    }
+
+    // MARK: Google Fonts task 6: controller
+
+    /// Serves a small catalogue, its manifests and font bytes from memory; never touches the network.
+    final class FakeGoogleTransport: GoogleTransport, @unchecked Sendable {
+        struct Family {
+            var modified: String
+            var font: Data
+        }
+        private let lock = NSLock()
+        private var families: [String: Family] = [:]
+        private var failsCatalog = false
+        private var fontDelay: Duration = .zero
+        private var count = 0
+
+        var requests: Int { lock.withLock { count } }
+        func set(_ name: String, modified: String, font: Data) { lock.withLock { families[name] = Family(modified: modified, font: font) } }
+        func setFailsCatalog(_ fails: Bool) { lock.withLock { failsCatalog = fails } }
+        func setFontDelay(_ delay: Duration) { lock.withLock { fontDelay = delay } }
+
+        static func fileName(_ family: String) -> String { family.replacingOccurrences(of: " ", with: "") + "-Regular.ttf" }
+        static func fontURL(_ family: String) -> URL {
+            URL(string: "https://fonts.gstatic.com/s/smoke/\(fileName(family))")!
+        }
+
+        func data(from url: URL) async throws -> Data {
+            let (fams, fails, delay) = lock.withLock { count += 1; return (families, failsCatalog, fontDelay) }
+            func json(_ object: Any) throws -> Data {
+                Data(")]}'\n".utf8) + (try JSONSerialization.data(withJSONObject: object))
+            }
+            if url == GoogleCatalog.catalogURL {
+                if fails { throw URLError(.notConnectedToInternet) }
+                let list = fams.keys.sorted().enumerated().map { i, name in
+                    ["family": name, "category": "Sans Serif", "lastModified": fams[name]!.modified,
+                     "subsets": ["latin", "vietnamese"], "designers": ["Smoke"], "popularity": i + 1,
+                     "size": fams[name]!.font.count] as [String: Any]
+                }
+                return try json(["familyMetadataList": list])
+            }
+            if url.host() == "fonts.google.com", url.path() == "/download/list",
+               let family = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "family" })?.value,
+               fams[family] != nil {
+                return try json(["manifest": [
+                    "files": [["filename": "OFL.txt", "contents": "Smoke licence"]],
+                    "fileRefs": [["filename": "static/" + Self.fileName(family), "url": Self.fontURL(family).absoluteString]],
+                ] as [String: Any]])
+            }
+            if let (_, family) = fams.first(where: { Self.fontURL($0.key) == url }) {
+                if delay > .zero { try await Task.sleep(for: delay) }
+                return family.font
+            }
+            throw GoogleTransportError.http(404)
+        }
+    }
+
+    private static func googleIDs(_ store: FontStore) -> Set<Int64> {
+        Set((try? store.faceIDs(for: LibraryQuery(scope: .googleFonts, includeSystem: true))) ?? [])
+    }
+
+    private static func activatedIDs(_ store: FontStore) -> Set<Int64> {
+        Set((try? store.faceIDs(for: LibraryQuery(scope: .activated, includeSystem: true))) ?? [])
+    }
+
+    private static func googleFace(_ store: FontStore, postScriptName: String) -> Int64? {
+        let ids = Array(googleIDs(store))
+        return ((try? store.rows(ids: ids)) ?? [:]).values.first { $0.postScriptName == postScriptName }?.id
+    }
+
+    private static func samePath(_ a: String?, _ b: URL) -> Bool {
+        guard let a else { return false }
+        return URL(fileURLWithPath: a).resolvingSymlinksInPath().path == b.resolvingSymlinksInPath().path
+    }
+
+    /// A temporary library and root, a private defaults suite, the fake transport and `SmokeRegistrar`: enabling,
+    /// updates, offline/mount, catalogue failure and both folder changes. Nothing is activated on the Mac.
+    private static func googleSteps() async {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FontoryGoogleSmoke-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let suiteName = "FontorySmoke-\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else { check(false, "google: settings suite"); return }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+        let keys = [SettingsKey.googleFontsEnabled, SettingsKey.googleFontsLastCheck, SettingsKey.googleFontsPaused]
+        let standardBefore = keys.map { String(describing: UserDefaults.standard.object(forKey: $0)) }
+
+        let fonts = root.appendingPathComponent("Fonts", isDirectory: true)
+        let google = root.appendingPathComponent("Google Fonts", isDirectory: true)
+        let supplemental = URL(fileURLWithPath: "/System/Library/Fonts/Supplemental", isDirectory: true)
+        let transport = FakeGoogleTransport()
+        let backend: LibraryBackend
+        let arial: Data, georgia: Data, courier: Data
+        do {
+            try fm.createDirectory(at: fonts, withIntermediateDirectories: true)
+            // Read-only use of the system fonts: their bytes are served by the fake transport.
+            arial = try Data(contentsOf: supplemental.appendingPathComponent("Arial.ttf"))
+            georgia = try Data(contentsOf: supplemental.appendingPathComponent("Georgia.ttf"))
+            courier = try Data(contentsOf: supplemental.appendingPathComponent("Courier New.ttf"))
+            transport.set("Smoke Sans", modified: "2025-01-01", font: arial)
+            transport.set("Smoke Serif", modified: "2025-01-01", font: georgia)
+            transport.set("Smoke Mono", modified: "2025-01-01", font: courier)
+            backend = try LibraryBackend(databaseURL: root.appendingPathComponent("library.sqlite"), registrar: SmokeRegistrar())
+        } catch {
+            check(false, "google: setup", "\(error)"); return
+        }
+        let store = backend.store
+        let model = AppModel()
+        model.settingsDefaults = suite
+        model.suppressesPreviewSaveForSmoke = true
+        await model.attachBackendForSmoke(backend)
+        guard let fontsLoc = await model.runBackground({ try backend.addFolder(fonts) }) else {
+            check(false, "google: add the user folder", model.alert?.message ?? ""); return
+        }
+        await model.reloadLocations()
+        let controller = GoogleFontsController(model: model, transport: transport, defaults: suite, minimumFamilies: 1, backoff: [])
+        model.google = controller
+        func googleLocations() -> [LocationRecord] { ((try? store.locations()) ?? []).filter { $0.kind == .googleFonts } }
+        func settled() async -> Bool {
+            let ok = await eventually(within: .seconds(20)) {
+                if case .downloading = controller.phase { return false }
+                return controller.phase != .checking
+            }
+            await model.waitForScansForSmoke()
+            return ok
+        }
+
+        check(samePath(controller.defaultFolder.path, root.appendingPathComponent("Google Fonts")),
+              "google: default folder is a sibling of the first location", controller.defaultFolder.path)
+        await controller.loadEstimate()
+        check(controller.estimatedBytes == arial.count + georgia.count + courier.count && controller.estimatedFamilies == 3,
+              "google: estimate from the catalogue", "\(String(describing: controller.estimatedBytes))")
+
+        // Refused: inside a user location, and the user location itself (never converted to kind 4).
+        let inside = fonts.appendingPathComponent("Google Fonts", isDirectory: true)
+        let requestsBefore = transport.requests
+        for (target, name) in [(inside, "google: enable inside an existing location is refused"),
+                               (fonts, "google: enable on an existing location is refused")] {
+            var refused = false
+            do { try await controller.enable(at: target) } catch let error as LibraryError {
+                if case .overlapsLocation = error { refused = true }
+                if case .alreadyInLibrary = error { refused = true }
+            } catch {}
+            check(refused && googleLocations().isEmpty && transport.requests == requestsBefore
+                  && !suite.bool(forKey: SettingsKey.googleFontsEnabled) && !fm.fileExists(atPath: inside.path)
+                  && (try? store.locations())?.first(where: { $0.id == fontsLoc.id })?.kind == .folder,
+                  name, "\(googleLocations().count) \(transport.requests - requestsBefore) \(controller.phase)")
+        }
+
+        // Enable: the folder is created, every family downloaded and indexed, nothing activated.
+        do { try await controller.enable(at: google) } catch { check(false, "google: enable", "\(error)") }
+        let enabledSettled = await settled()
+        let ids = googleIDs(store)
+        check(enabledSettled && controller.phase == .idle && ids.count == 3 && activatedIDs(store).isDisjoint(with: ids)
+              && suite.bool(forKey: SettingsKey.googleFontsEnabled) && suite.object(forKey: SettingsKey.googleFontsLastCheck) != nil
+              && (try? store.googleProgress()).map { $0 == (3, 3) } == true
+              && fm.fileExists(atPath: google.appendingPathComponent("Smoke Sans/SmokeSans-Regular.ttf").path)
+              && fm.fileExists(atPath: google.appendingPathComponent("Smoke Sans/OFL.txt").path),
+              "google: enable downloads, indexes, nothing activated", "\(controller.phase) \(ids.count)")
+        guard let loc = controller.location, samePath(loc.lastKnownPath, google) else {
+            check(false, "google: location", "\(String(describing: controller.location))"); return
+        }
+
+        // A check within 24 h is skipped without a request.
+        let beforeSkip = transport.requests
+        await controller.checkForUpdates(force: false)
+        check(transport.requests == beforeSkip, "google: check skipped within 24 h")
+
+        // Update: same file name, new bytes (same PostScript name), newer lastModified → still active.
+        guard let sans = googleFace(store, postScriptName: "ArialMT") else { check(false, "google: ArialMT indexed"); return }
+        await model.setActivation([sans], .on)
+        let sansFile = indexedPaths(store, loc.id)["Smoke Sans/SmokeSans-Regular.ttf"]
+        let newer = arial + Data(count: 4)
+        transport.set("Smoke Sans", modified: "2026-01-01", font: newer)
+        await controller.checkForUpdates(force: true)
+        let updateSettled = await settled()
+        let sansAfter = googleFace(store, postScriptName: "ArialMT")
+        let size = (try? fm.attributesOfItem(atPath: google.appendingPathComponent("Smoke Sans/SmokeSans-Regular.ttf").path))?[.size] as? Int
+        check(updateSettled && size == newer.count && sansAfter != nil && activatedIDs(store).contains(sansAfter ?? -1)
+              && indexedPaths(store, loc.id)["Smoke Sans/SmokeSans-Regular.ttf"] == sansFile,
+              "google: update keeps activation", "\(String(describing: size)) \(String(describing: sansAfter))")
+
+        // Offline: an unmount of the root stops the run; the mount resumes it.
+        transport.setFontDelay(.milliseconds(400))
+        transport.set("Smoke Serif", modified: "2026-01-01", font: georgia + Data(count: 4))
+        transport.set("Smoke Mono", modified: "2026-01-01", font: courier + Data(count: 4))
+        await controller.checkForUpdates(force: true)
+        let started = await eventually(within: .seconds(5)) { if case .downloading = controller.phase { return true }; return false }
+        await model.handle(.unmounted(volumeURL: google))
+        let offline = controller.phase == .offline
+        try? await Task.sleep(for: .milliseconds(600))
+        let doneWhileOffline = (try? store.googleProgress())?.done ?? -1
+        check(started && offline && controller.phase == .offline && doneWhileOffline < 3,
+              "google: offline pauses", "\(started) \(controller.phase) \(doneWhileOffline)")
+        await model.handle(.mounted(volumeURL: URL(fileURLWithPath: "/"), uuid: loc.volumeUUID))
+        var resumed = false
+        if case .downloading = controller.phase { resumed = true }
+        let mountSettled = await settled()
+        check(resumed && mountSettled && controller.phase == .idle && (try? store.googleProgress()).map { $0 == (3, 3) } == true,
+              "google: offline pauses and mount resumes", "\(resumed) \(controller.phase)")
+        transport.setFontDelay(.zero)
+
+        // Catalogue failure: the error is shown and nothing else changes.
+        func snapshot() -> String {
+            let files = (fm.subpaths(atPath: google.path) ?? []).sorted().joined(separator: ",")
+            let progress = (try? store.googleProgress()).map { "\($0.done)/\($0.total)" } ?? "-"
+            let last = String(describing: suite.object(forKey: SettingsKey.googleFontsLastCheck))
+            return "\(files)|\(progress)|\(googleIDs(store).sorted())|\(googleLocations().map(\.id))|\(last)"
+        }
+        let before = snapshot()
+        transport.setFailsCatalog(true)
+        await controller.checkForUpdates(force: true)
+        check(controller.phase == .error("Couldn't reach Google Fonts") && snapshot() == before,
+              "google: catalogue failure shows error and changes nothing", "\(controller.phase)")
+        transport.setFailsCatalog(false)
+
+        // Move Files: the folder moves, the location is relinked (same id) and activation is kept.
+        let moved = root.appendingPathComponent("Moved/Google Fonts", isDirectory: true)
+        do {
+            try fm.createDirectory(at: moved.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try await controller.changeFolder(to: moved, moveFiles: true)
+        } catch { check(false, "google: move folder", "\(error)") }
+        let moveSettled = await settled()
+        let sansMoved = googleFace(store, postScriptName: "ArialMT")
+        check(moveSettled && controller.location?.id == loc.id && samePath(controller.location?.lastKnownPath, moved)
+              && !fm.fileExists(atPath: google.path)
+              && fm.fileExists(atPath: moved.appendingPathComponent("Smoke Sans/SmokeSans-Regular.ttf").path)
+              && googleIDs(store).count == 3 && activatedIDs(store).contains(sansMoved ?? -1),
+              "google: move folder keeps activation", "\(controller.phase) \(String(describing: controller.location?.lastKnownPath))")
+
+        // Leave Them: a new location, the old files stay, everything is downloaded again into the new root.
+        let left = root.appendingPathComponent("Leave/Google Fonts", isDirectory: true)
+        let requestsBeforeLeave = transport.requests
+        do { try await controller.changeFolder(to: left, moveFiles: false) } catch { check(false, "google: leave folder", "\(error)") }
+        let leaveSettled = await settled()
+        check(leaveSettled && controller.phase == .idle && googleLocations().count == 1
+              && controller.location.map { $0.id != loc.id && samePath($0.lastKnownPath, left) } == true
+              && fm.fileExists(atPath: moved.appendingPathComponent("Smoke Sans/SmokeSans-Regular.ttf").path)
+              && ["Smoke Sans", "Smoke Serif", "Smoke Mono"].allSatisfy {
+                  fm.fileExists(atPath: left.appendingPathComponent("\($0)/\(FakeGoogleTransport.fileName($0))").path)
+              }
+              && transport.requests - requestsBeforeLeave >= 6 && googleIDs(store).count == 3
+              && (try? store.googleProgress()).map { $0 == (3, 3) } == true,
+              "google: leave folder re-downloads into new root", "\(controller.phase) \(googleLocations().count)")
+
+        // Pause, Stop Syncing and Remove from Library: files stay on disk.
+        controller.pause()
+        check(controller.phase == .paused && suite.bool(forKey: SettingsKey.googleFontsPaused), "google: pause")
+        controller.disable()
+        check(controller.phase == .off && !suite.bool(forKey: SettingsKey.googleFontsEnabled) && controller.location != nil,
+              "google: disable keeps the location")
+        do { try await controller.removeFromLibrary() } catch { check(false, "google: remove", "\(error)") }
+        await model.waitForScansForSmoke()
+        check(controller.location == nil && googleLocations().isEmpty && googleIDs(store).isEmpty
+              && fm.fileExists(atPath: left.appendingPathComponent("Smoke Sans/SmokeSans-Regular.ttf").path),
+              "google: remove from library keeps the files")
+
+        let standardAfter = keys.map { String(describing: UserDefaults.standard.object(forKey: $0)) }
+        check(standardAfter == standardBefore, "google: nothing written to the user's defaults")
     }
 
     /// Polls (on the main actor) until `condition` holds or `budget` passes.

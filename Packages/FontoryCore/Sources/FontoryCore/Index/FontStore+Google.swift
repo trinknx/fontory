@@ -142,6 +142,14 @@ extension FontStore {
         }
     }
 
+    /// Marks every family as never downloaded (the files are elsewhere or gone, e.g. after the folder changed), so the
+    /// next run downloads them all again. Withdrawn flags are kept.
+    public func resetGoogleDownloads() throws {
+        try database.withLock {
+            try database.execute("UPDATE google_families SET downloaded_modified = NULL, status = 0, error = NULL")
+        }
+    }
+
     public func googleProgress() throws -> (done: Int, total: Int) {
         try reader.withLock {
             let s = try reader.prepare("""

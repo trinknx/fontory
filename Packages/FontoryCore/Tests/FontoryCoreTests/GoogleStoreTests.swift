@@ -95,4 +95,23 @@ import Testing
         try store.markGoogleFamilyDone("A", modified: "2024-01-01")
         #expect(try store.googleProgress() == (1, 3))
     }
+
+    @Test func resetDownloadsMakesEveryFamilyPending() throws {
+        let store = try makeStore()
+        _ = try store.syncGoogleCatalog([fam("A"), fam("B"), fam("C")])
+        try store.markGoogleFamilyDone("A", modified: "2024-01-01")
+        try store.markGoogleFamilyFailed("B", error: "boom")
+        _ = try store.syncGoogleCatalog([fam("A"), fam("B")])  // C withdrawn
+        try store.resetGoogleDownloads()
+        let s = try states(store)
+        for name in ["A", "B", "C"] {
+            #expect(s[name]?.downloadedModified == nil)
+            #expect(s[name]?.status == 0)
+            #expect(s[name]?.error == nil)
+        }
+        // Withdrawn rows keep their flag and stay out of the download list.
+        #expect(s["C"]?.withdrawn == true)
+        #expect(try store.googleFamiliesNeedingDownload().map(\.family) == ["A", "B"])
+        #expect(try store.googleProgress() == (0, 2))
+    }
 }

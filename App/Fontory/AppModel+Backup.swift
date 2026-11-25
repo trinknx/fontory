@@ -321,10 +321,8 @@ extension AppModel {
                 guard let dir = AppModel.reachableFolder(loc) else { return nil }
                 if loc.kind == LocationKind.folder.rawValue { return .folder(try backend.addFolder(dir).id) }
                 if loc.kind == LocationKind.googleFonts.rawValue {
-                    // The catalog owns this location (it gets its own sidebar row), so it is restored as-is, not via the overlap checks.
-                    let ref = try VolumeIdentity.ref(for: dir)
-                    return .folder(try backend.store.upsertLocation(kind: .googleFonts, volumeUUID: ref.volumeUUID, relativePath: ref.relativePath,
-                                                                    displayName: dir.lastPathComponent, lastKnownPath: dir.standardizedFileURL.path).id)
+                    // The overlap rules apply: a user location at the same place is never converted to Google Fonts.
+                    return .folder(try backend.addGoogleLocation(dir).id)
                 }
                 let urls = (loc.members ?? []).map { dir.appendingPathComponent($0) }
                     .filter { FileManager.default.fileExists(atPath: $0.path) }
