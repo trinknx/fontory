@@ -91,7 +91,7 @@ private struct LocationSettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Table(model.listedLocations, selection: $selection) {
+            Table(model.settingsLocations, selection: $selection) {
                 TableColumn("Name") { loc in
                     Label(loc.displayName, systemImage: symbol(loc.kind))
                 }
@@ -122,6 +122,10 @@ private struct LocationSettings: View {
                     .disabled(selected == nil || selected?.kind.isReadOnly == true)
                 Button("Rescan") { if let selected { model.rescan(selected.id) } }
                     .disabled(selected?.online != true)
+            }
+            if model.locations.contains(where: { $0.kind == .googleFonts }) {
+                Text("The Google Fonts folder is managed in the Google Fonts tab.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding()

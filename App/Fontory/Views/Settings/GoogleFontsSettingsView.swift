@@ -34,6 +34,10 @@ private struct GoogleFontsSyncSettings: View {
 
     var body: some View {
         let phase = google.phase
+        let moving = google.isMovingFolder
+        // "Folder offline" while the volume is mounted (the folder was deleted or is not writable): Check for Updates
+        // checks the folder again.
+        let volumeOffline = phase == .offline && google.location?.online != true
         Text("Folder").font(.headline)
         HStack {
             Text(google.defaultFolder.path)
@@ -44,7 +48,7 @@ private struct GoogleFontsSyncSettings: View {
                 .help(google.defaultFolder.path)
             Spacer()
             Button("Change…") { changeFolder() }
-                .disabled(google.location == nil)
+                .disabled(google.location == nil || moving)
         }
 
         Text("Status").font(.headline).padding(.top, 4)
@@ -55,9 +59,10 @@ private struct GoogleFontsSyncSettings: View {
             if google.isEnabled {
                 if phase == .paused {
                     Button("Resume") { google.resume() }
+                        .disabled(moving)
                 } else {
                     Button("Pause") { google.pause() }
-                        .disabled(phase == .offline)
+                        .disabled(volumeOffline || moving)
                 }
             }
         }
@@ -71,7 +76,7 @@ private struct GoogleFontsSyncSettings: View {
                 .foregroundStyle(.secondary)
             Spacer()
             Button("Check for Updates") { Task { await google.checkForUpdates(force: true) } }
-                .disabled(!google.isEnabled || phase == .checking || phase == .offline)
+                .disabled(!google.isEnabled || phase == .checking || volumeOffline || moving)
         }
 
         HStack {
@@ -81,13 +86,14 @@ private struct GoogleFontsSyncSettings: View {
             Spacer()
             // Failed families are downloaded again by the next run.
             Button("Retry Failed") { google.resume() }
-                .disabled(!google.isEnabled || failed == 0 || isRunning(phase) || phase == .offline)
+                .disabled(!google.isEnabled || failed == 0 || isRunning(phase) || volumeOffline || moving)
         }
 
         Divider().padding(.vertical, 4)
         HStack {
             if google.isEnabled {
                 Button("Stop Syncing") { google.disable() }
+                    .disabled(moving)
                     .help("No more downloads or update checks. The folder and its fonts stay in the library.")
             } else if let location = google.location {
                 Button("Start Syncing") {
@@ -98,10 +104,11 @@ private struct GoogleFontsSyncSettings: View {
                         }
                     }
                 }
+                .disabled(moving)
             }
             Spacer()
             Button("Remove Google Fonts from Library") { confirmRemove() }
-                .disabled(google.location == nil)
+                .disabled(google.location == nil || moving)
         }
         Text("Removing keeps the downloaded files on disk.")
             .font(.caption).foregroundStyle(.secondary)
@@ -113,9 +120,9 @@ private struct GoogleFontsSyncSettings: View {
     }
 
     private func statusText(_ phase: GooglePhase) -> String {
+        if phase == .checking { return "Checking for updates…" }
         if let detail = phase.sidebarDetail { return detail }
         switch phase {
-        case .checking: return "Checking for updates…"
         case .idle: return "Up to date"
         default: return "Syncing is off"
         }

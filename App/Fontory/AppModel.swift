@@ -1258,6 +1258,9 @@ final class AppModel {
     /// the System and User views.
     /// Every location but the auto-indexed ones (Settings).
     var listedLocations: [LocationRecord] { locations.filter { !$0.autoIndexed } }
+    /// Settings → Locations: the listed locations but Google Fonts, which the Google Fonts tab manages (it is
+    /// never removed or relinked from Locations).
+    var settingsLocations: [LocationRecord] { listedLocations.filter { $0.kind != .googleFonts } }
 
     func location(_ id: Int64) -> LocationRecord? { locations.first { $0.id == id } }
 
@@ -1418,16 +1421,19 @@ final class AppModel {
         startDuplicateSearch(hashing: isShowingDuplicates)
     }
 
-    func relink(_ id: Int64, to url: URL) async {
-        guard let backend else { return }
+    /// Returns false when the location could not be relinked (an alert says why).
+    @discardableResult
+    func relink(_ id: Int64, to url: URL) async -> Bool {
+        guard let backend else { return false }
         await backend.scanner.cancel(locationID: id)
-        guard await runBackground({ try backend.relink(id, to: url) }, failureTitle: "The location could not be relinked") != nil else { return }
+        guard await runBackground({ try backend.relink(id, to: url) }, failureTitle: "The location could not be relinked") != nil else { return false }
         await reloadLocations()
         let report = await backend.activation.volumeMounted(locationIDs: [id])
         present(report, state: .on, context: "Re-activating fonts")
         rescan(id)
         updateWatchers()
         invalidateRows()
+        return true
     }
 
     /// Stops watching and scanning a location and waits for its scan to end, so nothing reads or prunes its folder
@@ -1469,7 +1475,8 @@ final class AppModel {
     }
 
     func confirmRemoveLocation(_ id: Int64) {
-        guard let loc = location(id) else { return }
+        // The Google Fonts location is removed from the Google Fonts settings only.
+        guard let loc = location(id), loc.kind != .googleFonts else { return }
         alert = AlertItem(
             title: "Remove “\(loc.displayName)” from the library?",
             message: "Its fonts are deactivated and forgotten by Fontory. The files on disk are not touched.",
@@ -1489,7 +1496,10 @@ final class AppModel {
     // MARK: Folder watching
 
     func updateWatchers() {
-        let watched = locations.filter { $0.online && !$0.autoIndexed && ($0.kind == .folder || $0.kind == .googleFonts || $0.kind == .userInstalled) }
+        // A Google Fonts folder being moved is not watched until it is relinked.
+        let moving = google?.movingLocationID
+        let watched = locations.filter { $0.online && !$0.autoIndexed && $0.id != moving
+            && ($0.kind == .folder || $0.kind == .googleFonts || $0.kind == .userInstalled) }
         let wanted = Dictionary(watched.map { ($0.id, $0.lastKnownPath) },
                                 uniquingKeysWith: { a, _ in a })
         for (id, watcher) in watchers where wanted[id] != watcher.path {

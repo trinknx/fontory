@@ -131,8 +131,10 @@ extension GooglePhase {
         case .downloading(let done, let total): "Downloading \(done.formatted()) of \(total.formatted())"
         case .paused: "Paused"
         case .offline: "Folder offline"
+        case .checking: "Checking…"
+        case .moving: "Moving…"
         case .error(let message): message
-        case .off, .idle, .checking: nil
+        case .off, .idle: nil
         }
     }
 
@@ -408,7 +410,8 @@ struct LocationMenu: View {
             .disabled(!location.online)
         Button("Reveal in Finder") { model.revealLocation(location.id) }
             .disabled(!location.online)
-        if !location.kind.isReadOnly {
+        // The Google Fonts folder is changed or removed in Settings → Google Fonts only.
+        if !location.kind.isReadOnly && location.kind != .googleFonts {
             Button("Relink…") { chooseRelinkTarget(for: location, model: model) }
             Divider()
             Button("Remove from Library…") { model.confirmRemoveLocation(location.id) }

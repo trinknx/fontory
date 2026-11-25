@@ -3033,6 +3033,7 @@ enum OrganizationSmoke {
         private var families: [String: Family] = [:]
         private var failsCatalog = false
         private var fontDelay: Duration = .zero
+        private var catalogDelay: Duration = .zero
         private var count = 0
 
         var requests: Int { lock.withLock { count } }
@@ -3049,6 +3050,7 @@ enum OrganizationSmoke {
         }
         func setFailsCatalog(_ fails: Bool) { lock.withLock { failsCatalog = fails } }
         func setFontDelay(_ delay: Duration) { lock.withLock { fontDelay = delay } }
+        func setCatalogDelay(_ delay: Duration) { lock.withLock { catalogDelay = delay } }
 
         static func fileName(_ family: String) -> String { family.replacingOccurrences(of: " ", with: "") + "-Regular.ttf" }
         static func fontURL(_ family: String) -> URL {
@@ -3056,11 +3058,12 @@ enum OrganizationSmoke {
         }
 
         func data(from url: URL) async throws -> Data {
-            let (fams, fails, delay) = lock.withLock { count += 1; return (families, failsCatalog, fontDelay) }
+            let (fams, fails, delay, catDelay) = lock.withLock { count += 1; return (families, failsCatalog, fontDelay, catalogDelay) }
             func json(_ object: Any) throws -> Data {
                 Data(")]}'\n".utf8) + (try JSONSerialization.data(withJSONObject: object))
             }
             if url == GoogleCatalog.catalogURL {
+                if catDelay > .zero { try await Task.sleep(for: catDelay) }
                 if fails { throw URLError(.notConnectedToInternet) }
                 let list = fams.keys.sorted().enumerated().map { i, name in
                     ["family": name, "category": fams[name]!.category, "lastModified": fams[name]!.modified,
@@ -3200,6 +3203,13 @@ enum OrganizationSmoke {
             check(false, "google: location", "\(String(describing: controller.location))"); return
         }
 
+        // Settings → Locations lists the user folder but not the Google Fonts location, which cannot be removed there.
+        model.alert = nil
+        model.confirmRemoveLocation(loc.id)
+        check(!model.settingsLocations.contains { $0.kind == .googleFonts } && model.settingsLocations.contains { $0.id == fontsLoc.id }
+              && model.alert == nil,
+              "google: settings locations exclude the Google Fonts location", "\(model.settingsLocations.map(\.kind))")
+
         await googleFilterBarSteps(model, store: store)
 
         // A check within 24 h is skipped without a request.
@@ -3255,6 +3265,25 @@ enum OrganizationSmoke {
               "google: catalogue failure shows error and changes nothing", "\(controller.phase)")
         transport.setFailsCatalog(false)
 
+        // Pause during a catalogue check: the check ends, nothing downloads and syncing stays paused.
+        transport.setCatalogDelay(.milliseconds(400))
+        transport.set("Smoke Serif", modified: "2026-03-01", font: georgia + Data(count: 6))
+        let checkTask = Task { await controller.checkForUpdates(force: true) }
+        let checking = await eventually(within: .seconds(5)) { controller.phase == .checking }
+        let checkingDetail = controller.phase.sidebarDetail
+        controller.pause()
+        await checkTask.value
+        transport.setCatalogDelay(.zero)
+        try? await Task.sleep(for: .milliseconds(300))
+        let pausedProgress = (try? store.googleProgress()) ?? (done: 0, total: 0)
+        check(checking && checkingDetail == "Checking…" && controller.phase == .paused && controller.isPaused
+              && suite.bool(forKey: SettingsKey.googleFontsPaused) && pausedProgress.done < pausedProgress.total,
+              "google: pause during a check stays paused", "\(checking) \(controller.phase) \(pausedProgress)")
+        controller.resume()
+        let pauseResumeSettled = await settled()
+        check(pauseResumeSettled && controller.phase == .idle && (try? store.googleProgress()).map { $0 == (3, 3) } == true,
+              "google: resume after a paused check downloads", "\(controller.phase)")
+
         // A new folder inside or containing the current one is refused (move and leave) and nothing changes.
         let diskBefore = snapshot()
         for (target, move) in [(google.appendingPathComponent("Sub", isDirectory: true), true),
@@ -3302,8 +3331,28 @@ enum OrganizationSmoke {
         let copied = root.appendingPathComponent("Copied/Google Fonts", isDirectory: true)
         let eventsBeforeCopy = registrar.events.count
         controller.forcesCrossVolumeMove = true
-        do { try await controller.changeFolder(to: copied, moveFiles: true) } catch { check(false, "google: copy folder", "\(error)") }
+        // A newer version is listed, so a run started during the move would have something to download.
+        transport.set("Smoke Mono", modified: "2026-04-01", font: courier + Data(count: 2))
+        let requestsBeforeCopy = transport.requests
+        let moveTask = Task { try await controller.changeFolder(to: copied, moveFiles: true) }
+        var yields = 0
+        while !controller.isMovingFolder && yields < 1000 { await Task.yield(); yields += 1 }
+        let movingStarted = controller.isMovingFolder
+        // During the move: Check for Updates, Resume, a second Change… and Remove start nothing.
+        await controller.checkForUpdates(force: true)
+        controller.resume()
+        let second = root.appendingPathComponent("Second/Google Fonts", isDirectory: true)
+        try? await controller.changeFolder(to: second, moveFiles: true)
+        try? await controller.removeFromLibrary()
+        let blockedDuringMove = movingStarted && controller.isMovingFolder && transport.requests == requestsBeforeCopy
+            && controller.isEnabled && controller.location?.id == loc.id && !fm.fileExists(atPath: second.deletingLastPathComponent().path)
+        let movingShown = await eventually(within: .seconds(5)) { controller.phase == .moving || !controller.isMovingFolder }
+        let phaseDuringMove = controller.phase
+        do { try await moveTask.value } catch { check(false, "google: copy folder", "\(error)") }
         controller.forcesCrossVolumeMove = false
+        check(blockedDuringMove && movingShown,
+              "google: check, resume, change and remove during a move start nothing",
+              "\(movingStarted) \(transport.requests - requestsBeforeCopy) \(phaseDuringMove) \(phaseDuringMove.sidebarDetail ?? "-")")
         let copySettled = await settled()
         // Past the folder-event delay: a watcher left on the old folder would have rescanned (and pruned) by now.
         try? await Task.sleep(for: .seconds(6))
@@ -3315,6 +3364,18 @@ enum OrganizationSmoke {
               && googleIDs(store).count == 3 && activatedIDs(store).contains(sansCopied ?? -1)
               && unregisterBeforeRegister(since: eventsBeforeCopy, old: moved, new: copied),
               "google: cross-volume move keeps activation", "\(controller.phase) \(googleIDs(store).count)")
+        // Nothing is marked done without its file in the folder the location names.
+        check((try? store.googleProgress()).map { $0 == (3, 3) } == true
+              && ["Smoke Sans", "Smoke Serif", "Smoke Mono"].allSatisfy {
+                  fm.fileExists(atPath: copied.appendingPathComponent("\($0)/\(FakeGoogleTransport.fileName($0))").path)
+              },
+              "google: after the move nothing is done but missing", "\(String(describing: try? store.googleProgress()))")
+        // The check refused during the move works after it, into the new folder.
+        await controller.checkForUpdates(force: true)
+        let afterMoveSettled = await settled()
+        check(afterMoveSettled && controller.phase == .idle && (try? store.googleProgress()).map { $0 == (3, 3) } == true
+              && (try? Data(contentsOf: copied.appendingPathComponent("Smoke Mono/SmokeMono-Regular.ttf")))?.count == courier.count + 2,
+              "google: check after the move downloads into the new folder", "\(controller.phase)")
 
         // Leave Them: a new location, the old files stay, everything is downloaded again into the new root.
         let left = root.appendingPathComponent("Leave/Google Fonts", isDirectory: true)

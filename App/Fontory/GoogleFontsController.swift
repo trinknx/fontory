@@ -3,7 +3,19 @@ import FontoryCore
 import os
 
 enum GooglePhase: Equatable {
-    case off, idle, checking, downloading(done: Int, total: Int), paused, offline, error(String)
+    case off, idle, checking, downloading(done: Int, total: Int), paused, offline, moving, error(String)
+}
+
+/// A Move Files whose copy is in place but whose location could not be relinked to it.
+enum GoogleFolderError: LocalizedError {
+    case relinkFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .relinkFailed(let path):
+            "The fonts are now in “\(path)”, but the library could not follow them. Choose that folder with Change… to use it again."
+        }
+    }
 }
 
 /// Google Fonts download and sync: consent, the daily catalogue check, downloads into the Google Fonts location
@@ -13,6 +25,8 @@ enum GooglePhase: Equatable {
 final class GoogleFontsController {
     private static let log = Logger(subsystem: "local.fontory.app", category: "google")
     static let unreachableMessage = "Couldn't reach Google Fonts"
+    static let outOfSpaceMessage = "Not enough free space"
+    static let relinkFailedMessage = "The moved folder could not be relinked"
     static let checkInterval: TimeInterval = 24 * 60 * 60
     /// The location is rescanned after this many completed families, and at the end of a run.
     static let rescanEvery = 25
@@ -40,8 +54,11 @@ final class GoogleFontsController {
     /// A catalogue check succeeded while a run was going: run again when it finishes (it listed families before).
     @ObservationIgnored private var rerunRequested = false
     @ObservationIgnored private var isChecking = false
-    /// A folder move is under way: the stopped run must not rescan the old folder.
-    @ObservationIgnored private var isMovingFolder = false
+    /// A folder change is under way: no run, check or other folder change starts, and the stopped run does not
+    /// rescan the old folder. The settings disable their controls meanwhile.
+    private(set) var isMovingFolder = false
+    /// Move Files: the location whose folder is being moved (not watched until it is relinked).
+    @ObservationIgnored private(set) var movingLocationID: Int64?
     /// Smoke hook: Move Files takes the cross-volume path (copy, then delete) on one volume.
     @ObservationIgnored var forcesCrossVolumeMove = false
     /// The last progress read, shown while the next run reads it again.
@@ -90,10 +107,12 @@ final class GoogleFontsController {
     /// At launch: when enabled and not paused, the daily catalogue check, then any pending downloads.
     func launch() async {
         guard isEnabled, location != nil else { phase = .off; return }
+        await refreshFailedCount()
         guard !isPaused else { phase = .paused; return }
         await checkForUpdates(force: false)
         if case .error = phase { return }
-        resume()
+        // Paused during the check: stays paused.
+        if !isPaused { resume() }
     }
 
     // MARK: Consent and settings
@@ -101,15 +120,17 @@ final class GoogleFontsController {
     /// Adds the Google Fonts location at `folder` (created if missing), turns syncing on and checks for updates.
     /// An existing Google Fonts location elsewhere is replaced (its files stay on disk).
     func enable(at folder: URL) async throws {
-        guard let model, let backend = model.backend else { return }
+        guard !isMovingFolder, let model, let backend = model.backend else { return }
         let previous = location
         let folder = folder.standardizedFileURL
         if previous.map({ URL(fileURLWithPath: $0.lastKnownPath).standardizedFileURL.path == folder.path }) != true {
             try await Self.background { try backend.validateGoogleFolder(folder, ignoring: previous?.id) }
             stopRun()
             await stoppedRun?.value
+            var added: LocationRecord?
             do {
                 let loc = try await Self.addLocation(at: folder, backend: backend, ignoring: previous?.id)
+                added = loc
                 // The families were downloaded elsewhere, if at all: everything is fetched again into this folder.
                 // Reset before the old location goes, so a failure never leaves rows "done" for an empty folder.
                 try await Self.background { try backend.store.resetGoogleDownloads() }
@@ -117,6 +138,8 @@ final class GoogleFontsController {
                 await model.reloadLocations()
                 model.updateWatchers()
             } catch {
+                // Never two Google Fonts locations: the one added here goes again.
+                if let added, added.id != previous?.id { await model.removeLocation(added.id).value }
                 await model.reloadLocations()
                 restartIfActive()
                 throw error
@@ -124,6 +147,7 @@ final class GoogleFontsController {
         }
         setEnabled(true)
         setPaused(false)
+        await refreshFailedCount()
         await checkForUpdates(force: true)
     }
 
@@ -137,6 +161,7 @@ final class GoogleFontsController {
 
     /// "Remove Google Fonts from Library": stops syncing and removes the location; the files stay on disk.
     func removeFromLibrary() async throws {
+        guard !isMovingFolder else { return }
         disable()
         await stoppedRun?.value
         guard let model, let loc = location else { return }
@@ -148,10 +173,13 @@ final class GoogleFontsController {
     /// and the location relinked, keeping activation. Otherwise the old location is removed from the library (its
     /// files stay) and every family is downloaded again into `url`. `url` must be new or an empty folder for a move.
     func changeFolder(to url: URL, moveFiles: Bool) async throws {
-        guard let model, let backend = model.backend, let old = location else { return }
+        guard !isMovingFolder, let model, let backend = model.backend, let old = location else { return }
         let target = url.standardizedFileURL
         let oldURL = URL(fileURLWithPath: old.lastKnownPath, isDirectory: true).standardizedFileURL
         guard target.path != oldURL.path else { return }
+        // Set before the first suspension point, so a second Change… cannot start a concurrent move.
+        isMovingFolder = true
+        defer { isMovingFolder = false }
         // Refuses user locations and any folder inside or containing the current one (a move into itself, or new
         // files nested in the old folder).
         let ref = try await Self.background { try backend.validateGoogleFolder(target, ignoring: old.id) }
@@ -159,23 +187,37 @@ final class GoogleFontsController {
         if moveFiles, !old.online { throw LibraryError.locationOffline(old.displayName) }
 
         stopRun()
-        isMovingFolder = true
-        defer { isMovingFolder = false }
+        phase = .moving
         await stoppedRun?.value
         do {
             if moveFiles {
                 try await moveFolderKeepingActivation(old, from: oldURL, to: target, model: model, backend: backend)
             } else {
-                let loc = try await Self.addLocation(at: target, backend: backend, ignoring: old.id)
-                try await Self.background { try backend.store.resetGoogleDownloads() }
-                if loc.id != old.id { await model.removeLocation(old.id).value }
-                await model.reloadLocations()
-                model.updateWatchers()
+                var added: LocationRecord?
+                do {
+                    let loc = try await Self.addLocation(at: target, backend: backend, ignoring: old.id)
+                    added = loc
+                    try await Self.background { try backend.store.resetGoogleDownloads() }
+                    if loc.id != old.id { await model.removeLocation(old.id).value }
+                    await model.reloadLocations()
+                    model.updateWatchers()
+                } catch {
+                    if let added, added.id != old.id { await model.removeLocation(added.id).value }
+                    await model.reloadLocations()
+                    throw error
+                }
             }
+        } catch GoogleFolderError.relinkFailed(let path) {
+            // The root the location names is gone: no run starts there.
+            isMovingFolder = false
+            phase = .error(Self.relinkFailedMessage)
+            throw GoogleFolderError.relinkFailed(path)
         } catch {
+            isMovingFolder = false
             restartIfActive()
             throw error
         }
+        isMovingFolder = false
         restartIfActive()
     }
 
@@ -183,6 +225,7 @@ final class GoogleFontsController {
     /// fonts are registered again from the new place by `relink` (or from the old one when the move fails).
     private func moveFolderKeepingActivation(_ old: LocationRecord, from oldURL: URL, to target: URL, model: AppModel,
                            backend: LibraryBackend) async throws {
+        movingLocationID = old.id
         await model.suspendLocation(old.id)
         await backend.activation.volumeUnmounted(locationIDs: [old.id])
         let forceCopy = forcesCrossVolumeMove
@@ -190,12 +233,20 @@ final class GoogleFontsController {
         do {
             leftover = try await Self.background { try Self.moveFolder(from: oldURL, to: target, forceCopy: forceCopy) }
         } catch {
+            movingLocationID = nil
             let report = await backend.activation.volumeMounted(locationIDs: [old.id])
             model.present(report, state: .on, context: "Re-activating fonts")
             model.updateWatchers()
             throw error
         }
-        await model.relink(old.id, to: target)
+        movingLocationID = nil
+        guard await model.relink(old.id, to: target) else {
+            // The location still names the old folder: whatever is still there is registered again.
+            let report = await backend.activation.volumeMounted(locationIDs: [old.id])
+            model.present(report, state: .on, context: "Re-activating fonts")
+            model.updateWatchers()
+            throw GoogleFolderError.relinkFailed(target.path)
+        }
         if leftover {
             model.alert = AlertItem(title: "The old Google Fonts folder could not be deleted",
                                     message: "Its fonts were copied to “\(target.lastPathComponent)”. Delete “\(oldURL.path)” in the Finder.")
@@ -207,7 +258,7 @@ final class GoogleFontsController {
     /// Fetches the catalogue and records what changed, then resumes downloading. Without `force`, skipped when the
     /// last check is less than 24 h old. A failure shows "Couldn't reach Google Fonts" and changes nothing else.
     func checkForUpdates(force: Bool) async {
-        guard isEnabled, !isChecking, let model, let backend = model.backend, let loc = location else { return }
+        guard isEnabled, !isChecking, !isMovingFolder, let model, let backend = model.backend, let loc = location else { return }
         if !force, let lastCheck, Date().timeIntervalSince(lastCheck) < Self.checkInterval { return }
         isChecking = true
         defer { isChecking = false }
@@ -217,17 +268,20 @@ final class GoogleFontsController {
             _ = try await downloader.refreshCatalog()
         } catch {
             Self.log.error("Google Fonts catalogue check failed: \(String(describing: error), privacy: .public)")
-            phase = .error(Self.unreachableMessage)
+            if !isMovingFolder { phase = .error(Self.unreachableMessage) }
             return
         }
         setLastCheck(Date())
+        // A folder change that started meanwhile restarts the run when it ends.
+        guard !isMovingFolder else { return }
         if runTask != nil { rerunRequested = true }
-        resume()
+        // Paused (or stopped) during the check: stays so.
+        if isEnabled && !isPaused { resume() } else if runTask == nil { phase = restingPhase() }
     }
 
     /// Starts (or continues) downloading every family that needs it, the failed ones included.
     func resume() {
-        guard isEnabled else { return }
+        guard isEnabled, !isMovingFolder else { return }
         setPaused(false)
         startRun()
     }
@@ -236,7 +290,7 @@ final class GoogleFontsController {
         guard isEnabled else { return }
         setPaused(true)
         stopRun()
-        phase = .paused
+        if !isMovingFolder { phase = .paused }
     }
 
     /// Fetches the catalogue only, for the consent sheet's family count and size. Nothing is stored.
@@ -289,7 +343,7 @@ final class GoogleFontsController {
     }
 
     private func startRun() {
-        guard runTask == nil else { return }
+        guard runTask == nil, !isMovingFolder else { return }
         guard let backend = model?.backend, let loc = location else { phase = restingPhase(); return }
         guard loc.online else { phase = .offline; return }
         runGeneration += 1
@@ -327,6 +381,7 @@ final class GoogleFontsController {
         }
         var sinceRescan = 0
         var unavailable = false
+        var outOfSpace = false
         await withTaskCancellationHandler {
             for await event in events {
                 switch event {
@@ -342,6 +397,8 @@ final class GoogleFontsController {
                     Self.log.error("Google Fonts family \(family, privacy: .public) failed: \(message, privacy: .public)")
                 case .rootUnavailable:
                     unavailable = true
+                case .outOfSpace:
+                    outOfSpace = true
                 case .finished:
                     break
                 }
@@ -355,17 +412,16 @@ final class GoogleFontsController {
         let present = model?.location(loc.id) != nil
         // Families written since the last rescan are indexed now (also after a pause; not when the folder is gone).
         if sinceRescan > 0, !unavailable, !isMovingFolder, model?.location(loc.id)?.online == true { model?.rescan(loc.id) }
-        if present {
-            failedFamilies = (try? await Self.background {
-                try store.googleFamiliesNeedingDownload().filter { $0.status == 2 }.count
-            }) ?? failedFamilies
-        }
+        if present { await refreshFailedCount() }
         guard generation == runGeneration else { return }
         runTask = nil
         if !present {
             phase = restingPhase()
         } else if unavailable {
             phase = .offline
+        } else if outOfSpace {
+            rerunRequested = false
+            phase = .error(Self.outOfSpaceMessage)
         } else if rerunRequested {
             rerunRequested = false
             startRun()
@@ -435,6 +491,14 @@ final class GoogleFontsController {
         } catch {
             return true
         }
+    }
+
+    /// Families whose last download failed, from the store.
+    private func refreshFailedCount() async {
+        guard let store = model?.backend?.store else { return }
+        failedFamilies = (try? await Self.background {
+            try store.googleFamiliesNeedingDownload().filter { $0.status == 2 }.count
+        }) ?? failedFamilies
     }
 
     private func setEnabled(_ value: Bool) {
