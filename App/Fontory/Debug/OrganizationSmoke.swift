@@ -171,6 +171,16 @@ enum OrganizationSmoke {
             CTFontGetGlyphsForCharacters(sfFont, &ch, &space, 1)
             check(space != 0 && model.dragItem(for: space) == nil, "rules: inkless glyph has no drag item")
         }
+        if let sfFont = renderer.font(fileURL: sfns, faceIndex: 0, pointSize: 1) {
+            var ch: UniChar = 0x61
+            var a: CGGlyph = 0
+            CTFontGetGlyphsForCharacters(sfFont, &ch, &a, 1)
+            let light = await model.glyphImage(a, pointSize: 40, scale: 2, dark: false)
+            let dark = await model.glyphImage(a, pointSize: 40, scale: 2, dark: true)
+            // The box spans ascent + descent at 40 pt (2x), so it is taller than 80 px and wider than a's ink.
+            check(a != 0 && (light?.height ?? 0) > 80 && (light?.width ?? 0) > 20 && dark != nil,
+                  "rules: glyph image renders SFNS a", "\(String(describing: light?.width))x\(String(describing: light?.height))")
+        }
 
         let emojiURL = URL(fileURLWithPath: "/System/Library/Fonts/Apple Color Emoji.ttc")
         let emoji = FeatureRulesModel(renderer: renderer)

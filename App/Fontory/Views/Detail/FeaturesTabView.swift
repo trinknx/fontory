@@ -28,6 +28,8 @@ struct FeaturesTabView: View {
     @State private var lastSwitched: String?
     @State private var styleNames: [Int64: String] = [:]
     @State private var copied = false
+    /// The GSUB rules of the shown face and selection; made on the first load (it needs the app's renderer).
+    @State private var rules: FeatureRulesModel?
 
     struct LoadedFace: Equatable {
         let face: SpecimenFace
@@ -39,12 +41,19 @@ struct FeaturesTabView: View {
         let rowsVersion: Int
     }
 
+    private struct RulesKey: Equatable {
+        let face: SpecimenFace?
+        let selection: LayoutSelection
+    }
+
     var body: some View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .glassBottomBar { bottomBar }
         .task(id: LoadKey(faceID: faceID, rowsVersion: model.rowsVersion)) { await load() }
         .onChange(of: selection) { updateFeatures() }
+        // After each load and on every selection change; one task even when a load also resets the selection.
+        .task(id: RulesKey(face: loaded?.face, selection: selection)) { await loadRules() }
         .onAppear { updateStyleNames() }
         .onReceive(NotificationCenter.default.publisher(for: AppModel.rowsLoadedNotification, object: model)) { _ in
             updateStyleNames()
@@ -109,16 +118,31 @@ struct FeaturesTabView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
+                if let rules, rules.hasAATLayout, !rules.counts.isEmpty {
+                    Label("This font also has Apple layout tables, which macOS uses instead; these rules may differ "
+                          + "from what you get.", systemImage: "info.circle")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
                 if groups.isEmpty {
                     Text("No features for this script and language.").foregroundStyle(.secondary)
                 }
                 ForEach(groups, id: \.group) { entry in
                     VStack(alignment: .leading, spacing: 8) {
                         Text(entry.group.title).font(.headline)
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 16, alignment: .leading)],
-                                  alignment: .leading, spacing: 8) {
-                            ForEach(entry.features) { feature in
-                                FeatureRow(feature: feature, isOn: binding(feature))
+                        ForEach(segments(entry.features)) { segment in
+                            switch segment {
+                            case let .grid(features):
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 16, alignment: .leading)],
+                                          alignment: .leading, spacing: 8) {
+                                    ForEach(features) { feature in row(feature) }
+                                }
+                            case let .expanded(feature, tag):
+                                VStack(alignment: .leading, spacing: 8) {
+                                    row(feature)
+                                    if let rules { FeatureRulesView(tag: tag, model: rules) }
+                                }
+                                .padding(.vertical, 4)
                             }
                         }
                     }
@@ -127,6 +151,56 @@ struct FeaturesTabView: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// A run of collapsed rows (one grid) or an expanded GSUB row, which takes the full width with its rules below.
+    private enum Segment: Identifiable {
+        case grid([LayoutFeature])
+        case expanded(LayoutFeature, tag: String)
+
+        var id: String {
+            switch self {
+            case let .grid(features): "grid:" + (features.first?.id ?? "")
+            case let .expanded(feature, _): "rules:" + feature.id
+            }
+        }
+    }
+
+    private func segments(_ features: [LayoutFeature]) -> [Segment] {
+        var out: [Segment] = []
+        var run: [LayoutFeature] = []
+        for feature in features {
+            if let tag = gsubTag(feature), rules?.expanded.contains(tag) == true {
+                if !run.isEmpty { out.append(.grid(run)) }
+                run = []
+                out.append(.expanded(feature, tag: tag))
+            } else {
+                run.append(feature)
+            }
+        }
+        if !run.isEmpty { out.append(.grid(run)) }
+        return out
+    }
+
+    /// The tag of an OpenType feature with GSUB rules in the current selection.
+    private func gsubTag(_ feature: LayoutFeature) -> String? {
+        guard case .openType = feature.source, let tag = feature.tag, rules?.counts[tag] != nil else { return nil }
+        return tag
+    }
+
+    private func row(_ feature: LayoutFeature) -> some View {
+        let tag = gsubTag(feature)
+        return FeatureRow(feature: feature, isOn: binding(feature),
+                          substitutions: tag.flatMap { rules?.counts[$0] },
+                          isExpanded: tag.map { rules?.expanded.contains($0) == true } ?? false,
+                          reservesDisclosure: !(rules?.counts.isEmpty ?? true),
+                          toggleExpanded: tag.map { tag in
+                              {
+                                  guard let rules else { return }
+                                  if rules.expanded.contains(tag) { rules.expanded.remove(tag) }
+                                  else { rules.expanded.insert(tag) }
+                              }
+                          })
     }
 
     private func binding(_ feature: LayoutFeature) -> Binding<Bool> {
@@ -172,6 +246,13 @@ struct FeaturesTabView: View {
         }
         updateFeatures()
         updateStyleNames()
+    }
+
+    private func loadRules() async {
+        guard let face = loaded?.face else { return }
+        let rules = rules ?? FeatureRulesModel(renderer: model.previewRenderer)
+        if self.rules == nil { self.rules = rules }
+        await rules.load(fileURL: face.fileURL, faceIndex: face.faceIndex, selection: selection)
     }
 
     private func fail(_ message: String, _ id: Int64) {
@@ -307,12 +388,39 @@ struct FeaturesTabView: View {
     }
 }
 
-/// One feature: its name, tag (or AAT type) and a switch.
+/// One feature: its name, tag (or AAT type) and a switch; a GSUB feature also gets a disclosure chevron and its
+/// substitution count.
 private struct FeatureRow: View {
     let feature: LayoutFeature
     @Binding var isOn: Bool
+    var substitutions: Int?
+    var isExpanded = false
+    /// Keeps the chevron's width on rows without one, so names line up when the face has GSUB rules.
+    var reservesDisclosure = false
+    var toggleExpanded: (() -> Void)?
 
     var body: some View {
+        HStack(spacing: 4) {
+            if let toggleExpanded {
+                Button(action: toggleExpanded) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .frame(width: 14, height: 14)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help(isExpanded ? "Hide the substitutions" : "Show the substitutions")
+                .accessibilityLabel(isExpanded ? "Hide the substitutions" : "Show the substitutions")
+            } else if reservesDisclosure {
+                Color.clear.frame(width: 14, height: 14)
+            }
+            toggle
+        }
+    }
+
+    private var toggle: some View {
         Toggle(isOn: $isOn) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(feature.name).lineLimit(1).truncationMode(.tail)
@@ -328,8 +436,14 @@ private struct FeatureRow: View {
     }
 
     private var caption: String {
-        guard feature.isOnByDefault else { return feature.detail }
-        return feature.previewsWhenOff ? "\(feature.detail) · on by default" : "\(feature.detail) · always on in previews"
+        let base: String
+        if !feature.isOnByDefault {
+            base = feature.detail
+        } else {
+            base = feature.previewsWhenOff ? "\(feature.detail) · on by default" : "\(feature.detail) · always on in previews"
+        }
+        guard let substitutions else { return base }
+        return "\(base) · " + (substitutions == 1 ? "1 substitution" : "\(substitutions) substitutions")
     }
 
     private var help: String {

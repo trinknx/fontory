@@ -15,6 +15,10 @@ final class FeatureRulesModel {
     private(set) var hasAATLayout = false
     /// Expanded feature tags, kept for the session across faces.
     var expanded: Set<String> = []
+    /// The output glyph the user clicked; cleared by `load`.
+    var selectedGlyph: RuleGlyph?
+    /// Bumped by every `load`, so views keyed on it drop images of the previous face.
+    private(set) var faceVersion = 0
 
     /// Published rules per tag and statuses per rule (observed, so rows update as results arrive).
     private var rulesByTag: [String: GSUBFeatureRules] = [:]
@@ -33,6 +37,9 @@ final class FeatureRulesModel {
     @ObservationIgnored private var queued: Set<StatusKey> = []
     @ObservationIgnored private var flushScheduled = false
     @ObservationIgnored private let promiseWriter = GlyphPromiseWriter()
+    /// Rendered output glyphs of the current face; bounded, cleared by `load`.
+    @ObservationIgnored private var images: [ImageKey: ImageBox] = [:]
+    private static let imageCacheLimit = 600
 
     init(renderer: PreviewRenderer) {
         self.renderer = renderer
@@ -57,6 +64,9 @@ final class FeatureRulesModel {
         queued = []
         rulesByTag = [:]
         statusCache = [:]
+        images = [:]
+        selectedGlyph = nil
+        faceVersion = current
         counts = [:]
         hasAATLayout = false
         phase = .reading
@@ -143,6 +153,68 @@ final class FeatureRulesModel {
         }
     }
 
+    // MARK: Glyph images
+
+    /// `glyph` drawn at `pointSize` (in points; the bitmap is `scale` times larger) in the primary text colour of the
+    /// appearance, colour glyphs in colour, on a transparent background. The box spans the face's ascent and descent
+    /// (grown to the ink) so a rule's glyphs line up. Renders off the main actor; cached; nil when the face changed
+    /// meanwhile or there is no face.
+    func glyphImage(_ glyph: CGGlyph, pointSize: CGFloat, scale: CGFloat, dark: Bool) async -> CGImage? {
+        let key = ImageKey(glyph: glyph, pointSize: pointSize, scale: scale, dark: dark)
+        if let cached = images[key] { return cached.image }
+        guard let face else { return nil }
+        let current = generation
+        let rendered = await Task.detached(priority: .userInitiated) {
+            ImageBox(image: Self.renderGlyph(font: face.font, glyph: glyph, pointSize: pointSize, scale: scale,
+                                             foreground: CGColor(gray: dark ? 1 : 0, alpha: 0.85)))
+        }.value
+        guard current == generation else { return nil }
+        if images.count >= Self.imageCacheLimit { images.removeAll(keepingCapacity: true) }
+        images[key] = rendered
+        return rendered.image
+    }
+
+    /// Pure: see `glyphImage`. At least a quarter em wide, so an inkless glyph (space) still shows a cell.
+    nonisolated static func renderGlyph(font: CTFont, glyph: CGGlyph, pointSize: CGFloat, scale: CGFloat,
+                                        foreground: CGColor) -> CGImage? {
+        guard pointSize > 0, scale > 0 else { return nil }
+        let sized = CTFontCreateCopyWithAttributes(font, pointSize, nil, nil)
+        var g = glyph
+        var advance = CGSize.zero
+        CTFontGetAdvancesForGlyphs(sized, .horizontal, &g, &advance, 1)
+        var ink = CGRect.zero
+        CTFontGetBoundingRectsForGlyphs(sized, .horizontal, &g, &ink, 1)
+        let hasInk = !ink.isNull && !ink.isInfinite && ink.width > 0 && ink.height > 0
+            && ink.minX.isFinite && ink.minY.isFinite && ink.width.isFinite && ink.height.isFinite
+        let advanceWidth = advance.width.isFinite ? advance.width : 0
+        let limit = pointSize * 8
+        let left = max(-limit, hasInk ? min(0, ink.minX) : 0)
+        let right = min(limit, max(advanceWidth, hasInk ? ink.maxX : 0, pointSize * 0.25))
+        let top = min(limit, max(CTFontGetAscent(sized), hasInk ? ink.maxY : 0))
+        let bottom = min(limit, max(CTFontGetDescent(sized), hasInk ? -ink.minY : 0))
+        let pad: CGFloat = 2
+        let width = Int(((right - left + 2 * pad) * scale).rounded(.up))
+        let height = Int(((top + bottom + 2 * pad) * scale).rounded(.up))
+        guard width > 0, height > 0,
+              let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.scaleBy(x: scale, y: scale)
+        ctx.setAllowsAntialiasing(true)
+        ctx.setShouldAntialias(true)
+        ctx.setFillColor(foreground)
+        var position = CGPoint(x: pad - left, y: pad + bottom)
+        CTFontDrawGlyphs(sized, &g, &position, 1, ctx)
+        return ctx.makeImage()
+    }
+
+    /// Whether the glyph has an outline (Copy SVG Code).
+    func hasOutline(_ glyph: CGGlyph) -> Bool {
+        guard let font = face?.font else { return false }
+        return GlyphSVG.document(font: font, glyph: glyph) != nil
+    }
+
     // MARK: Labels
 
     /// The glyphs' labels (character, else glyph name, else #gid) joined by spaces.
@@ -214,6 +286,23 @@ final class FeatureRulesModel {
         }
         return provider
     }
+}
+
+/// One output glyph of a rule on screen: the rule's `output`-th output, its `index`-th glyph.
+struct RuleGlyph: Hashable {
+    let tag: String
+    let rule: GSUBRule
+    let output: Int
+    let index: Int
+
+    var glyph: CGGlyph { rule.outputs[output][index] }
+}
+
+private struct ImageKey: Hashable {
+    let glyph: CGGlyph
+    let pointSize: CGFloat
+    let scale: CGFloat
+    let dark: Bool
 }
 
 /// A cached check: rules are compared by value, so the tag keeps equal rules of different features apart.
