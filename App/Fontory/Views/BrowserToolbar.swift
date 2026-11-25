@@ -95,9 +95,14 @@ private struct SortMenu: View {
         ("Family", .family), ("Name", .name), ("Weight", .weight), ("Date Added", .dateAdded), ("Last Activated", .lastActivated),
     ]
 
+    /// Popular (Google's rank) is offered in the Google Fonts view only; leaving it restores the previous sort.
+    private var options: [(String, LibraryQuery.Sort)] {
+        model.query.scope == .googleFonts ? [("Popular", .popularity)] + Self.options : Self.options
+    }
+
     var body: some View {
         Menu {
-            ForEach(Self.options, id: \.0) { title, sort in
+            ForEach(options, id: \.0) { title, sort in
                 Button { model.chooseSort(sort) } label: {
                     if model.query.sort == sort {
                         Label(title, systemImage: model.query.ascending ? "chevron.up" : "chevron.down")

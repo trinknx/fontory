@@ -18,6 +18,8 @@ struct SidebarView: View {
                     .help("Fonts active outside Fontory: /Library/Fonts, ~/Library/Fonts, Font Book, Adobe and other apps")
                 libraryRow("System", "desktopcomputer", .system, model.counts.system)
                     .help("Fonts that ship with macOS (read-only)")
+                GoogleFontsRow()
+                    .tag(SidebarItem.scope(.googleFonts))
                 libraryRow("Last Import", "clock", .recentImport, model.counts.lastImport)
                 libraryRow("Activated", "sun.max", .activated, model.counts.activated)
                     .help("Everything active on this Mac: System, User and the fonts Fontory activated")
@@ -90,6 +92,53 @@ private struct LibraryHeader: View {
             .accessibilityLabel("System Fonts")
             .accessibilityValue(shown ? "Shown" : "Hidden")
         }
+    }
+}
+
+/// "Google Fonts" with its face count; under it, while syncing needs attention, the download progress (with a small
+/// bar), "Paused", "Folder offline" or the error.
+private struct GoogleFontsRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let google = model.google
+        let count = google?.location.map { model.counts.perLocation[$0.id] ?? 0 } ?? 0
+        VStack(alignment: .leading, spacing: 3) {
+            Label("Google Fonts", systemImage: "globe")
+            if let phase = google?.phase, let detail = phase.sidebarDetail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(phase.isError ? AnyShapeStyle(Color.red) : AnyShapeStyle(.secondary))
+                    .lineLimit(2)
+                    .padding(.leading, 22)
+                if case .downloading(let done, let total) = phase, total > 0 {
+                    ProgressView(value: Double(min(done, total)), total: Double(total))
+                        .progressViewStyle(.linear)
+                        .controlSize(.small)
+                        .padding(.leading, 22)
+                }
+            }
+        }
+        .badge(count)
+        .help("Every Google Fonts family, downloaded to a folder you choose")
+    }
+}
+
+extension GooglePhase {
+    /// The sidebar row's second line; nil when there is nothing to report.
+    var sidebarDetail: String? {
+        switch self {
+        case .downloading(let done, let total): "Downloading \(done.formatted()) of \(total.formatted())"
+        case .paused: "Paused"
+        case .offline: "Folder offline"
+        case .error(let message): message
+        case .off, .idle, .checking: nil
+        }
+    }
+
+    var isError: Bool {
+        if case .error = self { return true }
+        return false
     }
 }
 
@@ -234,7 +283,7 @@ private struct LocationRow: View {
         switch location.kind {
         case .folder: return "folder"
         case .fileSet: return "doc.on.doc"
-        case .googleFonts: return "textformat"
+        case .googleFonts: return "globe"
         case .system: return "lock"
         case .userInstalled: return "person.crop.square"
         }

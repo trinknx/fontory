@@ -25,6 +25,14 @@ struct MainWindow: View {
                              selection: model.selection, quickCollection: model.quickCollectionIDs, query: model.query,
                              isHidden: browserHidden)
                     .id(mode)
+                    // The Google Fonts view's category and Vietnamese filters, above the fonts.
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        if model.showsGoogleFilterBar { GoogleFilterBar(model: model) }
+                    }
+                if model.showsGoogleEmptyState && !browserHidden {
+                    GoogleFontsEmptyState()
+                        .background(.background)
+                }
                 if model.isShowingDuplicates {
                     DuplicatesView(model: model)
                         .background(.background)

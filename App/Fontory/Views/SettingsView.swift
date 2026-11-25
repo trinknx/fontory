@@ -2,7 +2,7 @@ import FontoryCore
 import SwiftUI
 
 enum SettingsTab: Hashable, Sendable {
-    case general, locations, duplicates, backups
+    case general, locations, duplicates, backups, googleFonts
 }
 
 struct SettingsView: View {
@@ -23,6 +23,9 @@ struct SettingsView: View {
             BackupsSettingsView()
                 .tabItem { Label("Backups", systemImage: "clock.arrow.circlepath") }
                 .tag(SettingsTab.backups)
+            GoogleFontsSettingsView()
+                .tabItem { Label("Google Fonts", systemImage: "globe") }
+                .tag(SettingsTab.googleFonts)
         }
         .frame(width: 560, height: 460)
         // One presenter for every tab.
@@ -132,7 +135,7 @@ private struct LocationSettings: View {
         case .userInstalled: "person.crop.square"
         case .fileSet: "doc.on.doc"
         case .folder: "folder"
-        case .googleFonts: "textformat"
+        case .googleFonts: "globe"
         }
     }
 

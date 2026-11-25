@@ -382,9 +382,15 @@ final class AppModel {
                 refreshCounts()
                 startDuplicateSearch(hashing: false)
             }
+            if query.sort == .popularity && oldValue.sort != .popularity {
+                sortBeforePopularity = (oldValue.sort, oldValue.ascending)
+            }
             scheduleRefresh()
+            if oldValue.scope == .googleFonts && query.scope != .googleFonts { leftGoogleScope() }
         }
     }
+    /// The sort to return to when the Google Fonts view (the only one offering Popular) is left.
+    @ObservationIgnored var sortBeforePopularity: (sort: LibraryQuery.Sort, ascending: Bool) = (.family, true)
     var searchText = "" { didSet { if searchText != oldValue { updateSearch() } } }
     var searchScope: Set<SearchText.Field> = Set(SearchText.Field.allCases) { didSet { if searchScope != oldValue { updateSearch() } } }
     var viewMode: ViewMode = .grid {

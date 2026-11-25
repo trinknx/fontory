@@ -110,3 +110,40 @@ extension AppModel {
         return fonts + (active == 1 ? " · 1 filter" : " · \(active) filters")
     }
 }
+
+// MARK: Google Fonts browser
+
+/// The Google Fonts row's browser: the empty state with the consent button before the first download, else the
+/// faces with the Google filter bar (category, Vietnamese, and Popular in the sort menu). The Google filters restrict
+/// every view to Google faces, so they and the Popular sort are dropped when another view is chosen.
+extension AppModel {
+    /// Google's categories, as the catalogue spells them (the filter bar's segments after All).
+    static let googleCategories = ["Sans Serif", "Serif", "Display", "Handwriting", "Monospace"]
+
+    /// The Google Fonts view before consent: syncing is off and there is no Google Fonts location (Stop Syncing keeps
+    /// the location, and its fonts stay browsable).
+    var showsGoogleEmptyState: Bool {
+        query.scope == .googleFonts && google?.isEnabled != true && google?.location == nil
+    }
+
+    var showsGoogleFilterBar: Bool {
+        query.scope == .googleFonts && !showsGoogleEmptyState && filtersAvailable
+    }
+
+    /// Called from `query`'s observer when the scope changes away from `.googleFonts`.
+    func leftGoogleScope() {
+        if filters.googleCategory != nil || filters.googleVietnamese {
+            var cleared = filters
+            cleared.googleCategory = nil
+            cleared.googleVietnamese = false
+            filters = cleared
+        }
+        if query.sort == .popularity {
+            let previous = sortBeforePopularity
+            var restored = query
+            restored.sort = previous.sort
+            restored.ascending = previous.ascending
+            query = restored
+        }
+    }
+}

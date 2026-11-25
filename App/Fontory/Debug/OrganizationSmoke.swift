@@ -3026,6 +3026,8 @@ enum OrganizationSmoke {
         struct Family {
             var modified: String
             var font: Data
+            var category = "Sans Serif"
+            var subsets = ["latin", "vietnamese"]
         }
         private let lock = NSLock()
         private var families: [String: Family] = [:]
@@ -3034,7 +3036,17 @@ enum OrganizationSmoke {
         private var count = 0
 
         var requests: Int { lock.withLock { count } }
-        func set(_ name: String, modified: String, font: Data) { lock.withLock { families[name] = Family(modified: modified, font: font) } }
+        /// A family's category and subsets are kept when not given.
+        func set(_ name: String, modified: String, font: Data, category: String? = nil, subsets: [String]? = nil) {
+            lock.withLock {
+                var family = families[name] ?? Family(modified: modified, font: font)
+                family.modified = modified
+                family.font = font
+                if let category { family.category = category }
+                if let subsets { family.subsets = subsets }
+                families[name] = family
+            }
+        }
         func setFailsCatalog(_ fails: Bool) { lock.withLock { failsCatalog = fails } }
         func setFontDelay(_ delay: Duration) { lock.withLock { fontDelay = delay } }
 
@@ -3051,8 +3063,8 @@ enum OrganizationSmoke {
             if url == GoogleCatalog.catalogURL {
                 if fails { throw URLError(.notConnectedToInternet) }
                 let list = fams.keys.sorted().enumerated().map { i, name in
-                    ["family": name, "category": "Sans Serif", "lastModified": fams[name]!.modified,
-                     "subsets": ["latin", "vietnamese"], "designers": ["Smoke"], "popularity": i + 1,
+                    ["family": name, "category": fams[name]!.category, "lastModified": fams[name]!.modified,
+                     "subsets": fams[name]!.subsets, "designers": ["Smoke"], "popularity": i + 1,
                      "size": fams[name]!.font.count] as [String: Any]
                 }
                 return try json(["familyMetadataList": list])
@@ -3117,8 +3129,8 @@ enum OrganizationSmoke {
             georgia = try Data(contentsOf: supplemental.appendingPathComponent("Georgia.ttf"))
             courier = try Data(contentsOf: supplemental.appendingPathComponent("Courier New.ttf"))
             transport.set("Smoke Sans", modified: "2025-01-01", font: arial)
-            transport.set("Smoke Serif", modified: "2025-01-01", font: georgia)
-            transport.set("Smoke Mono", modified: "2025-01-01", font: courier)
+            transport.set("Smoke Serif", modified: "2025-01-01", font: georgia, category: "Serif", subsets: ["latin"])
+            transport.set("Smoke Mono", modified: "2025-01-01", font: courier, category: "Monospace")
             backend = try LibraryBackend(databaseURL: root.appendingPathComponent("library.sqlite"), registrar: registrar)
         } catch {
             check(false, "google: setup", "\(error)"); return
@@ -3150,6 +3162,14 @@ enum OrganizationSmoke {
         check(controller.estimatedBytes == arial.count + georgia.count + courier.count && controller.estimatedFamilies == 3,
               "google: estimate from the catalogue", "\(String(describing: controller.estimatedBytes))")
 
+        // The sidebar row before consent: the browser shows the empty state (no catalogue request).
+        let requestsBeforeRow = transport.requests
+        model.applySidebarSelection([.scope(.googleFonts)], modifiers: [])
+        check(model.query.scope == .googleFonts && model.showsGoogleEmptyState && !model.showsGoogleFilterBar
+              && transport.requests == requestsBeforeRow,
+              "google ui: empty state when disabled", "\(model.query.scope) \(model.showsGoogleEmptyState)")
+        model.applySidebarSelection([.scope(.all)], modifiers: [])
+
         // Refused: inside a user location, and the user location itself (never converted to kind 4).
         let inside = fonts.appendingPathComponent("Google Fonts", isDirectory: true)
         let requestsBefore = transport.requests
@@ -3179,6 +3199,8 @@ enum OrganizationSmoke {
         guard let loc = controller.location, samePath(loc.lastKnownPath, google) else {
             check(false, "google: location", "\(String(describing: controller.location))"); return
         }
+
+        await googleFilterBarSteps(model, store: store)
 
         // A check within 24 h is skipped without a request.
         let beforeSkip = transport.requests
@@ -3341,6 +3363,51 @@ enum OrganizationSmoke {
 
         let standardAfter = keys.map { String(describing: UserDefaults.standard.object(forKey: $0)) }
         check(standardAfter == standardBefore, "google: nothing written to the user's defaults")
+    }
+
+    /// The Google filter bar on the downloaded fixture (Smoke Mono: Monospace, vietnamese, popularity 1; Smoke Sans:
+    /// Sans Serif, vietnamese, 2; Smoke Serif: Serif, latin only, 3): category, Vietnamese and Popular reach the
+    /// browser's query; leaving the scope clears them and restores the previous sort.
+    private static func googleFilterBarSteps(_ model: AppModel, store: FontStore) async {
+        guard let mono = googleFace(store, postScriptName: "CourierNewPSMT"), let sans = googleFace(store, postScriptName: "ArialMT"),
+              let serif = googleFace(store, postScriptName: "Georgia") else {
+            check(false, "google ui: fixture faces", "\(googleIDs(store))"); return
+        }
+        model.clearFilters()
+        model.chooseSort(.name)
+        model.applySidebarSelection([.scope(.googleFonts)], modifiers: [])
+        let all = await shown(model)
+        check(all == [mono, sans, serif] && !model.showsGoogleEmptyState && model.showsGoogleFilterBar,
+              "google ui: enabled scope shows the faces and the filter bar", "\(all) \(model.showsGoogleEmptyState)")
+
+        model.filters.googleCategory = "Serif"
+        let serifOnly = await shown(model)
+        model.filters.googleCategory = "Monospace"
+        let monoOnly = await shown(model)
+        check(serifOnly == [serif] && monoOnly == [mono] && model.query.filters.googleCategory == "Monospace",
+              "google ui: category filter narrows", "\(serifOnly) \(monoOnly)")
+        model.filters.googleCategory = nil
+
+        model.filters.googleVietnamese = true
+        let vietnamese = await shown(model)
+        check(vietnamese == [mono, sans] && model.query.filters.googleVietnamese,
+              "google ui: vietnamese filter narrows", "\(vietnamese)")
+
+        model.chooseSort(.popularity)
+        model.filters.googleVietnamese = false
+        _ = await shown(model)
+        check(model.query.sort == .popularity && model.query.ascending && model.faceIDs == [mono, sans, serif],
+              "google ui: popularity sort orders", "\(model.faceIDs)")
+
+        model.filters.googleCategory = "Serif"
+        model.filters.googleVietnamese = true
+        model.applySidebarSelection([.scope(.all)], modifiers: [])
+        check(model.filters.googleCategory == nil && !model.filters.googleVietnamese && model.query.filters.googleCategory == nil
+              && !model.query.filters.googleVietnamese && model.query.sort == .name && model.query.ascending
+              && !model.showsGoogleFilterBar,
+              "google ui: leaving the scope clears the google filters and the popularity sort",
+              "\(model.filters.googleCategory ?? "-") \(model.query.sort)")
+        model.chooseSort(.family)
     }
 
     /// Polls (on the main actor) until `condition` holds or `budget` passes.
