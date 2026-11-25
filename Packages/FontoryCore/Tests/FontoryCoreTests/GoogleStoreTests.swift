@@ -40,7 +40,7 @@ import Testing
     @Test func syncUpdatesMetadataKeepsFolderAndDownloadState() throws {
         let store = try makeStore()
         _ = try store.syncGoogleCatalog([fam("Foo"), fam("FOO")])
-        try store.markGoogleFamilyDone("Foo", modified: "2024-01-01")
+        try store.markGoogleFamilyDone("Foo", modified: "2024-01-01", installedFiles: [])
         #expect(try store.googleFamiliesNeedingDownload().map(\.family) == ["FOO"])
         // Metadata-only change is not an update and keeps the done state.
         var summary = try store.syncGoogleCatalog([fam("Foo", designers: ["Z"]), fam("FOO")])
@@ -78,7 +78,7 @@ import Testing
     @Test func doneAndFailedStates() throws {
         let store = try makeStore()
         _ = try store.syncGoogleCatalog([fam("Foo"), fam("Bar")])
-        try store.markGoogleFamilyDone("Foo", modified: "2024-01-01")
+        try store.markGoogleFamilyDone("Foo", modified: "2024-01-01", installedFiles: [])
         try store.markGoogleFamilyFailed("Bar", error: "boom")
         let need = try store.googleFamiliesNeedingDownload()
         #expect(need.map(\.family) == ["Bar"])
@@ -92,14 +92,14 @@ import Testing
     @Test func progressCounts() throws {
         let store = try makeStore()
         _ = try store.syncGoogleCatalog([fam("A"), fam("B"), fam("C")])
-        try store.markGoogleFamilyDone("A", modified: "2024-01-01")
+        try store.markGoogleFamilyDone("A", modified: "2024-01-01", installedFiles: [])
         #expect(try store.googleProgress() == (1, 3))
     }
 
     @Test func resetDownloadsMakesEveryFamilyPending() throws {
         let store = try makeStore()
         _ = try store.syncGoogleCatalog([fam("A"), fam("B"), fam("C")])
-        try store.markGoogleFamilyDone("A", modified: "2024-01-01")
+        try store.markGoogleFamilyDone("A", modified: "2024-01-01", installedFiles: [])
         try store.markGoogleFamilyFailed("B", error: "boom")
         _ = try store.syncGoogleCatalog([fam("A"), fam("B")])  // C withdrawn
         try store.resetGoogleDownloads()
@@ -113,5 +113,31 @@ import Testing
         #expect(s["C"]?.withdrawn == true)
         #expect(try store.googleFamiliesNeedingDownload().map(\.family) == ["A", "B"])
         #expect(try store.googleProgress() == (0, 2))
+    }
+
+    @Test func doneRecordsInstalledFiles() throws {
+        let store = try makeStore()
+        _ = try store.syncGoogleCatalog([fam("A")])
+        try store.markGoogleFamilyDone("A", modified: "2024-01-01", installedFiles: ["OFL.txt", "A-Bold.ttf"])
+        _ = try store.syncGoogleCatalog([fam("A", modified: "2025-01-01")])
+        let need = try store.googleFamiliesNeedingDownload()
+        #expect(need.map(\.family) == ["A"])
+        #expect(need[0].installedFiles == ["OFL.txt", "A-Bold.ttf"])
+    }
+
+    @Test func resetClearsInstalledFiles() throws {
+        let store = try makeStore()
+        _ = try store.syncGoogleCatalog([fam("A")])
+        try store.markGoogleFamilyDone("A", modified: "2024-01-01", installedFiles: ["OFL.txt", "A-Bold.ttf"])
+        try store.resetGoogleDownloads()
+        let need = try store.googleFamiliesNeedingDownload()
+        #expect(need.map(\.family) == ["A"])
+        #expect(need[0].installedFiles.isEmpty)
+        try store.database.withLock {
+            let s = try store.database.prepare("SELECT installed_files FROM google_families WHERE family = 'A'")
+            defer { s.reset() }
+            #expect(try s.step())
+            #expect(s.isNull(0))
+        }
     }
 }

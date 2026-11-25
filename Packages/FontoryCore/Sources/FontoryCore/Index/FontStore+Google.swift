@@ -8,9 +8,12 @@ public struct GoogleFamilyState: Sendable, Hashable {
     public let status: Int
     public let error: String?
     public let withdrawn: Bool
+    /// Basenames Fontory installed into the family folder in its last completed download (empty when none known).
+    /// Updates delete only these files, never anything else in the folder.
+    public let installedFiles: [String]
 
     public init(family: String, folder: String, lastModified: String, downloadedModified: String?,
-                status: Int, error: String?, withdrawn: Bool) {
+                status: Int, error: String?, withdrawn: Bool, installedFiles: [String] = []) {
         self.family = family
         self.folder = folder
         self.lastModified = lastModified
@@ -18,6 +21,7 @@ public struct GoogleFamilyState: Sendable, Hashable {
         self.status = status
         self.error = error
         self.withdrawn = withdrawn
+        self.installedFiles = installedFiles
     }
 }
 
@@ -109,8 +113,8 @@ extension FontStore {
     public func googleFamiliesNeedingDownload() throws -> [GoogleFamilyState] {
         try reader.withLock {
             let s = try reader.prepare("""
-                SELECT family, folder, last_modified, downloaded_modified, status, error, withdrawn FROM google_families
-                WHERE withdrawn = 0 AND (downloaded_modified IS NULL OR downloaded_modified != last_modified)
+                SELECT family, folder, last_modified, downloaded_modified, status, error, withdrawn, installed_files
+                FROM google_families WHERE withdrawn = 0 AND (downloaded_modified IS NULL OR downloaded_modified != last_modified)
                 ORDER BY family ASC
                 """)
             defer { s.reset() }
@@ -118,17 +122,24 @@ extension FontStore {
             while try s.step() {
                 out.append(GoogleFamilyState(family: s.text(0), folder: s.text(1), lastModified: s.text(2),
                                              downloadedModified: s.isNull(3) ? nil : s.text(3), status: Int(s.int64(4)),
-                                             error: s.isNull(5) ? nil : s.text(5), withdrawn: s.int64(6) != 0))
+                                             error: s.isNull(5) ? nil : s.text(5), withdrawn: s.int64(6) != 0,
+                                             installedFiles: s.isNull(7) ? [] : Self.decodeInstalledFiles(s.text(7))))
             }
             return out
         }
     }
 
-    public func markGoogleFamilyDone(_ family: String, modified: String) throws {
+    /// `installedFiles`: the basenames this download wrote into the family folder; the next update may delete those
+    /// of them the new version no longer lists, and nothing else.
+    public func markGoogleFamilyDone(_ family: String, modified: String, installedFiles: [String]) throws {
+        let files: SQLValue = installedFiles.isEmpty ? .null : .text(Self.encodeInstalledFiles(installedFiles))
         try database.withLock {
-            let s = try database.prepare("UPDATE google_families SET downloaded_modified = ?, status = 1, error = NULL WHERE family = ?")
+            let s = try database.prepare("""
+                UPDATE google_families SET downloaded_modified = ?, status = 1, error = NULL, installed_files = ?
+                WHERE family = ?
+                """)
             defer { s.reset() }
-            try s.bind([.text(modified), .text(family)])
+            try s.bind([.text(modified), files, .text(family)])
             _ = try s.step()
         }
     }
@@ -143,11 +154,23 @@ extension FontStore {
     }
 
     /// Marks every family as never downloaded (the files are elsewhere or gone, e.g. after the folder changed), so the
-    /// next run downloads them all again. Withdrawn flags are kept.
+    /// next run downloads them all again. Nothing is known to be installed in the new folder, so installed files are
+    /// cleared too. Withdrawn flags are kept.
     public func resetGoogleDownloads() throws {
         try database.withLock {
-            try database.execute("UPDATE google_families SET downloaded_modified = NULL, status = 0, error = NULL")
+            try database.execute("""
+                UPDATE google_families SET downloaded_modified = NULL, status = 0, error = NULL, installed_files = NULL
+                """)
         }
+    }
+
+    static func encodeInstalledFiles(_ names: [String]) -> String {
+        (try? JSONEncoder().encode(names)).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
+    }
+
+    /// Unreadable data means none known, so nothing is deleted.
+    static func decodeInstalledFiles(_ text: String) -> [String] {
+        (try? JSONDecoder().decode([String].self, from: Data(text.utf8))) ?? []
     }
 
     public func googleProgress() throws -> (done: Int, total: Int) {

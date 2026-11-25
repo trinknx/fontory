@@ -570,13 +570,42 @@ final class EventLog: @unchecked Sendable {
         #expect(contents(folder.appendingPathComponent("Roboto-Bold.ttf")) == "bold")
         #expect(contents(folder.appendingPathComponent("OFL.txt")) == "licence")
 
-        // An update after Fontory's own download prunes files the family no longer lists.
+        // An update never deletes a file Fontory did not install: the user's Mine.ttf survives it too.
         t.set(GoogleCatalog.catalogURL, catalog([("Roboto", "2")]))
         serve(t, "Roboto", fonts: ["Roboto-Bold.ttf": "bold-v2"])
         _ = try await dl.refreshCatalog()
         await dl.run { _ in }
-        #expect(!exists(folder.appendingPathComponent("Mine.ttf")))
+        #expect(contents(folder.appendingPathComponent("Mine.ttf")) == "mine")
         #expect(contents(folder.appendingPathComponent("Roboto-Bold.ttf")) == "bold-v2")
+    }
+
+    /// An update deletes only files Fontory installed in an earlier download and the new version dropped; a file the
+    /// user added to the family folder afterwards is kept.
+    @Test func updateDeletesOnlyFilesFontoryInstalled() async throws {
+        let root = try makeRoot(); defer { cleanup(root) }
+        let store = try makeStore()
+        let t = FakeGoogleTransport()
+        t.set(GoogleCatalog.catalogURL, catalog([("A", "1")]))
+        serve(t, "A", fonts: ["A-Bold.ttf": "bold-v1", "A-Thin.ttf": "thin-v1"])
+        let dl = downloader(store, root, t)
+        _ = try await dl.refreshCatalog()
+        await dl.run { _ in }
+        let folder = root.appendingPathComponent("A")
+        #expect(contents(folder.appendingPathComponent("A-Thin.ttf")) == "thin-v1")
+        try Data("mine".utf8).write(to: folder.appendingPathComponent("Mine.ttf"))
+
+        t.set(GoogleCatalog.catalogURL, catalog([("A", "2")]))
+        t.remove(fontURL("A", "static/A-Thin.ttf"))
+        serve(t, "A", fonts: ["A-Bold.ttf": "bold-v2"])
+        _ = try await dl.refreshCatalog()
+        let log = EventLog()
+        await dl.run { log.append($0) }
+
+        #expect(log.done == ["A"])
+        #expect(!exists(folder.appendingPathComponent("A-Thin.ttf")))
+        #expect(contents(folder.appendingPathComponent("Mine.ttf")) == "mine")
+        #expect(contents(folder.appendingPathComponent("A-Bold.ttf")) == "bold-v2")
+        #expect(contents(folder.appendingPathComponent("OFL.txt")) == "licence")
     }
 
     /// A full disk stops the run with `.outOfSpace`: no family is marked failed and staging is cleaned.

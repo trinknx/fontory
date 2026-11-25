@@ -26,7 +26,7 @@ import Testing
         try Schema.migrate(db)
         let v = try db.prepare("PRAGMA user_version")
         #expect(try v.step())
-        #expect(v.int64(0) == 6)
+        #expect(v.int64(0) == Int64(Schema.currentVersion))
         v.reset()
         func insert(_ family: String, _ folder: String) throws {
             try db.execute("""
@@ -99,5 +99,34 @@ import Testing
         #expect(try fl.step())
         #expect(fl.int64(0) == 0)
         fl.reset()
+    }
+
+    @Test func v7AddsInstalledFilesToGoogleFamilies() throws {
+        let db = try Database(path: ":memory:")
+        try db.execute(Schema.v1)
+        try db.execute(Schema.v2)
+        try db.execute(Schema.v3)
+        try db.execute(Schema.v4)
+        try db.execute(Schema.v5)
+        try db.execute(Schema.v6)
+        try db.execute("PRAGMA user_version = 6")
+        try db.execute("""
+        INSERT INTO google_families(family, folder, category, subsets, popularity, designers, last_modified,
+          downloaded_modified, status)
+        VALUES('Lato', 'Lato', 'sans-serif', ',latin,', 1, 'D', '2024-01-01', '2024-01-01', 1)
+        """)
+        try Schema.migrate(db)
+
+        let v = try db.prepare("PRAGMA user_version")
+        #expect(try v.step())
+        #expect(v.int64(0) == 7)
+        v.reset()
+        #expect(Schema.currentVersion == 7)
+        // Rows downloaded before v7 have no known installed files, so an update prunes nothing.
+        let row = try db.prepare("SELECT installed_files, downloaded_modified, status FROM google_families WHERE family = 'Lato'")
+        #expect(try row.step())
+        #expect(row.isNull(0))
+        #expect(row.text(1) == "2024-01-01" && row.int64(2) == 1)
+        row.reset()
     }
 }

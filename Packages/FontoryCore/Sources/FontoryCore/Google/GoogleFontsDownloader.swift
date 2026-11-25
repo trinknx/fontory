@@ -87,9 +87,9 @@ public actor GoogleFontsDownloader {
                 return
             }
             switch await download(state) {
-            case .done:
+            case .done(let installed):
                 do {
-                    try store.markGoogleFamilyDone(state.family, modified: state.lastModified)
+                    try store.markGoogleFamilyDone(state.family, modified: state.lastModified, installedFiles: installed)
                     onEvent(.familyDone(state.family))
                 } catch {
                     onEvent(.familyFailed(state.family, Self.describe(error)))
@@ -110,7 +110,8 @@ public actor GoogleFontsDownloader {
         onEvent(.finished)
     }
 
-    private enum Outcome { case done, failed(String), cancelled, rootUnavailable, outOfSpace }
+    /// `done` carries the basenames installed into the family folder.
+    private enum Outcome { case done([String]), failed(String), cancelled, rootUnavailable, outOfSpace }
 
     private enum InstallError: Error {
         case notAFolder(String)
@@ -175,21 +176,21 @@ public actor GoogleFontsDownloader {
 
         guard rootAvailable() else { return abandon(.rootUnavailable) }
         let dest = root.appendingPathComponent(state.folder, isDirectory: true)
+        let names = texts.map(\.name) + fonts.map(\.name)
         do {
-            try install(staging: staging, into: dest, names: texts.map(\.name) + fonts.map(\.name),
-                        pruneOthers: state.downloadedModified != nil)
+            try install(staging: staging, into: dest, names: names, previouslyInstalled: state.installedFiles)
         } catch {
             return abandon(writeFailure(error))
         }
         try? fm.removeItem(at: staging)
-        return .done
+        return .done(names)
     }
 
     /// No `dest` yet: the staging folder is moved into place. Otherwise each new file replaces the file with the
-    /// same name; with `pruneOthers` (an update of a family Fontory completed in this folder), regular files (and
-    /// links) in `dest` whose names are not in the new set are then deleted. A first download into an existing
-    /// folder (one the user made) never deletes anything.
-    private func install(staging: URL, into dest: URL, names: [String], pruneOthers: Bool) throws {
+    /// same name, then regular files (and links) in `dest` that Fontory installed in its previous download of this
+    /// family (`previouslyInstalled`) and the new set no longer lists are deleted. Files Fontory did not install
+    /// (the user's own) are never deleted, on a first download or any update.
+    private func install(staging: URL, into dest: URL, names: [String], previouslyInstalled: [String]) throws {
         let fm = FileManager.default
         // attributesOfItem does not follow symlinks, so a link at `dest` is never written through.
         guard let destType = (try? fm.attributesOfItem(atPath: dest.path))?[.type] as? FileAttributeType else {
@@ -209,11 +210,12 @@ public actor GoogleFontsDownloader {
             }
         }
 
-        guard pruneOthers else { return }
         let keep = Set(names.map { $0.lowercased() })
+        let dropped = Set(previouslyInstalled.map { $0.lowercased() }).subtracting(keep)
+        guard !dropped.isEmpty else { return }
         let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
         for item in try fm.contentsOfDirectory(at: dest, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) {
-            guard !keep.contains(item.lastPathComponent.lowercased()) else { continue }
+            guard dropped.contains(item.lastPathComponent.lowercased()) else { continue }
             let values = try item.resourceValues(forKeys: Set(keys))
             guard values.isRegularFile == true || values.isSymbolicLink == true else { continue }
             try fm.removeItem(at: item)

@@ -1,9 +1,9 @@
 import Foundation
 
 public enum Schema {
-    public static let currentVersion: Int32 = 6
+    public static let currentVersion: Int32 = 7
 
-    private static let steps: [(version: Int32, sql: String)] = [(1, v1), (2, v2), (3, v3), (4, v4), (5, v5), (6, v6)]
+    private static let steps: [(version: Int32, sql: String)] = [(1, v1), (2, v2), (3, v3), (4, v4), (5, v5), (6, v6), (7, v7)]
 
     /// Runs each step whose version is greater than the database's `user_version`.
     public static func migrate(_ db: Database) throws {
@@ -18,6 +18,12 @@ public enum Schema {
             }
         }
     }
+
+    /// The basenames Fontory installed into each Google family folder in its last completed download, as a JSON
+    /// array. NULL means none known (never downloaded, reset, or downloaded before v7), so an update deletes nothing.
+    static let v7 = """
+    ALTER TABLE google_families ADD COLUMN installed_files TEXT;
+    """
 
     /// Google Fonts catalog cache: one row per family. `status`: 0 pending, 1 done, 2 failed. `subsets` is stored as
     /// `",latin,vietnamese,"` so a subset matches exactly with `LIKE '%,latin,%'`.
