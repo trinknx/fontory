@@ -16,7 +16,8 @@ public struct LayoutFeatureInventory: Sendable, Equatable {
     /// One parsed `GSUB` or `GPOS` table.
     struct Table: Sendable, Equatable {
         /// FeatureList in order: tag, and the UI name ID from `FeatureParams` for ssXX / cvXX.
-        var features: [(tag: String, nameID: UInt16?)]
+        /// `lookups`: the FeatureTable's LookupList indices (empty when that list is truncated).
+        var features: [(tag: String, nameID: UInt16?, lookups: [UInt16])]
         var scripts: [String: ScriptEntry]
 
         static let empty = Table(features: [], scripts: [:])
@@ -90,7 +91,7 @@ public struct LayoutFeatureInventory: Sendable, Equatable {
         guard let major = r.u16(0), major == 1, let scriptListOffset = r.u16(4), let featureListOffset = r.u16(6)
         else { return nil }
         // FeatureList
-        var features: [(tag: String, nameID: UInt16?)] = []
+        var features: [(tag: String, nameID: UInt16?, lookups: [UInt16])] = []
         if featureListOffset != 0 {
             let fl = Int(featureListOffset)
             guard let count = r.u16(fl), spend(Int(count)) else { return nil }
@@ -99,7 +100,15 @@ public struct LayoutFeatureInventory: Sendable, Equatable {
                 let record = fl + 2 + i * 6
                 guard let tag = r.tag(record), let offset = r.u16(record + 4) else { return nil }
                 let featureTable = fl + Int(offset)
-                guard let paramsOffset = r.u16(featureTable), r.u16(featureTable + 2) != nil else { return nil }
+                guard let paramsOffset = r.u16(featureTable), let lookupCount = r.u16(featureTable + 2),
+                      spend(Int(lookupCount)) else { return nil }
+                // A truncated index list costs the feature its lookups, not the table.
+                var lookups: [UInt16] = []
+                lookups.reserveCapacity(Int(lookupCount))
+                for k in 0..<Int(lookupCount) {
+                    guard let index = r.u16(featureTable + 4 + k * 2) else { lookups = []; break }
+                    lookups.append(index)
+                }
                 var id: UInt16?
                 if paramsOffset != 0, isNumbered(tag, prefix: "ss") || isNumbered(tag, prefix: "cv") {
                     let params = featureTable + Int(paramsOffset)
@@ -108,7 +117,7 @@ public struct LayoutFeatureInventory: Sendable, Equatable {
                     if let version = r.u16(params), let value = r.u16(params + 2), version == 0,
                        (256...32767).contains(value) { id = value }
                 }
-                features.append((tag, id))
+                features.append((tag, id, lookups))
             }
         }
         // ScriptList
