@@ -6,6 +6,8 @@ public struct LibraryQuery: Sendable, Hashable {
         /// `activated`: everything active on the Mac (system + user + Fontory's). `deactivated`: toggleable
         /// library fonts that are active nowhere.
         case all, system, user, activated, deactivated, offline, recentImport
+        /// Faces of the downloaded Google Fonts location (`locations.kind = 4`).
+        case googleFonts
         case location(id: Int64, subfolder: String?)
         case untagged, quickCollection
         case styleClass(StyleClass)
@@ -15,6 +17,8 @@ public struct LibraryQuery: Sendable, Hashable {
 
     public enum Sort: Sendable, Hashable {
         case family, name, weight, dateAdded, lastActivated
+        /// Google's popularity rank, 1 first; faces from outside Google Fonts last.
+        case popularity
         case random(seed: UInt64)
     }
 
@@ -79,6 +83,10 @@ extension LibraryQuery {
         case .weight: order = "faces.weight \(dir), \(Self.effectiveFamily) COLLATE NOCASE \(dir), faces.id \(dir)"
         case .dateAdded: order = "files.added_at \(dir), faces.id \(dir)"
         case .lastActivated: order = "faces.last_activated IS NULL, faces.last_activated \(dir), faces.id \(dir)"
+        case .popularity:
+            // Smaller rank is more popular; descending flips it. Non-Google faces (NULL rank) stay last either way.
+            let rank = "(SELECT g.popularity FROM google_families g WHERE locations.kind = 4 AND g.folder = \(LibraryFilters.googleFolderSQL) COLLATE NOCASE)"
+            order = "\(rank) IS NULL, \(rank) \(dir), \(Self.effectiveFamily) COLLATE NOCASE \(dir), faces.id \(dir)"
         case .random(let seed):
             // Reduce the seed first so id * seed stays well inside Int64.
             // Bound, not interpolated, so every reshuffle reuses one cached statement.
@@ -105,6 +113,7 @@ extension LibraryQuery {
         case .user: clauses.append("files.external_active != 0 AND (locations.kind = 3 OR locations.kind IN (\(Self.toggleableKindsSQL)) AND faces.activation = 0)")
         case .activated: clauses.append(Self.activatedClause)
         case .deactivated: clauses.append("faces.activation = 0 AND files.external_active = 0 AND locations.kind IN (\(Self.toggleableKindsSQL))")
+        case .googleFonts: clauses.append("locations.kind = 4")
         case .offline: clauses.append("locations.online = 0")
         case .recentImport: clauses.append("files.import_batch = (SELECT MAX(import_batch) FROM files)")
         case .location(let id, let subfolder):

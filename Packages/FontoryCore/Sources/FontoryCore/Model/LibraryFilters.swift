@@ -20,7 +20,16 @@ public struct LibraryFilters: Sendable, Hashable {
     public var variable: TriState = .any, color: TriState = .any
     public var xHeight: XHeight = .any
 
+    /// One of Google's category strings ("Sans Serif", "Serif", "Display", "Handwriting", "Monospace"); nil = any.
+    /// Like `googleVietnamese`, it only matches faces of the Google Fonts location.
+    public var googleCategory: String? = nil
+    /// The Google family lists vietnamese among its subsets (the catalogue's flag, not glyph coverage).
+    public var googleVietnamese = false
+
     public init() {}
+
+    /// First path component of `files.relative_path`: the family folder of a downloaded Google face.
+    static let googleFolderSQL = "substr(files.relative_path, 1, instr(files.relative_path || '/', '/') - 1)"
 
     /// Unique required scalars, ascending.
     var requiredScalars: [UInt32] {
@@ -54,6 +63,8 @@ public struct LibraryFilters: Sendable, Hashable {
         if variable != .any { n += 1 }
         if color != .any { n += 1 }
         if xHeight != .any { n += 1 }
+        if googleCategory != nil { n += 1 }
+        if googleVietnamese { n += 1 }
         return n
     }
 
@@ -111,6 +122,15 @@ public struct LibraryFilters: Sendable, Hashable {
             default: band = "\(ratio) > ?"; bindings.append(.double(Self.highAbove))
             }
             clauses.append("faces.x_height > 0 AND faces.cap_height > 0 AND \(band)")
+        }
+        if googleCategory != nil || googleVietnamese {
+            var match = "EXISTS (SELECT 1 FROM google_families g WHERE locations.kind = 4 AND g.folder = \(Self.googleFolderSQL) COLLATE NOCASE"
+            if let googleCategory {
+                match += " AND g.category = ?"
+                bindings.append(.text(googleCategory))
+            }
+            if googleVietnamese { match += " AND g.subsets LIKE '%,vietnamese,%'" }
+            clauses.append(match + ")")
         }
         return (clauses, bindings)
     }
