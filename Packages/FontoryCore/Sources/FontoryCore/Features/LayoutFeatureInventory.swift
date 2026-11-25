@@ -101,6 +101,7 @@ public struct LayoutFeatureInventory: Sendable, Equatable {
                 let record = fl + 2 + i * 6
                 guard let tag = r.tag(record), let offset = r.u16(record + 4) else { return nil }
                 let featureTable = fl + Int(offset)
+                // Reading the lookup indices counts against the inventory's work budget (one unit per index).
                 guard let paramsOffset = r.u16(featureTable), let lookupCount = r.u16(featureTable + 2),
                       spend(Int(lookupCount)) else { return nil }
                 // A truncated index list costs the feature its lookups, not the table.

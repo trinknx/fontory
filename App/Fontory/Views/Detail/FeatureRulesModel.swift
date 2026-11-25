@@ -13,16 +13,17 @@ final class FeatureRulesModel {
     /// GSUB tags of the current selection with at least one rule, and their counts.
     private(set) var counts: [String: Int] = [:]
     private(set) var hasAATLayout = false
-    /// Expanded feature tags, kept for the session across faces.
-    var expanded: Set<String> = []
-    /// The output glyph the user clicked; cleared by `load`.
-    var selectedGlyph: RuleGlyph?
+    /// The output glyph the user clicked (set through `select`); cleared by `load`. Only the footer observes it; each
+    /// rule cell observes its own `RuleCellState`.
+    private(set) var selectedGlyph: RuleGlyph?
     /// Bumped by every `load`, so views keyed on it drop images of the previous face.
     private(set) var faceVersion = 0
 
-    /// Published rules per tag and statuses per rule (observed, so rows update as results arrive).
+    /// Published rules per tag (observed, so the list appears when read).
     private var rulesByTag: [String: GSUBFeatureRules] = [:]
-    private var statusCache: [StatusKey: [GSUBRuleStatus]] = [:]
+    /// Per-rule statuses and selection. The dictionary is not observed; each cell observes only its own state, so a
+    /// check batch or a click re-renders the cells it touches, not every cell on screen.
+    @ObservationIgnored private var cellStates: [StatusKey: RuleCellState] = [:]
 
     @ObservationIgnored private let renderer: PreviewRenderer
     @ObservationIgnored private var generation = 0
@@ -37,8 +38,12 @@ final class FeatureRulesModel {
     @ObservationIgnored private var queued: Set<StatusKey> = []
     @ObservationIgnored private var flushScheduled = false
     @ObservationIgnored private let promiseWriter = GlyphPromiseWriter()
-    /// Rendered output glyphs of the current face; bounded, cleared by `load`.
+    /// Rendered output glyphs of the current face, oldest first in `imageOrder`; bounded (the oldest quarter is
+    /// dropped at the limit), cleared by `load`.
     @ObservationIgnored private var images: [ImageKey: ImageBox] = [:]
+    @ObservationIgnored private var imageOrder: [ImageKey] = []
+    /// Renders in flight, shared by every cell asking for the same image.
+    @ObservationIgnored private var rendering: [ImageKey: Task<ImageBox, Never>] = [:]
     private static let imageCacheLimit = 600
 
     init(renderer: PreviewRenderer) {
@@ -63,8 +68,10 @@ final class FeatureRulesModel {
         pending = []
         queued = []
         rulesByTag = [:]
-        statusCache = [:]
+        cellStates = [:]
         images = [:]
+        imageOrder = []
+        rendering = [:]
         selectedGlyph = nil
         faceVersion = current
         counts = [:]
@@ -111,15 +118,38 @@ final class FeatureRulesModel {
         return nil
     }
 
-    /// Statuses for a visible rule; nil until checked. Calling it schedules the check (batched, off main, cached).
-    func statuses(for rule: GSUBRule, tag: String) -> [GSUBRuleStatus]? {
+    /// The observable state of one rule's cell (statuses, selected glyph); made on first use, replaced by `load`.
+    /// Never schedules work, so a view body may call it.
+    func cellState(for rule: GSUBRule, tag: String) -> RuleCellState {
         let key = StatusKey(tag: tag, rule: rule)
-        if let statuses = statusCache[key] { return statuses }
-        guard face != nil, !queued.contains(key) else { return nil }
+        if let state = cellStates[key] { return state }
+        let state = RuleCellState()
+        if let selectedGlyph, selectedGlyph.tag == tag, selectedGlyph.rule == rule { state.selected = selectedGlyph }
+        cellStates[key] = state
+        return state
+    }
+
+    /// Schedules the check of a rule on screen (batched, off main, cached); the result lands in its `cellState`.
+    func requestCheck(_ rule: GSUBRule, tag: String) {
+        let key = StatusKey(tag: tag, rule: rule)
+        guard face != nil, cellStates[key]?.statuses == nil, !queued.contains(key) else { return }
         queued.insert(key)
         pending.append(key)
         scheduleFlush()
-        return nil
+    }
+
+    /// Statuses for a rule; nil until checked. Calling it schedules the check (see `requestCheck`).
+    func statuses(for rule: GSUBRule, tag: String) -> [GSUBRuleStatus]? {
+        requestCheck(rule, tag: tag)
+        return cellStates[StatusKey(tag: tag, rule: rule)]?.statuses
+    }
+
+    /// Selects an output glyph (nil clears), updating only the cells it leaves and enters.
+    func select(_ item: RuleGlyph?) {
+        guard item != selectedGlyph else { return }
+        if let old = selectedGlyph { cellStates[StatusKey(tag: old.tag, rule: old.rule)]?.selected = nil }
+        selectedGlyph = item
+        if let item { cellState(for: item.rule, tag: item.tag).selected = item }
     }
 
     /// Runs the rules requested in this main-actor turn as one detached batch.
@@ -148,7 +178,9 @@ final class FeatureRulesModel {
                 return out
             }.value
             guard let self, current == self.generation else { return }
-            self.statusCache.merge(results) { _, new in new }
+            for (key, statuses) in results {
+                self.cellState(for: key.rule, tag: key.tag).statuses = statuses
+            }
             self.queued.subtract(results.keys)
         }
     }
@@ -158,21 +190,39 @@ final class FeatureRulesModel {
     /// `glyph` drawn at `pointSize` (in points; the bitmap is `scale` times larger) in the primary text colour of the
     /// appearance, colour glyphs in colour, on a transparent background. The box spans the face's ascent and descent
     /// (grown to the ink) so a rule's glyphs line up. Renders off the main actor; cached; nil when the face changed
-    /// meanwhile or there is no face.
+    /// meanwhile or there is no face. Cells asking for an image already rendering share that render.
     func glyphImage(_ glyph: CGGlyph, pointSize: CGFloat, scale: CGFloat, dark: Bool) async -> CGImage? {
         let key = ImageKey(glyph: glyph, pointSize: pointSize, scale: scale, dark: dark)
         if let cached = images[key] { return cached.image }
         guard let face else { return nil }
         let current = generation
-        let rendered = await Task.detached(priority: .userInitiated) {
-            ImageBox(image: Self.renderGlyph(font: face.font, glyph: glyph, pointSize: pointSize, scale: scale,
-                                             foreground: CGColor(gray: dark ? 1 : 0, alpha: 0.85)))
-        }.value
+        let task: Task<ImageBox, Never>
+        if let running = rendering[key] {
+            task = running
+        } else {
+            task = Task.detached(priority: .userInitiated) {
+                ImageBox(image: Self.renderGlyph(font: face.font, glyph: glyph, pointSize: pointSize, scale: scale,
+                                                 foreground: CGColor(gray: dark ? 1 : 0, alpha: 0.85)))
+            }
+            rendering[key] = task
+        }
+        let rendered = await task.value
         guard current == generation else { return nil }
-        if images.count >= Self.imageCacheLimit { images.removeAll(keepingCapacity: true) }
-        images[key] = rendered
+        if rendering[key] == task { rendering[key] = nil }
+        if images[key] == nil {
+            if images.count >= Self.imageCacheLimit {
+                let dropped = imageOrder.prefix(Self.imageCacheLimit / 4)
+                for old in dropped { images[old] = nil }
+                imageOrder.removeFirst(dropped.count)
+            }
+            images[key] = rendered
+            imageOrder.append(key)
+        }
         return rendered.image
     }
+
+    /// Cached images and renders in flight (smoke checks).
+    var imageCacheCountForSmoke: (images: Int, rendering: Int) { (images.count, rendering.count) }
 
     /// Pure: see `glyphImage`. At least a quarter em wide, so an inkless glyph (space) still shows a cell.
     nonisolated static func renderGlyph(font: CTFont, glyph: CGGlyph, pointSize: CGFloat, scale: CGFloat,
@@ -209,10 +259,10 @@ final class FeatureRulesModel {
         return ctx.makeImage()
     }
 
-    /// Whether the glyph has an outline (Copy SVG Code).
+    /// Whether the glyph has an exportable outline (Copy SVG Code); false for every glyph of a colour or bitmap face.
     func hasOutline(_ glyph: CGGlyph) -> Bool {
         guard let font = face?.font else { return false }
-        return GlyphSVG.document(font: font, glyph: glyph) != nil
+        return GlyphSVG.hasExportableOutline(font: font, glyph: glyph)
     }
 
     // MARK: Labels
@@ -254,7 +304,7 @@ final class FeatureRulesModel {
 
     /// The glyph's SVG document as plain text. False when the glyph has no outline.
     func copySVGCode(_ glyph: CGGlyph, to pasteboard: NSPasteboard = .general) -> Bool {
-        guard let font = face?.font, let svg = GlyphSVG.document(font: font, glyph: glyph) else { return false }
+        guard let font = face?.font, let svg = GlyphSVG.exportDocument(font: font, glyph: glyph) else { return false }
         return GlyphExport.copySVGCode(svg, to: pasteboard)
     }
 
@@ -270,14 +320,14 @@ final class FeatureRulesModel {
         let glyphName = CTFontCopyGraphicsFont(font, nil).name(for: glyph) as String?
         let scalar = labels?.character(for: glyph)?.unicodeScalars.first?.value
         let provider: GlyphPromiseProvider
-        if let svg = GlyphSVG.document(font: font, glyph: glyph) {
+        if let svg = GlyphSVG.exportDocument(font: font, glyph: glyph) {
             provider = GlyphPromiseProvider(fileType: UTType.svg.identifier, delegate: promiseWriter)
             provider.userInfo = GlyphPromiseProvider.Payload(
                 fileName: GlyphExport.fileName(postScriptName: psName, glyphName: glyphName, scalar: scalar,
                                                glyph: glyph, extension: "svg"),
                 svg: svg)
         } else {
-            // Colour or bitmap glyph: the PNG renders on the promise writer's queue when the drop asks for it.
+            // Colour or bitmap face (its outlines are only a fallback): the PNG renders on the promise writer's queue when the drop asks for it.
             provider = GlyphPromiseProvider(fileType: UTType.png.identifier, delegate: promiseWriter)
             provider.userInfo = GlyphPromiseProvider.Payload(
                 fileName: GlyphExport.fileName(postScriptName: psName, glyphName: glyphName, scalar: scalar,
@@ -286,6 +336,14 @@ final class FeatureRulesModel {
         }
         return provider
     }
+}
+
+/// What one rule cell shows that changes after it appears: the check's statuses (nil until checked) and the selected
+/// output glyph of this rule, if any.
+@MainActor @Observable
+final class RuleCellState {
+    var statuses: [GSUBRuleStatus]?
+    var selected: RuleGlyph?
 }
 
 /// One output glyph of a rule on screen: the rule's `output`-th output, its `index`-th glyph.

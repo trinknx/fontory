@@ -283,8 +283,8 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
         true
     }
 
-    /// An SVG file promise, plus the character as plain text. A glyph without an outline (bitmap, colour) drags only
-    /// its character, and not at all when it has none.
+    /// An SVG file promise, plus the character as plain text. A glyph without an outline, or of a colour or bitmap
+    /// face, drags only its character, and not at all when it has none.
     func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
         guard let face, entries.indices.contains(indexPath.item) else { return nil }
         let entry = entries[indexPath.item]
@@ -299,22 +299,28 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
 
     func svg(of entry: GlyphEntry, face: GlyphFace) -> String? {
         model.previewRenderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: 1)
-            .flatMap { GlyphSVG.document(font: $0, glyph: entry.glyphID) }
+            .flatMap { GlyphSVG.exportDocument(font: $0, glyph: entry.glyphID) }
     }
 
     var selectedEntry: GlyphEntry? {
         selectedIndex.map { entries[$0] }
     }
 
-    /// ⌘C: the character; for an unmapped glyph the glyph image (PNG + SVG); a beep when there is neither.
+    /// ⌘C: the character; for an unmapped glyph the glyph image (PNG + SVG, rendered off the main thread); a beep
+    /// when there is neither.
     func copySelection() {
         guard let entry = selectedEntry, let face else { return NSSound.beep() }
         if entry.isMapped {
             GlyphExport.copyCharacter(entry)
-        } else if let font = model.previewRenderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: 1),
-                  GlyphExport.copyGlyph(font: font, glyph: entry.glyphID) {
-        } else {
-            NSSound.beep()
+            return
+        }
+        let renderer = model.previewRenderer
+        let glyph = entry.glyphID
+        // copyGlyphAsync beeps when it writes nothing.
+        Task {
+            await GlyphExport.copyGlyphAsync(font: {
+                renderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: 1)
+            }, glyph: glyph)
         }
     }
 }
@@ -470,10 +476,12 @@ enum GlyphExport {
     static let svgType = NSPasteboard.PasteboardType(UTType.svg.identifier)
 
     /// The glyph as a PNG and as an SVG (public.svg-image), and no plain text: a design app pastes text in preference
-    /// to an image, so the clipboard offers images only. False (nothing written) when the glyph has neither.
+    /// to an image, so the clipboard offers images only. A colour or bitmap face gives the full-colour PNG only.
+    /// False (nothing written) when the glyph has neither.
     @discardableResult
     static func copyGlyph(font: CTFont, glyph: CGGlyph, to pasteboard: NSPasteboard = .general) -> Bool {
-        write(png: GlyphImage.png(font: font, glyph: glyph), svg: GlyphSVG.document(font: font, glyph: glyph), to: pasteboard)
+        write(png: GlyphImage.png(font: font, glyph: glyph), svg: GlyphSVG.exportDocument(font: font, glyph: glyph),
+              to: pasteboard)
     }
 
     /// Writes already-rendered data; the UI renders off the main thread and calls this afterwards.
@@ -502,7 +510,7 @@ enum GlyphExport {
                                to pasteboard: NSPasteboard = .general) async -> Bool {
         let rendered = await Task.detached(priority: .userInitiated) { () -> (Data?, String?) in
             guard let font = font() else { return (nil, nil) }
-            return (GlyphImage.png(font: font, glyph: glyph), GlyphSVG.document(font: font, glyph: glyph))
+            return (GlyphImage.png(font: font, glyph: glyph), GlyphSVG.exportDocument(font: font, glyph: glyph))
         }.value
         let wrote = write(png: rendered.0, svg: rendered.1, to: pasteboard)
         if !wrote { NSSound.beep() }

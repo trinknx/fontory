@@ -9,6 +9,22 @@ public enum GlyphImage {
     public static let emPixels: CGFloat = 2048
     private static let maxSide: CGFloat = 8192
 
+    /// Whether the face draws colour or bitmap glyphs (`COLR`, `SVG `, `sbix`, `CBDT`, or CoreText's colour-glyphs
+    /// trait). Such faces may keep plain outlines as a fallback, so exports give a full-colour PNG and no SVG.
+    /// Reads only the table directory, never a table's bytes (the emoji `sbix` is huge).
+    public static func isColourFace(_ font: CTFont) -> Bool {
+        if CTFontGetSymbolicTraits(font).contains(.traitColorGlyphs) { return true }
+        let colourTags: Set<UInt32> = Set(["COLR", "SVG ", "sbix", "CBDT"].map { tag in
+            tag.utf8.reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+        })
+        guard let tables = CTFontCopyAvailableTables(font, []) else { return false }
+        for i in 0..<CFArrayGetCount(tables) {
+            let raw = UInt32(UInt(bitPattern: CFArrayGetValueAtIndex(tables, i)))
+            if colourTags.contains(raw) { return true }
+        }
+        return false
+    }
+
     /// PNG of `glyph` with em = 2048 px, cropped to the ink plus a margin of 2% of the em, transparent background.
     /// Outline glyphs are filled black; colour and bitmap glyphs are drawn in colour (CTFontDrawGlyphs).
     /// nil for a glyph with no ink (space).

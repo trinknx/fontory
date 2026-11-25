@@ -577,6 +577,9 @@ final class AppModel {
     var renamingTagID: Int64?
     /// Expanded tag rows in the sidebar tree.
     var expandedTagIDs: Set<Int64> = []
+    /// GSUB feature tags whose rules are expanded in the Features tab; kept for the session (across faces and tab
+    /// switches), not saved across launches.
+    var expandedRuleFeatures: Set<String> = []
     /// The smart tag editor sheet's draft, while it is shown (see `SmartTagEditor`).
     var smartTagEditor: SmartTagEditorState?
     /// Organization reloads (see `reloadOrganization`): the one running, the merged kind of the pending one,

@@ -198,18 +198,70 @@ enum OrganizationSmoke {
               && !(emojiItem?.writableTypes(for: emojiPB) ?? []).contains(.string),
               "rules: colour glyph drags as a PNG promise", "\(emojiGlyphs[0]) \(emojiName)")
 
+        if emojiGlyphs[0] != 0 {
+            let pb = NSPasteboard(name: .init("fontory.smoke.\(UUID())"))
+            defer { pb.releaseGlobally() }
+            let wrote = await emoji.copyGlyphAsync(emojiGlyphs[0], to: pb)
+            let types = pb.types ?? []
+            check(wrote && types.contains(.png) && !types.contains(GlyphExport.svgType) && !types.contains(.string)
+                  && !emoji.hasOutline(emojiGlyphs[0]),
+                  "rules: colour face copies a PNG only and has no SVG code", "\(types.map(\.rawValue))")
+        }
+
+        // Selection and statuses live in per-rule states: selecting moves the mark from one rule's state to another's.
+        if let rules, rules.rules.count >= 2 {
+            let r0 = rules.rules[0], r1 = rules.rules[1]
+            let s0 = model.cellState(for: r0, tag: tag), s1 = model.cellState(for: r1, tag: tag)
+            let g0 = RuleGlyph(tag: tag, rule: r0, output: 0, index: 0)
+            let g1 = RuleGlyph(tag: tag, rule: r1, output: 0, index: 0)
+            model.select(g0)
+            let first = s0.selected == g0 && s1.selected == nil
+            model.select(g1)
+            check(first && s0.selected == nil && s1.selected == g1 && model.selectedGlyph == g1
+                  && s0.statuses != nil,
+                  "rules: selection and statuses live in per-rule cell states")
+            model.select(nil)
+        }
+
+        // Two cells asking for the same image at once share one render.
+        if let glyph = rules?.rules.last?.outputs.first?.first {
+            let one = Task { await model.glyphImage(glyph, pointSize: 31, scale: 2, dark: false) }
+            let two = Task { await model.glyphImage(glyph, pointSize: 31, scale: 2, dark: false) }
+            await Task.yield()
+            await Task.yield()
+            let inFlight = model.imageCacheCountForSmoke.rendering
+            let a = await one.value, b = await two.value
+            check(a != nil && a === b && model.imageCacheCountForSmoke.rendering == 0 && inFlight <= 1,
+                  "rules: concurrent image requests share one render", "in flight \(inFlight)")
+        }
+
+        // The first face is a large CJK font (slow to read: thousands of glyph names and a big GSUB), so the second,
+        // small face finishes while the first is still loading; the first must not overwrite it.
+        let hiragino = URL(fileURLWithPath: "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc")
         let raced = FeatureRulesModel(renderer: renderer)
-        let first = Task { await raced.load(fileURL: sfns, faceIndex: 0, selection: .all) }
+        let firstDone = SmokeFlag()
+        let first = Task {
+            await raced.load(fileURL: hiragino, faceIndex: 0, selection: .all)
+            firstDone.value = true
+        }
         _ = await eventually(within: .seconds(2)) { raced.phase == .reading }
         await raced.load(fileURL: newYork, faceIndex: 0, selection: .all)
+        let overlapped = !firstDone.value
         await first.value
         let expected = renderer.font(fileURL: newYork, faceIndex: 0, pointSize: 1)
             .flatMap { GSUBRuleReader.read($0) }?.counts(selection: .all) ?? [:]
-        check(raced.phase == .ready && !expected.isEmpty && raced.counts == expected,
-              "rules: a stale load does not overwrite the new face", "\(raced.counts.count) vs \(expected.count)")
+        check(raced.phase == .ready && !expected.isEmpty && raced.counts == expected && overlapped,
+              "rules: a stale load does not overwrite the new face",
+              "\(raced.counts.count) vs \(expected.count), overlapped \(overlapped)")
 
         await model.load(fileURL: hoefler, faceIndex: 0, selection: .all)
         check(model.hasAATLayout, "rules: AAT font is flagged", "\(model.phase)")
+
+        // Expanded features live on the app model (outlive the Features tab view), and are not saved.
+        let app = AppModel()
+        app.expandedRuleFeatures.insert("liga")
+        check(app.expandedRuleFeatures == ["liga"] && AppModel().expandedRuleFeatures.isEmpty,
+              "rules: expanded features are kept on the app model for the session only")
     }
 
     /// Compare: opening rules, cycling, swap, the missing-font scene, remembered text/recents in a temporary suite
@@ -2968,3 +3020,9 @@ enum OrganizationSmoke {
     }
 }
 #endif
+
+/// A main-actor flag set by a smoke task.
+@MainActor
+private final class SmokeFlag {
+    var value = false
+}

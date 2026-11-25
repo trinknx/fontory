@@ -16,6 +16,17 @@ public enum GlyphSVG {
         return !path.isEmpty
     }
 
+    /// The SVG to export (copy, drag, Copy SVG Code): `document`, but nil for every glyph of a colour or bitmap face
+    /// (`GlyphImage.isColourFace`), whose outlines are only a monochrome fallback.
+    public static func exportDocument(font: CTFont, glyph: CGGlyph) -> String? {
+        GlyphImage.isColourFace(font) ? nil : document(font: font, glyph: glyph)
+    }
+
+    /// Whether `exportDocument` gives an SVG (Copy SVG Code is enabled).
+    public static func hasExportableOutline(font: CTFont, glyph: CGGlyph) -> Bool {
+        !GlyphImage.isColourFace(font) && hasOutline(font: font, glyph: glyph)
+    }
+
     /// The outline in font units, or nil when the glyph has none (see `hasOutline`).
     ///
     /// The viewBox is the union of the advance × (ascent + descent) box, with the ascender line at y = 0, and the

@@ -2,12 +2,21 @@ import AppKit
 import FontoryCore
 import SwiftUI
 
+/// The help of every "in context only" mark (verbatim, spec §22).
+let contextOnlyHelp =
+    "This substitution needs neighbouring letters, a language or other features; typing these characters alone won't produce it"
+
 /// The substitutions of one expanded GSUB feature: a grid of rule cells (input → output glyphs), the check marks,
 /// and a footer with the overflow notes and Copy Glyph. Output glyphs are selectable (⌘C copies), have a context menu
 /// and drag out as SVG files.
+///
+/// Its content is a `Group`, so inside the Features tab's `LazyVStack` the rule grid and the footer are children of
+/// that lazy stack (no plain `VStack` around the `LazyVGrid`, which would build every cell).
 struct FeatureRulesView: View {
     let tag: String
     let model: FeatureRulesModel
+
+    private static let columns = [GridItem(.adaptive(minimum: 120), spacing: 8, alignment: .topLeading)]
 
     var body: some View {
         Group {
@@ -17,15 +26,13 @@ struct FeatureRulesView: View {
                 if rules.isUnreadable {
                     message("Could not read this feature's rules.")
                 } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8, alignment: .topLeading)],
-                                  alignment: .leading, spacing: 8) {
-                            ForEach(Array(rules.rules.enumerated()), id: \.offset) { _, rule in
-                                RuleCell(tag: tag, rule: rule, model: model)
-                            }
+                    LazyVGrid(columns: Self.columns, alignment: .leading, spacing: 8) {
+                        ForEach(rules.rules.indices, id: \.self) { i in
+                            let rule = rules.rules[i]
+                            RuleCell(tag: tag, rule: rule, model: model, state: model.cellState(for: rule, tag: tag))
                         }
-                        footer(rules)
                     }
+                    RulesFooter(tag: tag, rules: rules, model: model)
                 }
             } else {
                 HStack(spacing: 6) {
@@ -41,10 +48,17 @@ struct FeatureRulesView: View {
     private func message(_ text: String) -> some View {
         Text(text).font(.callout).foregroundStyle(.secondary)
     }
+}
 
-    private func footer(_ rules: GSUBFeatureRules) -> some View {
+/// The overflow notes and Copy Glyph; the only view of the rules that observes the selection.
+private struct RulesFooter: View {
+    let tag: String
+    let rules: GSUBFeatureRules
+    let model: FeatureRulesModel
+
+    var body: some View {
         let selected = model.selectedGlyph.flatMap { $0.tag == tag ? $0 : nil }
-        return HStack(spacing: 10) {
+        HStack(spacing: 10) {
             if rules.totalCount > rules.rules.count {
                 Text("and \(rules.totalCount - rules.rules.count) more")
             }
@@ -67,15 +81,22 @@ struct FeatureRulesView: View {
 }
 
 /// One rule: the input as text (characters, else glyph names), an arrow, and its output glyphs; a mark below when
-/// typing the input alone does not give the output.
+/// typing the input alone does not give the output. When only some alternates are "in context only", each of those
+/// glyphs also gets an orange dot.
+///
+/// The body reads only this rule's `state` (statuses, selection), never the model's shared caches, so a check batch
+/// or a click re-renders only the cells it changes. The check is asked for when the cell appears.
 private struct RuleCell: View {
     let tag: String
     let rule: GSUBRule
     let model: FeatureRulesModel
+    let state: RuleCellState
 
     var body: some View {
         let label = model.label(for: rule.input)
-        let statuses = model.statuses(for: rule, tag: tag)
+        let statuses = state.statuses
+        let selected = state.selected
+        let perGlyph = Self.marksPerGlyph(statuses)
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .center, spacing: 6) {
                 Text(label)
@@ -86,7 +107,8 @@ private struct RuleCell: View {
                 Text("→").foregroundStyle(.tertiary)
                 CenteredFlow(spacing: 4) {
                     ForEach(glyphs, id: \.self) { item in
-                        RuleOutputGlyph(item: item, model: model, isSelected: model.selectedGlyph == item)
+                        RuleOutputGlyph(item: item, model: model, isSelected: selected == item,
+                                        contextMark: perGlyph ? statuses?[item.output] == .contextOnly : nil)
                     }
                 }
             }
@@ -100,7 +122,8 @@ private struct RuleCell: View {
         .padding(6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.4)))
-        .onAppear { _ = model.statuses(for: rule, tag: tag) }
+        .onAppear { model.requestCheck(rule, tag: tag) }
+        .onChange(of: ObjectIdentifier(state)) { model.requestCheck(rule, tag: tag) }
     }
 
     /// Every output glyph; each glyph of a multiple substitution's sequence is its own item.
@@ -110,12 +133,16 @@ private struct RuleCell: View {
         }
     }
 
+    /// Whether the outputs differ in being "in context only", so the caption alone cannot say which alternate is.
+    static func marksPerGlyph(_ statuses: [GSUBRuleStatus]?) -> Bool {
+        guard let statuses, statuses.count > 1, statuses.contains(.contextOnly) else { return false }
+        return !statuses.allSatisfy { $0 == .contextOnly }
+    }
+
     static func mark(_ statuses: [GSUBRuleStatus]?) -> (text: String, help: String, isContext: Bool)? {
         guard let statuses else { return nil }
         if statuses.contains(.contextOnly) {
-            return ("in context only",
-                    "This substitution needs neighbouring letters or other features; typing these characters alone won't produce it",
-                    true)
+            return ("in context only", contextOnlyHelp, true)
         }
         if statuses.contains(.noCharacters) {
             return ("no characters", "The input glyphs have no characters, so this substitution cannot be typed or checked",
@@ -126,11 +153,13 @@ private struct RuleCell: View {
 }
 
 /// One output glyph, drawn in the primary text colour (colour glyphs in colour). Click selects it (accent ring) and
-/// gives it the keyboard for ⌘C; right click shows the copy menu; dragging gives an SVG file (PNG for colour glyphs).
+/// gives it the keyboard for ⌘C; right click shows the copy menu; dragging gives an SVG file (PNG for colour faces).
+/// `contextMark` (when not nil) adds a row below: an orange dot when this alternate is "in context only".
 private struct RuleOutputGlyph: View {
     let item: RuleGlyph
     let model: FeatureRulesModel
     let isSelected: Bool
+    var contextMark: Bool?
 
     @Environment(\.displayScale) private var scale
     @Environment(\.colorScheme) private var colorScheme
@@ -147,8 +176,22 @@ private struct RuleOutputGlyph: View {
     }
 
     var body: some View {
+        VStack(spacing: 1) {
+            glyphView
+            if let contextMark {
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 5, height: 5)
+                    .opacity(contextMark ? 1 : 0)
+                    .help(contextMark ? contextOnlyHelp : "")
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private var glyphView: some View {
         let glyph = item.glyph
-        Group {
+        return Group {
             if let image {
                 let natural = CGSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)
                 let fit = min(1, Self.maxHeight / max(natural.height, 1))
@@ -168,11 +211,12 @@ private struct RuleOutputGlyph: View {
         }
         .overlay {
             GlyphInteraction(
-                help: "Drag into Pixelmator Pro for a vector shape",
-                accessibilityLabel: "Glyph \(model.label(for: [glyph]))",
+                help: contextMark == true ? "In context only. " + contextOnlyHelp
+                    : "Drag into Pixelmator Pro for a vector shape",
+                accessibilityLabel: "Glyph \(model.label(for: [glyph]))" + (contextMark == true ? ", in context only" : ""),
                 image: image.map { NSImage(cgImage: $0, size: NSSize(width: CGFloat($0.width) / scale,
                                                                        height: CGFloat($0.height) / scale)) },
-                select: { model.selectedGlyph = item },
+                select: { model.select(item) },
                 copy: { Task { await model.copyGlyphAsync(glyph) } },
                 dragItem: { model.dragItem(for: glyph) },
                 menu: { menu(glyph) })

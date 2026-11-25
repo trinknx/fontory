@@ -32,6 +32,21 @@ import Testing
         return (px, w, h)
     }
 
+    /// No COLR or OpenType-SVG font ships in /System/Library/Fonts (searched 2026-11-25), so only sbix and plain
+    /// outlines are asserted here.
+    @Test func colourFaceDetection() throws {
+        let emoji = try font("/System/Library/Fonts/Apple Color Emoji.ttc")
+        let newYork = try font(TempFonts.newYork)
+        #expect(GlyphImage.isColourFace(emoji))
+        #expect(!GlyphImage.isColourFace(newYork))
+        let smile = try glyph(emoji, "\u{1F600}")
+        #expect(GlyphSVG.exportDocument(font: emoji, glyph: smile) == nil)
+        #expect(!GlyphSVG.hasExportableOutline(font: emoji, glyph: smile))
+        let g = try glyph(newYork, "g")
+        #expect(GlyphSVG.exportDocument(font: newYork, glyph: g) != nil)
+        #expect(GlyphSVG.hasExportableOutline(font: newYork, glyph: g))
+    }
+
     @Test func pngIsSharpAndCropped() throws {
         let f = try font(TempFonts.newYork)
         let data = try #require(GlyphImage.png(font: f, glyph: try glyph(f, "g")))

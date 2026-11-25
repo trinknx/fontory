@@ -108,10 +108,12 @@ struct FeaturesTabView: View {
         features = loaded?.features.features(for: selection) ?? []
     }
 
+    /// One flat `LazyVStack`: group headers, feature grids, and an expanded feature's row, rule grid and footer are
+    /// all its direct children (no plain `VStack` around them), so a feature's 2,000 rule cells are built lazily.
     private func featureList(_ loaded: LoadedFace) -> some View {
         let groups = FontFeatureSet.grouped(features)
         return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 18) {
+            LazyVStack(alignment: .leading, spacing: 8) {
                 if !loaded.features.usesOpenType {
                     Label("This font uses Apple Advanced Typography (AAT) features; CSS lists only those with an "
                           + "OpenType equivalent.", systemImage: "info.circle")
@@ -128,22 +130,19 @@ struct FeaturesTabView: View {
                     Text("No features for this script and language.").foregroundStyle(.secondary)
                 }
                 ForEach(groups, id: \.group) { entry in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(entry.group.title).font(.headline)
-                        ForEach(segments(entry.features)) { segment in
-                            switch segment {
-                            case let .grid(features):
-                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 16, alignment: .leading)],
-                                          alignment: .leading, spacing: 8) {
-                                    ForEach(features) { feature in row(feature) }
-                                }
-                            case let .expanded(feature, tag):
-                                VStack(alignment: .leading, spacing: 8) {
-                                    row(feature)
-                                    if let rules { FeatureRulesView(tag: tag, model: rules) }
-                                }
-                                .padding(.vertical, 4)
+                    Text(entry.group.title)
+                        .font(.headline)
+                        .padding(.top, 10)
+                    ForEach(segments(entry.features)) { segment in
+                        switch segment {
+                        case let .grid(features):
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 16, alignment: .leading)],
+                                      alignment: .leading, spacing: 8) {
+                                ForEach(features) { feature in row(feature) }
                             }
+                        case let .expanded(feature, tag):
+                            row(feature)
+                            if let rules { FeatureRulesView(tag: tag, model: rules) }
                         }
                     }
                 }
@@ -170,7 +169,7 @@ struct FeaturesTabView: View {
         var out: [Segment] = []
         var run: [LayoutFeature] = []
         for feature in features {
-            if let tag = gsubTag(feature), rules?.expanded.contains(tag) == true {
+            if let tag = gsubTag(feature), model.expandedRuleFeatures.contains(tag) {
                 if !run.isEmpty { out.append(.grid(run)) }
                 run = []
                 out.append(.expanded(feature, tag: tag))
@@ -192,13 +191,12 @@ struct FeaturesTabView: View {
         let tag = gsubTag(feature)
         return FeatureRow(feature: feature, isOn: binding(feature),
                           substitutions: tag.flatMap { rules?.counts[$0] },
-                          isExpanded: tag.map { rules?.expanded.contains($0) == true } ?? false,
+                          isExpanded: tag.map { model.expandedRuleFeatures.contains($0) } ?? false,
                           reservesDisclosure: !(rules?.counts.isEmpty ?? true),
                           toggleExpanded: tag.map { tag in
                               {
-                                  guard let rules else { return }
-                                  if rules.expanded.contains(tag) { rules.expanded.remove(tag) }
-                                  else { rules.expanded.insert(tag) }
+                                  if model.expandedRuleFeatures.contains(tag) { model.expandedRuleFeatures.remove(tag) }
+                                  else { model.expandedRuleFeatures.insert(tag) }
                               }
                           })
     }

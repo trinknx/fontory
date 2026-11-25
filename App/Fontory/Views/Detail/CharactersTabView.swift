@@ -272,7 +272,7 @@ private struct GlyphInspector: View {
     let entry: GlyphEntry?
 
     @State private var image: CGImage?
-    /// Whether the selected glyph has a vector outline (bitmap and colour glyphs have none: no SVG).
+    /// Whether the selected glyph has an exportable outline (none for bitmap and colour faces: no SVG).
     @State private var hasOutline = true
     @Environment(\.displayScale) private var displayScale
     @Environment(\.openWindow) private var openWindow
@@ -368,7 +368,7 @@ private struct GlyphInspector: View {
                 return (nil, false)
             }
             return (GlyphCellRenderer.render(font: font, glyph: entry.glyphID, style: style, box: face.box),
-                    GlyphSVG.hasOutline(font: font, glyph: entry.glyphID))
+                    GlyphSVG.hasExportableOutline(font: font, glyph: entry.glyphID))
         }.value
         guard !Task.isCancelled else { return }
         image = rendered.0
@@ -398,7 +398,7 @@ private struct GlyphInspector: View {
     private func copySVGCode(_ entry: GlyphEntry) {
         guard let face,
               let font = model.previewRenderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: 1),
-              let svg = GlyphSVG.document(font: font, glyph: entry.glyphID) else {
+              let svg = GlyphSVG.exportDocument(font: font, glyph: entry.glyphID) else {
             return NSSound.beep()
         }
         GlyphExport.copySVGCode(svg)

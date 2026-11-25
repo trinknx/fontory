@@ -50,6 +50,21 @@ import Testing
         #expect(GSUBRuleCheck.check(rule, tag: tag, font: font, labels: labels, language: nil) == [.plain])
     }
 
+    /// CoreText returns right-to-left runs in visual order; the check compares in logical order.
+    @Test func rtlMultipleRulesArePlain() throws {
+        let font = try load("/System/Library/Fonts/SFArabic.ttf")
+        let labels = GlyphLabels(font: font)
+        let reader = try #require(GSUBRuleReader.read(font))
+        let rules = reader.rules(for: "rclt", selection: .all).rules.filter {
+            $0.kind == .multiple && !$0.isContextual && labels.characters(for: $0.input) != nil
+        }
+        try #require(!rules.isEmpty)
+        let statuses = rules.map {
+            GSUBRuleCheck.check($0, tag: "rclt", font: font, labels: labels, language: nil)
+        }
+        #expect(statuses.allSatisfy { $0 == [.plain] }, "\(statuses.filter { $0 != [.plain] }.count) of \(rules.count)")
+    }
+
     @Test func contextualRuleIsContextOnly() throws {
         let font = try load(TempFonts.sfns)
         let labels = GlyphLabels(font: font)

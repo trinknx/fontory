@@ -97,11 +97,23 @@ public enum GSUBRuleCheck {
         var attrs: [NSAttributedString.Key: Any] = [NSAttributedString.Key(kCTFontAttributeName as String): featured]
         if let language { attrs[NSAttributedString.Key(kCTLanguageAttributeName as String)] = language }
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
+        // Runs and their glyphs come back in visual order; the rule's output is in logical order. Put the runs in
+        // string order and reverse right-to-left runs. Runs in a fallback font have that font's glyph IDs: skip them.
+        let fontName = CTFontCopyPostScriptName(font) as String
+        let runs = (CTLineGetGlyphRuns(line) as? [CTRun] ?? []).sorted {
+            CTRunGetStringRange($0).location < CTRunGetStringRange($1).location
+        }
         var glyphs: [CGGlyph] = []
-        for run in CTLineGetGlyphRuns(line) as? [CTRun] ?? [] {
+        for run in runs {
+            let runAttrs = CTRunGetAttributes(run) as NSDictionary
+            if let runFont = runAttrs[kCTFontAttributeName as String] {
+                let ct = runFont as! CTFont // swiftlint:disable:this force_cast
+                if CTFontCopyPostScriptName(ct) as String != fontName { continue }
+            }
             let n = CTRunGetGlyphCount(run)
             var buf = [CGGlyph](repeating: 0, count: n)
             CTRunGetGlyphs(run, CFRange(location: 0, length: n), &buf)
+            if CTRunGetStatus(run).contains(.rightToLeft) { buf.reverse() }
             glyphs += buf
         }
         return glyphs
