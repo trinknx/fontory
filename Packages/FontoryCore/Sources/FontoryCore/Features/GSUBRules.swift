@@ -138,7 +138,7 @@ public struct GSUBRuleReader: Sendable {
         guard index < lookupCount, walk.spend(1), let offset = gsub.u16(lookupList + 2 + index * 2),
               case let lookup = lookupList + Int(offset), let type = gsub.u16(lookup),
               let count = gsub.u16(lookup + 4), walk.spend(Int(count)) else {
-            walk.failed = true
+            if !walk.exhausted { walk.failed = true }
             return
         }
         for i in 0..<Int(count) {
@@ -167,7 +167,8 @@ public struct GSUBRuleReader: Sendable {
         }
         if let rules = parsed {
             for r in rules { walk.add(r) }
-        } else {
+        } else if !walk.exhausted {
+            // A nil caused by the budget running out is incompleteness, not a malformed lookup.
             walk.failed = true
         }
     }

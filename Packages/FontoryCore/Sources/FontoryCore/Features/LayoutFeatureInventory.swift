@@ -22,6 +22,7 @@ public struct LayoutFeatureInventory: Sendable, Equatable {
 
         static let empty = Table(features: [], scripts: [:])
 
+        /// Deliberately ignores `lookups`: equality covers what the picker and name resolution use.
         static func == (a: Table, b: Table) -> Bool {
             a.scripts == b.scripts && a.features.map(\.tag) == b.features.map(\.tag)
                 && a.features.map(\.nameID) == b.features.map(\.nameID)

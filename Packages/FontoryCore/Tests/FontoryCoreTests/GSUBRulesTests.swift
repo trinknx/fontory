@@ -150,7 +150,7 @@ private func standard(extra: [[UInt8]?] = []) -> GSUBRuleReader? {
     @Test func budgetExhaustionIsIncomplete() throws {
         let r = try #require(reader([("ss01", [0])], [lookup(1, [single1(cov2(0, 2499), delta: 1)])]))
         let got = r.rules(for: "ss01", selection: .all, budget: 100)
-        #expect(got.isIncomplete)
+        #expect(got.isIncomplete && !got.isUnreadable)
     }
 
     @Test func realFontHasRules() throws {
