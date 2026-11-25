@@ -6,6 +6,8 @@ public enum GoogleRunEvent: Sendable {
     case familyFailed(String, String)
     /// The download folder is missing, unwritable or vanished mid-run; the run stopped without marking anything.
     case rootUnavailable
+    /// The disk is full; the run stopped without marking anything.
+    case outOfSpace
     /// Every family that needed a download was attempted.
     case finished
 }
@@ -27,18 +29,26 @@ public actor GoogleFontsDownloader {
     private let maxConcurrentFiles: Int
     private let backoff: [Duration]
     private let minimumFamilies: Int
+    private let writeData: @Sendable (Data, URL) throws -> Void
     private var running = false
+
+    /// Writes a new file (never over an existing one).
+    public static let defaultWrite: @Sendable (Data, URL) throws -> Void = { data, url in
+        try data.write(to: url, options: .withoutOverwriting)
+    }
 
     /// `backoff[i]` is the wait before retry `i + 1`; missing entries mean no wait (tests pass `[]` or zeros).
     public init(store: FontStore, root: URL, transport: GoogleTransport, maxConcurrentFiles: Int = 4,
                 backoff: [Duration] = [.seconds(1), .seconds(2), .seconds(4)],
-                minimumFamilies: Int = GoogleCatalog.minimumFamilies) {
+                minimumFamilies: Int = GoogleCatalog.minimumFamilies,
+                writeData: @escaping @Sendable (Data, URL) throws -> Void = GoogleFontsDownloader.defaultWrite) {
         self.store = store
         self.root = root.standardizedFileURL
         self.transport = transport
         self.maxConcurrentFiles = max(1, maxConcurrentFiles)
         self.backoff = backoff
         self.minimumFamilies = minimumFamilies
+        self.writeData = writeData
     }
 
     private var tempRoot: URL { root.appendingPathComponent(Self.tempFolderName, isDirectory: true) }
@@ -92,12 +102,15 @@ public actor GoogleFontsDownloader {
             case .rootUnavailable:
                 onEvent(.rootUnavailable)
                 return
+            case .outOfSpace:
+                onEvent(.outOfSpace)
+                return
             }
         }
         onEvent(.finished)
     }
 
-    private enum Outcome { case done, failed(String), cancelled, rootUnavailable }
+    private enum Outcome { case done, failed(String), cancelled, rootUnavailable, outOfSpace }
 
     private enum InstallError: Error {
         case notAFolder(String)
@@ -133,7 +146,8 @@ public actor GoogleFontsDownloader {
             return outcome
         }
         func writeFailure(_ error: Error) -> Outcome {
-            rootAvailable() ? .failed(Self.describe(error)) : .rootUnavailable
+            if !rootAvailable() { return .rootUnavailable }
+            return Self.isOutOfSpace(error) ? .outOfSpace : .failed(Self.describe(error))
         }
 
         do {
@@ -144,14 +158,14 @@ public actor GoogleFontsDownloader {
             try? fm.removeItem(at: staging)
             try fm.createDirectory(at: staging, withIntermediateDirectories: false)
             for text in texts {
-                try Data(text.contents.utf8).write(to: staging.appendingPathComponent(text.name), options: .withoutOverwriting)
+                try writeData(Data(text.contents.utf8), staging.appendingPathComponent(text.name))
             }
         } catch {
             return abandon(writeFailure(error))
         }
 
         let failure = await Self.fetchAll(fonts, into: staging, transport: transport, backoff: backoff,
-                                          limit: maxConcurrentFiles)
+                                          limit: maxConcurrentFiles, writeData: writeData)
         if Task.isCancelled { return abandon(.cancelled) }
         switch failure {
         case .fetch(let name, let message)?: return abandon(.failed("\(name): \(message)"))
@@ -162,7 +176,8 @@ public actor GoogleFontsDownloader {
         guard rootAvailable() else { return abandon(.rootUnavailable) }
         let dest = root.appendingPathComponent(state.folder, isDirectory: true)
         do {
-            try install(staging: staging, into: dest, names: texts.map(\.name) + fonts.map(\.name))
+            try install(staging: staging, into: dest, names: texts.map(\.name) + fonts.map(\.name),
+                        pruneOthers: state.downloadedModified != nil)
         } catch {
             return abandon(writeFailure(error))
         }
@@ -170,9 +185,11 @@ public actor GoogleFontsDownloader {
         return .done
     }
 
-    /// First download: the staging folder is moved into place. Update: each new file replaces the file with the
-    /// same name, then regular files (and links) in `dest` whose names are not in the new set are deleted.
-    private func install(staging: URL, into dest: URL, names: [String]) throws {
+    /// No `dest` yet: the staging folder is moved into place. Otherwise each new file replaces the file with the
+    /// same name; with `pruneOthers` (an update of a family Fontory completed in this folder), regular files (and
+    /// links) in `dest` whose names are not in the new set are then deleted. A first download into an existing
+    /// folder (one the user made) never deletes anything.
+    private func install(staging: URL, into dest: URL, names: [String], pruneOthers: Bool) throws {
         let fm = FileManager.default
         // attributesOfItem does not follow symlinks, so a link at `dest` is never written through.
         guard let destType = (try? fm.attributesOfItem(atPath: dest.path))?[.type] as? FileAttributeType else {
@@ -192,6 +209,7 @@ public actor GoogleFontsDownloader {
             }
         }
 
+        guard pruneOthers else { return }
         let keep = Set(names.map { $0.lowercased() })
         let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
         for item in try fm.contentsOfDirectory(at: dest, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) {
@@ -212,6 +230,15 @@ public actor GoogleFontsDownloader {
     /// A single path component that cannot escape or hide inside the family folder.
     static func isSafeName(_ name: String) -> Bool {
         !name.isEmpty && !name.hasPrefix(".") && !name.contains("/") && !name.contains("\\") && !name.contains("\0")
+    }
+
+    /// A write failed because the volume is full (Cocoa out-of-space, or POSIX ENOSPC, also as the underlying error).
+    static func isOutOfSpace(_ error: Error) -> Bool {
+        let ns = error as NSError
+        if ns.domain == NSCocoaErrorDomain && ns.code == NSFileWriteOutOfSpaceError { return true }
+        if ns.domain == NSPOSIXErrorDomain && ns.code == Int(ENOSPC) { return true }
+        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? Error { return isOutOfSpace(underlying) }
+        return false
     }
 
     /// Allowed-hosts rule: font files come only from https://fonts.gstatic.com.
@@ -256,7 +283,8 @@ public actor GoogleFontsDownloader {
     /// Downloads `refs` into `dir` with at most `limit` requests in flight. Returns the first failure, if any;
     /// remaining requests are cancelled after it.
     private static func fetchAll(_ refs: [(name: String, url: URL)], into dir: URL, transport: GoogleTransport,
-                                 backoff: [Duration], limit: Int) async -> FileFailure? {
+                                 backoff: [Duration], limit: Int,
+                                 writeData: @escaping @Sendable (Data, URL) throws -> Void) async -> FileFailure? {
         await withTaskGroup(of: FileFailure?.self) { group in
             var next = 0
             var failure: FileFailure?
@@ -271,7 +299,7 @@ public actor GoogleFontsDownloader {
                         return .fetch(ref.name, describe(error))
                     }
                     do {
-                        try data.write(to: dir.appendingPathComponent(ref.name), options: .withoutOverwriting)
+                        try writeData(data, dir.appendingPathComponent(ref.name))
                     } catch {
                         return .write(error)
                     }

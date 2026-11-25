@@ -54,6 +54,7 @@ final class EventLog: @unchecked Sendable {
     var failed: [String] { events.compactMap { if case .familyFailed(let f, _) = $0 { f } else { nil } } }
     var finished: Bool { events.contains { if case .finished = $0 { true } else { false } } }
     var rootUnavailable: Bool { events.contains { if case .rootUnavailable = $0 { true } else { false } } }
+    var outOfSpace: Bool { events.contains { if case .outOfSpace = $0 { true } else { false } } }
 }
 
 @Suite struct GoogleDownloaderTests {
@@ -544,6 +545,63 @@ final class EventLog: @unchecked Sendable {
         #expect(contents(folder.appendingPathComponent("A-Bold.ttf")) == "first")
         #expect(!t.requests.contains(second))
         #expect(Set(try FileManager.default.contentsOfDirectory(atPath: root.path)) == ["A"])
+    }
+
+    /// The user's own files in an existing family folder survive Fontory's first download there; same-name files
+    /// are replaced. Pruning starts once Fontory has completed the family in that folder.
+    @Test func firstDownloadIntoExistingFolderKeepsOtherFiles() async throws {
+        let root = try makeRoot(); defer { cleanup(root) }
+        let fm = FileManager.default
+        let folder = root.appendingPathComponent("Roboto")
+        try fm.createDirectory(at: folder, withIntermediateDirectories: false)
+        try Data("mine".utf8).write(to: folder.appendingPathComponent("Mine.ttf"))
+        try Data("old".utf8).write(to: folder.appendingPathComponent("Roboto-Bold.ttf"))
+
+        let store = try makeStore()
+        let t = FakeGoogleTransport()
+        t.set(GoogleCatalog.catalogURL, catalog([("Roboto", "1")]))
+        serve(t, "Roboto", fonts: ["Roboto-Bold.ttf": "bold"])
+        let dl = downloader(store, root, t)
+        _ = try await dl.refreshCatalog()
+        let log = EventLog()
+        await dl.run { log.append($0) }
+        #expect(log.done == ["Roboto"])
+        #expect(contents(folder.appendingPathComponent("Mine.ttf")) == "mine")
+        #expect(contents(folder.appendingPathComponent("Roboto-Bold.ttf")) == "bold")
+        #expect(contents(folder.appendingPathComponent("OFL.txt")) == "licence")
+
+        // An update after Fontory's own download prunes files the family no longer lists.
+        t.set(GoogleCatalog.catalogURL, catalog([("Roboto", "2")]))
+        serve(t, "Roboto", fonts: ["Roboto-Bold.ttf": "bold-v2"])
+        _ = try await dl.refreshCatalog()
+        await dl.run { _ in }
+        #expect(!exists(folder.appendingPathComponent("Mine.ttf")))
+        #expect(contents(folder.appendingPathComponent("Roboto-Bold.ttf")) == "bold-v2")
+    }
+
+    /// A full disk stops the run with `.outOfSpace`: no family is marked failed and staging is cleaned.
+    @Test func outOfSpaceStopsRunWithoutFailingFamilies() async throws {
+        let root = try makeRoot(); defer { cleanup(root) }
+        let store = try makeStore()
+        let t = FakeGoogleTransport()
+        t.set(GoogleCatalog.catalogURL, catalog([("A", "1"), ("B", "1"), ("C", "1")]))
+        for f in ["A", "B", "C"] { serve(t, f, fonts: ["\(f).ttf": f]) }
+        let dl = GoogleFontsDownloader(store: store, root: root, transport: t, backoff: [], minimumFamilies: 1,
+                                       writeData: { data, url in
+            if url.pathExtension == "ttf" { throw CocoaError(.fileWriteOutOfSpace) }
+            try data.write(to: url, options: .withoutOverwriting)
+        })
+        _ = try await dl.refreshCatalog()
+        let log = EventLog()
+        await dl.run { log.append($0) }
+        #expect(log.outOfSpace)
+        #expect(log.failed.isEmpty && log.done.isEmpty && !log.finished)
+        #expect(try status(store).values.allSatisfy { $0.status == 0 })
+        #expect(!exists(tmp(root)))
+        #expect(GoogleFontsDownloader.isOutOfSpace(NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))))
+        #expect(GoogleFontsDownloader.isOutOfSpace(NSError(domain: NSCocoaErrorDomain, code: 512,
+            userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))])))
+        #expect(!GoogleFontsDownloader.isOutOfSpace(CocoaError(.fileWriteNoPermission)))
     }
 }
 
