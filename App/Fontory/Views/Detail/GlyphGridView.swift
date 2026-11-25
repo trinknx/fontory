@@ -446,11 +446,18 @@ enum GlyphExport {
 
     /// "Arial-BoldMT adieresis.svg": the PostScript name and the glyph name (or uniXXXX / glyph ID).
     static func fileName(_ entry: GlyphEntry, face: GlyphFace) -> String {
-        let glyph = entry.glyphName.flatMap { $0.isEmpty ? nil : $0 }
-            ?? entry.scalarValue.map { String(format: "uni%04X", $0) } ?? "glyph\(entry.glyphID)"
-        let base = [face.postScriptName, glyph].filter { !$0.isEmpty }.joined(separator: " ")
+        fileName(postScriptName: face.postScriptName, glyphName: entry.glyphName, scalar: entry.scalarValue,
+                 glyph: entry.glyphID, extension: "svg")
+    }
+
+    /// "PostScriptName glyphname.ext": the glyph name, else uniXXXX of its scalar, else glyph<ID>.
+    static func fileName(postScriptName: String, glyphName: String?, scalar: UInt32?, glyph: CGGlyph,
+                         extension ext: String) -> String {
+        let name = glyphName.flatMap { $0.isEmpty ? nil : $0 }
+            ?? scalar.map { String(format: "uni%04X", $0) } ?? "glyph\(glyph)"
+        let base = [postScriptName, name].filter { !$0.isEmpty }.joined(separator: " ")
         let safe = base.map { "/:\\".contains($0) ? "-" : $0 }
-        return String(safe.prefix(200)) + ".svg"
+        return String(safe.prefix(200)) + "." + ext
     }
 
     static func copyCharacter(_ entry: GlyphEntry) {
@@ -499,11 +506,23 @@ enum GlyphExport {
     }
 }
 
-/// A dragged glyph: an SVG file promise, and the character as plain text.
+/// A dragged glyph: an SVG (or PNG) file promise, and the character as plain text when `character` is set.
 final class GlyphPromiseProvider: NSFilePromiseProvider {
     struct Payload {
         let fileName: String
-        let svg: String
+        /// The file's bytes, made when the drop asks for them (on the writer's background queue).
+        let contents: @Sendable () -> Data?
+
+        init(fileName: String, svg: String) {
+            self.fileName = fileName
+            let data = Data(svg.utf8)
+            contents = { data }
+        }
+
+        init(fileName: String, contents: @escaping @Sendable () -> Data?) {
+            self.fileName = fileName
+            self.contents = contents
+        }
     }
 
     var character = ""
@@ -520,17 +539,27 @@ final class GlyphPromiseProvider: NSFilePromiseProvider {
     }
 }
 
-/// Writes promised SVG files.
+/// Writes promised SVG and PNG files, off the main thread (a PNG renders when the drop asks for it).
 final class GlyphPromiseWriter: NSObject, NSFilePromiseProviderDelegate {
+    private let queue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.qualityOfService = .userInitiated
+        return queue
+    }()
+
     func filePromiseProvider(_ filePromiseProvider: NSFilePromiseProvider, fileNameForType fileType: String) -> String {
         (filePromiseProvider.userInfo as? GlyphPromiseProvider.Payload)?.fileName ?? "Glyph.svg"
     }
 
+    func operationQueue(for filePromiseProvider: NSFilePromiseProvider) -> OperationQueue { queue }
+
     func filePromiseProvider(_ filePromiseProvider: NSFilePromiseProvider, writePromiseTo url: URL,
                              completionHandler: @escaping (Error?) -> Void) {
-        let svg = (filePromiseProvider.userInfo as? GlyphPromiseProvider.Payload)?.svg ?? ""
+        guard let data = (filePromiseProvider.userInfo as? GlyphPromiseProvider.Payload)?.contents() else {
+            return completionHandler(CocoaError(.fileWriteUnknown))
+        }
         do {
-            try Data(svg.utf8).write(to: url)
+            try data.write(to: url)
             completionHandler(nil)
         } catch {
             completionHandler(error)

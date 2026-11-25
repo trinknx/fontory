@@ -58,6 +58,7 @@ enum OrganizationSmoke {
             await layoutsSteps()
             await compareSteps()
             glyphCopySteps()
+            await rulesSteps()
         } catch {
             check(false, "setup", "\(error)")
         }
@@ -89,6 +90,71 @@ enum OrganizationSmoke {
         pb3.clearContents(); pb3.setString("keep", forType: .string)
         check(!GlyphExport.write(png: nil, svg: nil, to: pb3) && pb3.string(forType: .string) == "keep",
               "glyphCopy: nothing written without PNG or SVG")
+    }
+
+    /// FeatureRulesModel on system fonts loaded directly (not through the library): counts, expanding, checks, the
+    /// stale-load race, the AAT flag and copying to a private pasteboard.
+    private static func rulesSteps() async {
+        let sfns = URL(fileURLWithPath: "/System/Library/Fonts/SFNS.ttf")
+        let newYork = URL(fileURLWithPath: "/System/Library/Fonts/NewYork.ttf")
+        let hoefler = URL(fileURLWithPath: "/System/Library/Fonts/Supplemental/Hoefler Text.ttc")
+        let renderer = PreviewRenderer()
+        let model = FeatureRulesModel(renderer: renderer)
+        await model.load(fileURL: sfns, faceIndex: 0, selection: .all)
+        check(model.phase == .ready && !model.counts.isEmpty, "rules: counts listed for SFNS",
+              "\(model.phase) \(model.counts.count)")
+
+        let tag = model.counts.keys.sorted().first ?? ""
+        var rules: GSUBFeatureRules?
+        let read = await eventually(within: .seconds(2)) {
+            rules = model.rules(for: tag)
+            return !(rules?.rules.isEmpty ?? true)
+        }
+        check(read, "rules: expanding reads rules", "\(tag): \(String(describing: rules?.totalCount))")
+
+        var statuses: [GSUBRuleStatus]?
+        if let rule = rules?.rules.first {
+            _ = await eventually(within: .seconds(2)) {
+                statuses = model.statuses(for: rule, tag: tag)
+                return statuses != nil
+            }
+            check(statuses?.count == rule.outputs.count, "rules: statuses arrive",
+                  "\(String(describing: statuses)) for \(rule.outputs.count) outputs")
+        } else {
+            check(false, "rules: statuses arrive", "no rule")
+        }
+
+        let general = NSPasteboard.general.changeCount
+        if let rule = rules?.rules.first(where: { model.characters(for: $0) != nil }), let glyph = rule.input.first {
+            let pb = NSPasteboard(name: .init("fontory.smoke.\(UUID())"))
+            defer { pb.releaseGlobally() }
+            let pb2 = NSPasteboard(name: .init("fontory.smoke.\(UUID())"))
+            defer { pb2.releaseGlobally() }
+            let glyphOK = model.copyGlyph(glyph, to: pb)
+            let types = pb.types ?? []
+            let charsOK = model.copyCharacters(rule, to: pb2)
+            let types2 = pb2.types ?? []
+            check(glyphOK && types.contains(.png) && types.contains(GlyphExport.svgType) && !types.contains(.string)
+                  && charsOK && pb2.string(forType: .string) == model.characters(for: rule) && !types2.contains(.png)
+                  && NSPasteboard.general.changeCount == general,
+                  "rules: copy writes to the given pasteboard only",
+                  "\(types.map(\.rawValue)) \(types2.map(\.rawValue))")
+        } else {
+            check(false, "rules: copy writes to the given pasteboard only", "no rule with characters in \(tag)")
+        }
+
+        let raced = FeatureRulesModel(renderer: renderer)
+        let first = Task { await raced.load(fileURL: sfns, faceIndex: 0, selection: .all) }
+        _ = await eventually(within: .seconds(2)) { raced.phase == .reading }
+        await raced.load(fileURL: newYork, faceIndex: 0, selection: .all)
+        await first.value
+        let expected = renderer.font(fileURL: newYork, faceIndex: 0, pointSize: 1)
+            .flatMap { GSUBRuleReader.read($0) }?.counts(selection: .all) ?? [:]
+        check(raced.phase == .ready && !expected.isEmpty && raced.counts == expected,
+              "rules: a stale load does not overwrite the new face", "\(raced.counts.count) vs \(expected.count)")
+
+        await model.load(fileURL: hoefler, faceIndex: 0, selection: .all)
+        check(model.hasAATLayout, "rules: AAT font is flagged", "\(model.phase)")
     }
 
     /// Compare: opening rules, cycling, swap, the missing-font scene, remembered text/recents in a temporary suite
