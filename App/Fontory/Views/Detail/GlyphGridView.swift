@@ -306,13 +306,13 @@ final class GlyphGridController: NSObject, NSCollectionViewDataSource, NSCollect
         selectedIndex.map { entries[$0] }
     }
 
-    /// ⌘C: the character; for an unmapped glyph its SVG; a beep when there is neither.
+    /// ⌘C: the character; for an unmapped glyph the glyph image (PNG + SVG); a beep when there is neither.
     func copySelection() {
         guard let entry = selectedEntry, let face else { return NSSound.beep() }
         if entry.isMapped {
             GlyphExport.copyCharacter(entry)
-        } else if let svg = svg(of: entry, face: face) {
-            GlyphExport.copySVG(svg)
+        } else if let font = model.previewRenderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: 1),
+                  GlyphExport.copyGlyph(font: font, glyph: entry.glyphID) {
         } else {
             NSSound.beep()
         }
@@ -460,12 +460,42 @@ enum GlyphExport {
         pb.setString(entry.character, forType: .string)
     }
 
-    /// The SVG as an SVG image and as plain text (for code editors).
-    static func copySVG(_ svg: String) {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setData(Data(svg.utf8), forType: NSPasteboard.PasteboardType(UTType.svg.identifier))
-        pb.setString(svg, forType: .string)
+    static let svgType = NSPasteboard.PasteboardType(UTType.svg.identifier)
+
+    /// The glyph as a PNG and as an SVG (public.svg-image), and no plain text: a design app pastes text in preference
+    /// to an image, so the clipboard offers images only. False (nothing written) when the glyph has neither.
+    @discardableResult
+    static func copyGlyph(font: CTFont, glyph: CGGlyph, to pasteboard: NSPasteboard = .general) -> Bool {
+        write(png: GlyphImage.png(font: font, glyph: glyph), svg: GlyphSVG.document(font: font, glyph: glyph), to: pasteboard)
+    }
+
+    /// Writes already-rendered data; the UI renders off the main thread and calls this afterwards.
+    @discardableResult
+    static func write(png: Data?, svg: String?, to pasteboard: NSPasteboard = .general) -> Bool {
+        guard png != nil || svg != nil else { return false }
+        var types: [NSPasteboard.PasteboardType] = []
+        if png != nil { types.append(.png) }
+        if svg != nil { types.append(svgType) }
+        pasteboard.declareTypes(types, owner: nil)
+        if let png { pasteboard.setData(png, forType: .png) }
+        if let svg { pasteboard.setData(Data(svg.utf8), forType: svgType) }
+        return true
+    }
+
+    /// The SVG as plain text only (for code editors).
+    @discardableResult
+    static func copySVGCode(_ svg: String, to pasteboard: NSPasteboard = .general) -> Bool {
+        pasteboard.clearContents()
+        return pasteboard.setString(svg, forType: .string)
+    }
+
+    /// Copy Glyph for the UI: renders the PNG and SVG off the main thread, then writes; beeps when there is neither.
+    static func copyGlyphAsync(font: @escaping @Sendable () -> CTFont?, glyph: CGGlyph) async {
+        let rendered = await Task.detached(priority: .userInitiated) { () -> (Data?, String?) in
+            guard let font = font() else { return (nil, nil) }
+            return (GlyphImage.png(font: font, glyph: glyph), GlyphSVG.document(font: font, glyph: glyph))
+        }.value
+        if !write(png: rendered.0, svg: rendered.1) { NSSound.beep() }
     }
 }
 

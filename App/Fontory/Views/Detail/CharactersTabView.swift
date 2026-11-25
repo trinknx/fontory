@@ -308,9 +308,12 @@ private struct GlyphInspector: View {
                     Button("Copy Character") { GlyphExport.copyCharacter(entry) }
                         .disabled(!entry.isMapped)
                         .help(entry.isMapped ? "Copy \(entry.character) as text" : "This glyph has no character")
-                    Button("Copy SVG") { copySVG(entry) }
+                    Button("Copy Glyph") { copyGlyph(entry) }
+                        .disabled(face == nil)
+                        .help("Copy the glyph as an image; drag it out for a vector shape")
+                    Button("Copy SVG Code") { copySVGCode(entry) }
                         .disabled(!hasOutline)
-                        .help(hasOutline ? "Copy the outline as an SVG document" : "This glyph has no outline (bitmap/colour)")
+                        .help(hasOutline ? "Copy the outline as SVG code for code editors" : "This glyph has no outline (bitmap/colour)")
                     Button("Compare…") { compare(entry) }
                         .disabled(!entry.isMapped || face == nil)
                         .help(entry.isMapped ? "Compare \(entry.character) in this style with the Quick Collection"
@@ -381,12 +384,23 @@ private struct GlyphInspector: View {
         Task { await model.compare.open(referenceFaceID: face.faceID, candidateFaceIDs: candidates, text: text) }
     }
 
-    private func copySVG(_ entry: GlyphEntry) {
+    private func copyGlyph(_ entry: GlyphEntry) {
+        guard let face else { return NSSound.beep() }
+        let renderer = model.previewRenderer
+        let glyph = entry.glyphID
+        Task {
+            await GlyphExport.copyGlyphAsync(font: {
+                renderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: 1)
+            }, glyph: glyph)
+        }
+    }
+
+    private func copySVGCode(_ entry: GlyphEntry) {
         guard let face,
               let font = model.previewRenderer.font(fileURL: face.fileURL, faceIndex: face.faceIndex, pointSize: 1),
               let svg = GlyphSVG.document(font: font, glyph: entry.glyphID) else {
             return NSSound.beep()
         }
-        GlyphExport.copySVG(svg)
+        GlyphExport.copySVGCode(svg)
     }
 }

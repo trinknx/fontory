@@ -57,10 +57,38 @@ enum OrganizationSmoke {
             await backupSteps()
             await layoutsSteps()
             await compareSteps()
+            glyphCopySteps()
         } catch {
             check(false, "setup", "\(error)")
         }
         return failures == 0
+    }
+
+    /// Copy Glyph (PNG + SVG, no text) and Copy SVG Code (text only), on private pasteboards, never `.general`.
+    private static func glyphCopySteps() {
+        let base = NSFont.systemFont(ofSize: 100)
+        let desc = base.fontDescriptor.withDesign(.serif) ?? base.fontDescriptor
+        let font = NSFont(descriptor: desc, size: 100) ?? base
+        var glyph: CGGlyph = 0
+        var ch: UniChar = 0x67
+        CTFontGetGlyphsForCharacters(font, &ch, &glyph, 1)
+        let pb = NSPasteboard(name: .init("fontory.smoke.\(UUID())"))
+        defer { pb.releaseGlobally() }
+        let wrote = GlyphExport.copyGlyph(font: font, glyph: glyph, to: pb)
+        let types = pb.types ?? []
+        check(wrote && glyph != 0 && types.contains(.png) && types.contains(GlyphExport.svgType) && !types.contains(.string),
+              "glyphCopy: copyGlyphWritesPNGAndSVGOnly", "\(types.map(\.rawValue))")
+        let svg = GlyphSVG.document(font: font, glyph: glyph) ?? ""
+        let pb2 = NSPasteboard(name: .init("fontory.smoke.\(UUID())"))
+        defer { pb2.releaseGlobally() }
+        let ok = GlyphExport.copySVGCode(svg, to: pb2)
+        check(ok && !(pb2.types ?? []).contains(.png) && !(pb2.types ?? []).contains(GlyphExport.svgType) && (pb2.string(forType: .string) ?? "").hasPrefix("<svg"),
+              "glyphCopy: copySVGCodeWritesTextOnly", "\((pb2.types ?? []).map(\.rawValue))")
+        let pb3 = NSPasteboard(name: .init("fontory.smoke.\(UUID())"))
+        defer { pb3.releaseGlobally() }
+        pb3.clearContents(); pb3.setString("keep", forType: .string)
+        check(!GlyphExport.write(png: nil, svg: nil, to: pb3) && pb3.string(forType: .string) == "keep",
+              "glyphCopy: nothing written without PNG or SVG")
     }
 
     /// Compare: opening rules, cycling, swap, the missing-font scene, remembered text/recents in a temporary suite
