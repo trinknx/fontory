@@ -28,6 +28,7 @@ It was written for a designer with about 20,000 fonts on an external drive, afte
 - [Releasing](#releasing)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
+- [Support the project](#support-the-project)
 - [License](#license)
 
 ---
@@ -293,6 +294,16 @@ Bug reports and pull requests are welcome.
 - **Pull requests:** keep each one focused, add tests in `Packages/FontoryCore/Tests` for core changes, and make sure `swift test` and the smoke test pass.
 - **Performance matters.** Changes to the browser, search or scanning must stay smooth with 20,000+ fonts. The grid must never open font files just to read metadata.
 - **No new dependencies** without a strong reason. Fontory uses only Apple frameworks and the system SQLite.
+
+## Support the project
+
+Fontory is free and open source. If it saves you time, you can support its development with a USDT donation:
+
+| Network | Address |
+|---|---|
+| USDT on BNB Smart Chain (BEP20) | `0x7450cf5cfb5e89c62bcaec70102c9e8e48735ba2` |
+
+Send only USDT on the BEP20 network to this address. Tokens sent on another network (such as ERC20 or TRC20) may be lost.
 
 ## License
 
