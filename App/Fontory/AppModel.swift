@@ -157,7 +157,7 @@ struct PreviewSettings: Equatable {
     static let defaultForeground = CGColor(gray: 0, alpha: 1)
     static let defaultBackground = CGColor(gray: 1, alpha: 1)
 
-    /// Dark mode's defaults: light text on dark cards, as in Typeface.
+    /// Dark mode's defaults: light text on dark cards.
     static let darkForeground = CGColor(gray: 0.94, alpha: 1)
     static let darkBackground = CGColor(gray: 0.14, alpha: 1)
 

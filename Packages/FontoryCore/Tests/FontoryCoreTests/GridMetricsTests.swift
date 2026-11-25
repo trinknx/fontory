@@ -47,7 +47,7 @@ import Testing
         }
     }
 
-    /// Typeface-like density on a ~1000 pt wide window: 18 pt shows two columns, 60 pt one.
+    /// Comfortable density on a ~1000 pt wide window: 18 pt shows two columns, 60 pt one.
     @Test func columnsFollowPointSize() {
         let at18 = GridMetrics.compute(zoom: GridMetrics.zoom(pointSize: 18), availableWidth: 1000)
         let at60 = GridMetrics.compute(zoom: GridMetrics.zoom(pointSize: 60), availableWidth: 1000)

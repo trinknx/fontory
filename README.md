@@ -238,13 +238,19 @@ Packages/FontoryCore/        UI-free core library, unit tested
     Features/                OpenType feature inventory, GSUB rule reader
     Layout/  Compare/        layout documents, PDF output, overlay rendering
     Duplicates/ Backup/ Export/
-docs/superpowers/            design spec, implementation plans and verification checklists
+docs/screenshots/  docs/media/   README images and the intro video
 scripts/build-release.sh     release packaging
 .github/workflows/release.yml  builds and publishes a release when a tag is pushed
 project.yml                  XcodeGen project definition
 ```
 
-The design spec, [docs/superpowers/specs/2026-11-23-font-manager-design.md](docs/superpowers/specs/2026-11-23-font-manager-design.md), explains the architecture and the reasoning behind it.
+### How it stays fast
+
+- **The index is the source of truth for the UI.** Everything the browser shows (names, styles, sort keys, flags, script coverage) is read from SQLite, with FTS5 for search. Font files are opened only to render the cells on screen.
+- **Rendering is lazy and off the main thread.** `CTFont`s and preview images live in an LRU cache keyed by font, text, size and colour, and changing the text or size re-renders only the visible cells.
+- **Scanning is incremental.** Files are compared by relative path, size and modification date; only new or changed files are parsed, in parallel, by an actor that owns the database writes.
+- **Locations survive remounts.** A location is stored as a volume UUID plus a relative path, so tags and notes stay attached when a drive comes back at a different mount point.
+- **Activation uses session scope.** Fonts are registered with `CTFontManagerRegisterFontURLs` in `.session` scope, which other apps pick up through the font-change notification. Fontory keeps the "on" state in its own database and re-registers on launch and on mount, so an unplugged drive never leaves stale system registrations.
 
 ## Testing
 
@@ -262,7 +268,7 @@ The app also has a smoke test that exercises the real app code against temporary
 build/Build/Products/Debug/Fontory.app/Contents/MacOS/Fontory -FontoryOrganizationSmoke
 ```
 
-It prints `SMOKE PASSED` when every check passes. Hand-test checklists for each feature wave are in `docs/superpowers/verification/`.
+It prints `SMOKE PASSED` when every check passes.
 
 ## Releasing
 

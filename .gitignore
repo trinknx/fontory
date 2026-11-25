@@ -8,3 +8,7 @@ dist/
 
 # Remotion video project (kept on the video/intro-promo branch only)
 video/
+
+# Internal design notes, plans and references (kept locally, not published)
+docs/superpowers/
+docs/reference/

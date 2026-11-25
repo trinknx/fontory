@@ -18,7 +18,7 @@ struct BrowserToolbar: ToolbarContent {
                     .frame(width: 90)
                     .help("Preview size of the styles: \(model.effectiveDetailPointSize) pt")
             } else {
-                // One size control, as in Typeface: the preview size, and with it how many fonts fit in a row.
+                // One size control: the preview size, and with it how many fonts fit in a row.
                 HStack(spacing: 6) {
                     Text("\(Int(GridMetrics.pointSize(zoom: zoom.wrappedValue)))")
                         .font(.caption.monospacedDigit())

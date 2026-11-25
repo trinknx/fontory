@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-/// Size-driven layout of the font grid, as in Typeface: one slider sets the preview point size, and the column
+/// Size-driven layout of the font grid: one slider sets the preview point size, and the column
 /// count follows from it (smaller text, more fonts per row). Pure function of (zoom, width) so it can be unit tested.
 public struct GridMetrics: Sendable, Equatable {
     public let columns: Int
