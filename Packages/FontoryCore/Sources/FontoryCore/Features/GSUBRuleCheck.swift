@@ -6,8 +6,11 @@ import Foundation
 public struct GlyphLabels: Sendable {
     private let characters: [CGGlyph: String]
     private let names: [CGGlyph: String]
+    /// Computed once here so `GSUBRuleCheck.check` does not copy `morx` per rule.
+    fileprivate let hasAATLayout: Bool
 
     public init(font: CTFont) {
+        hasAATLayout = GSUBRuleCheck.hasAATLayout(font)
         var chars: [CGGlyph: String] = [:]
         let scalars = GlyphInventory.scalars(in: CTFontCopyCharacterSet(font) as CharacterSet)
         var utf16: [UniChar] = []
@@ -75,7 +78,7 @@ public enum GSUBRuleCheck {
     public static func check(_ rule: GSUBRule, tag: String, font: CTFont, labels: GlyphLabels,
                              language: String?) -> [GSUBRuleStatus] {
         let count = rule.outputs.count
-        if hasAATLayout(font) { return Array(repeating: .unchecked, count: count) }
+        if labels.hasAATLayout { return Array(repeating: .unchecked, count: count) }
         guard let text = labels.characters(for: rule.input), !text.isEmpty else {
             return Array(repeating: .noCharacters, count: count)
         }

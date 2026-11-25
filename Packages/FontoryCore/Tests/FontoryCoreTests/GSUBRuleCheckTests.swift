@@ -69,27 +69,18 @@ import Testing
     }
 
     @Test func alternateUsesIndexedValues() throws {
-        var checked = false
-        for path in [TempFonts.sfns, TempFonts.newYork] {
-            let font = try load(path)
-            let labels = GlyphLabels(font: font)
-            guard let reader = GSUBRuleReader.read(font) else { continue }
-            for tag in reader.counts(selection: .all).keys.sorted() {
-                guard let rule = reader.rules(for: tag, selection: .all).rules.first(where: {
-                    $0.kind == .alternate && labels.characters(for: $0.input) != nil
-                }) else { continue }
-                let got = GSUBRuleCheck.check(rule, tag: tag, font: font, labels: labels, language: nil)
-                #expect(got.count == rule.outputs.count)
-                #expect(got.allSatisfy { $0 == .plain || $0 == .contextOnly })
-                checked = true
-            }
-        }
-        // Neither system font has alternate rules, so also exercise the indexed path with a hand-made rule.
-        let font = try load(TempFonts.sfns)
-        let rule = GSUBRule(kind: .alternate, input: [glyph("a", font)], outputs: [[glyph("b", font)], [glyph("c", font)]])
-        let got = GSUBRuleCheck.check(rule, tag: "salt", font: font, labels: GlyphLabels(font: font), language: nil)
-        #expect(got.count == 2)
-        #expect(got.allSatisfy { $0 == .plain || $0 == .contextOnly })
-        _ = checked
+        // SFArmenian's aalt alternates are honoured by CoreText only at their own 1-based value, so every output is
+        // .plain only when the check shapes output i with value i + 1.
+        let path = "/System/Library/Fonts/SFArmenian.ttf"
+        try #require(FileManager.default.fileExists(atPath: path))
+        let font = try load(path)
+        let labels = GlyphLabels(font: font)
+        let reader = try #require(GSUBRuleReader.read(font))
+        let rule = try #require(reader.rules(for: "aalt", selection: .all).rules.first {
+            $0.kind == .alternate && !$0.isContextual && $0.outputs.count >= 2
+                && Set($0.outputs).count == $0.outputs.count && labels.characters(for: $0.input) != nil
+        })
+        let got = GSUBRuleCheck.check(rule, tag: "aalt", font: font, labels: labels, language: nil)
+        #expect(got == Array(repeating: .plain, count: rule.outputs.count))
     }
 }
